@@ -63,8 +63,8 @@ and options stay the same.
 \section{Single-Choice Poll}
 
 This first example uses the common one-answer multiple-choice format.
-
-\begin{pycode}
+The code used to generate the following question and QR code is shown below.
+\begin{pyblock}
 from mentipy.latex import mc
 
 print(
@@ -77,15 +77,55 @@ print(
         layout="article",
     )
 )
-\end{pycode}
-\printpythontex
+\end{pyblock}
+
+Now, the rendered question:
+\begin{center}\printpythontex\end{center}
+
+Real lecture sources will often keep the local server address in configuration
+instead of repeating it in every call.  The next example therefore keeps the
+same helper, question, and QR settings, but omits [[base_url]] so that the
+fallback path becomes visible.
+
+\subsection{The Same Poll with the Configured Default}
+
+The code used to generate the following question and QR code is shown below.
+\begin{pyblock}
+from mentipy.latex import mc
+
+print(
+    mc(
+        "How confident do you feel about the course goals?",
+        ["Very confident", "Somewhat confident", "Not yet"],
+        qr_dir="build",
+        qr_format="png",
+        layout="article",
+    )
+)
+\end{pyblock}
+
+Now, the rendered question:
+\begin{center}\printpythontex\end{center}
+
+These two examples form a deliberate contrast.
+
+\begin{description}
+\item[What varies] Whether [[base_url]] is passed explicitly.
+\item[What stays invariant] The [[mc()]] helper, the question text, the
+  options, the QR output directory, the QR format, and the article layout.
+\item[What this reveals] When [[base_url]] is omitted, the helper reads the
+  [[mentipy.base_url]] setting.  If that setting is absent, it falls back to
+  [[http://localhost:8080]], which is why the rendered URL still matches the
+  local server command shown at the start of the chapter.
+\end{description}
 
 \section{Multiple-Choice Poll}
 
 The second example keeps the same basic structure, but now contrast comes from
 allowing several simultaneous selections.
 
-\begin{pycode}
+The code used to generate the following question and QR code is shown below.
+\begin{pyblock}
 from mentipy.latex import mc
 
 print(
@@ -104,15 +144,18 @@ print(
         layout="article",
     )
 )
-\end{pycode}
-\printpythontex
+\end{pyblock}
+
+Now, the rendered question:
+\begin{center}\printpythontex\end{center}
 
 \section{Open-Text Poll}
 
 Free-text answers make it easy to collect unexpected questions or requests while
 the lecture is in progress.
 
-\begin{pycode}
+The code used to generate the following question and QR code is shown below.
+\begin{pyblock}
 from mentipy.latex import open_text
 
 print(
@@ -125,15 +168,18 @@ print(
         layout="article",
     )
 )
-\end{pycode}
-\printpythontex
+\end{pyblock}
+
+Now, the rendered question:
+\begin{center}\printpythontex\end{center}
 
 \section{Scale Poll}
 
 The scale variant makes the numeric range explicit while still giving students a
 human reading of the endpoints.
 
-\begin{pycode}
+The code used to generate the following question and QR code is shown below.
+\begin{pyblock}
 from mentipy.latex import scale
 
 print(
@@ -149,8 +195,10 @@ print(
         layout="article",
     )
 )
-\end{pycode}
-\printpythontex
+\end{pyblock}
+
+Now, the rendered question:
+\begin{center}\printpythontex\end{center}
 
 \input{../src/mentipy/mentipy.tex}
 \input{../src/mentipy/questions.tex}
