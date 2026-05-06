@@ -148,11 +148,13 @@ def _render_article_question(
     parts = [
         "\\noindent",
         f"\\begin{{minipage}}[t]{{{ARTICLE_TEXT_WIDTH}}}",
+        "\\vspace{0pt}",
         f"\\textbf{{{_escape_latex(question.text)}}}",
         "",
         _render_body(question),
         "\\end{minipage}\\hfill",
         f"\\begin{{minipage}}[t]{{{ARTICLE_QR_WIDTH}}}",
+        "\\vspace{0pt}",
         "\\centering",
         (
             f"\\includegraphics[width={ARTICLE_QR_IMAGE_WIDTH}]"
@@ -376,6 +378,7 @@ def test_article_layout_prints_the_canonical_url(tmp_path, monkeypatch):
     prefix = entry["url_prefix"]
 
     assert "\\begin{minipage}[t]" in rendered
+    assert rendered.count("\\vspace{0pt}") == 2
     assert "\\begin{columns}[T,onlytextwidth]" not in rendered
     assert f"\\texttt{{http://example.test:8080/{prefix}}}" in rendered
 @
