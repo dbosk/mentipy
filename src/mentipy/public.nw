@@ -1,0 +1,419 @@
+\chapter{Public Exposure}
+
+The local HTTP server is enough for a lecture room on the same LAN, but it
+breaks down as soon as students sit on a different network.  We therefore keep
+the network-facing exposure logic in its own module: the CLI can choose an
+exposure strategy without learning any UPnP or SSH details.
+
+<<[[public.py]]>>=
+from __future__ import annotations
+
+<<imports>>
+
+<<constants>>
+<<classes>>
+<<functions>>
+@
+
+<<imports>>=
+from contextlib import contextmanager
+from enum import Enum
+import subprocess
+from typing import Callable, Iterator
+import urllib.error
+import urllib.request
+@
+
+We keep the external echo service, the UPnP tuning, and the SSH keepalive as
+named constants so the behaviour stays explicit in both tests and user-facing
+errors.
+
+<<constants>>=
+IPIFY_URL = "https://api.ipify.org"
+PUBLIC_IP_TIMEOUT = 5
+UPNP_DISCOVER_DELAY_MS = 200
+UPNP_PROTOCOL = "TCP"
+UPNP_DESCRIPTION = "mentipy"
+SSH_KEEPALIVE_SECONDS = 30
+SSH_SHUTDOWN_TIMEOUT = 5
+@
+
+The CLI only needs a small enum and a typed failure mode.  The implementation
+details stay below this public surface.
+
+<<classes>>=
+class PublicMode(str, Enum):
+    """Supported strategies for public exposure."""
+
+    upnp = "upnp"
+    ssh = "ssh"
+
+
+class PublicExposureError(RuntimeError):
+    """Raised when mentipy cannot expose the local server."""
+@
+
+Both the UPnP and SSH strategies need a public address that respondents can
+reach.  A small HTTP echo service is enough for that, and wrapping the network
+failure lets the CLI present a short diagnostic instead of a traceback.
+
+<<functions>>=
+def resolve_public_ip() -> str:
+    """Return the current public IP address."""
+
+    try:
+        with urllib.request.urlopen(IPIFY_URL, timeout=PUBLIC_IP_TIMEOUT) as response:
+            return response.read().decode("utf-8").strip()
+    except (OSError, urllib.error.URLError) as err:
+        raise PublicExposureError(
+            "could not resolve the public IP address"
+        ) from err
+@
+
+The UPnP dependency stays optional because only one of the public modes needs
+it, and many users will never expose a lecture outside their own machine.  The
+private helper returns both the URL and a teardown callback so the public
+context manager can remove the mapping on shutdown.
+
+<<functions>>=
+def _upnp_mapping(port: int) -> tuple[str, Callable[[], None]]:
+    try:
+        import miniupnpc
+    except ImportError as err:
+        raise PublicExposureError(
+            "UPnP support is optional; install with: pip install mentipy[public]"
+        ) from err
+
+    upnp = miniupnpc.UPnP()
+    upnp.discoverdelay = UPNP_DISCOVER_DELAY_MS
+
+    try:
+        if upnp.discover() == 0:
+            raise PublicExposureError("no UPnP gateway answered discovery")
+        upnp.selectigd()
+        mapped = upnp.addportmapping(
+            port,
+            UPNP_PROTOCOL,
+            upnp.lanaddr,
+            port,
+            UPNP_DESCRIPTION,
+            "",
+        )
+    except PublicExposureError:
+        raise
+    except Exception as err:
+        raise PublicExposureError("could not create a UPnP port mapping") from err
+
+    if not mapped:
+        raise PublicExposureError("the router rejected the UPnP port mapping")
+
+    def cleanup():
+        try:
+            upnp.deleteportmapping(port, UPNP_PROTOCOL)
+        except Exception:
+            return
+
+    try:
+        public_ip = resolve_public_ip()
+    except PublicExposureError:
+        cleanup()
+        raise
+
+    return f"http://{public_ip}:{port}", cleanup
+
+
+def expose_upnp(port: int) -> str:
+    """Expose ``port`` through UPnP and return the public URL."""
+
+    public_url, _cleanup = _upnp_mapping(port)
+    return public_url
+@
+
+The SSH endpoint needs two views of the same configuration string: the full
+[[user@host]] target that the [[ssh]] command needs, and the bare host that the
+audience-facing URL should contain.
+
+<<functions>>=
+def _parse_ssh_endpoint(ssh_endpoint: str) -> tuple[str, str, int]:
+    target, separator, raw_port = ssh_endpoint.rpartition(":")
+    if not target or not separator or not raw_port or "@" not in target:
+        raise PublicExposureError(
+            "ssh tunnel must look like user@host:remote_port"
+        )
+
+    user, host = target.split("@", 1)
+    if not user or not host:
+        raise PublicExposureError(
+            "ssh tunnel must look like user@host:remote_port"
+        )
+
+    try:
+        remote_port = int(raw_port)
+    except ValueError as err:
+        raise PublicExposureError(
+            "ssh tunnel must end with a numeric remote port"
+        ) from err
+
+    if remote_port <= 0:
+        raise PublicExposureError("ssh tunnel port must be positive")
+
+    return target, host, remote_port
+
+
+def expose_ssh(
+    local_port: int, ssh_endpoint: str
+) -> tuple[subprocess.Popen[str], str]:
+    """Expose ``local_port`` through an SSH reverse tunnel."""
+
+    target, host, remote_port = _parse_ssh_endpoint(ssh_endpoint)
+    command = [
+        "ssh",
+        "-N",
+        "-R",
+        f"{remote_port}:localhost:{local_port}",
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-o",
+        f"ServerAliveInterval={SSH_KEEPALIVE_SECONDS}",
+        target,
+    ]
+
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except OSError as err:
+        raise PublicExposureError("could not start the SSH reverse tunnel") from err
+
+    return process, f"http://{host}:{remote_port}"
+
+
+def _stop_ssh_process(process: subprocess.Popen[str]):
+    if process.poll() is not None:
+        return
+
+    process.terminate()
+    try:
+        process.wait(timeout=SSH_SHUTDOWN_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+@
+
+The CLI wants one uniform [[with]]-block no matter which strategy it picked.
+The context manager keeps that interface small and guarantees that teardown runs
+on Ctrl-C as well as on a normal return.
+
+<<functions>>=
+@contextmanager
+def expose(
+    mode: PublicMode,
+    local_port: int,
+    *,
+    ssh_endpoint: str | None = None,
+) -> Iterator[str]:
+    """Yield a public URL for ``local_port`` and tear it down on exit."""
+
+    cleanup = lambda: None
+
+    if mode is PublicMode.upnp:
+        public_url, cleanup = _upnp_mapping(local_port)
+    elif mode is PublicMode.ssh:
+        if ssh_endpoint is None:
+            raise PublicExposureError("ssh mode requires a configured endpoint")
+        process, public_url = expose_ssh(local_port, ssh_endpoint)
+        cleanup = lambda: _stop_ssh_process(process)
+    else:
+        raise PublicExposureError(f"unknown public mode: {mode!r}")
+
+    try:
+        yield public_url
+    finally:
+        cleanup()
+@
+
+Let's first pin the public IP helper, because both exposure strategies depend on
+its error handling.
+
+<<test functions>>=
+def test_resolve_public_ip_reads_the_ipify_response(monkeypatch):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self):
+            return b"198.51.100.4\n"
+
+    monkeypatch.setattr(
+        public_module.urllib.request,
+        "urlopen",
+        lambda url, timeout: FakeResponse(),
+    )
+
+    assert resolve_public_ip() == "198.51.100.4"
+
+
+def test_resolve_public_ip_wraps_network_errors(monkeypatch):
+    def fail(_url, timeout):
+        raise public_module.urllib.error.URLError("offline")
+
+    monkeypatch.setattr(public_module.urllib.request, "urlopen", fail)
+
+    with pytest.raises(PublicExposureError):
+        resolve_public_ip()
+@
+
+The UPnP path is mostly wiring around the third-party client.  A fake module is
+enough to pin the contract without talking to a real router.
+
+<<test functions>>=
+def test_expose_upnp_maps_the_requested_port(monkeypatch):
+    called = {}
+
+    class FakeUPnP:
+        lanaddr = "192.0.2.10"
+
+        def __init__(self):
+            self.discoverdelay = None
+
+        def discover(self):
+            called["discoverdelay"] = self.discoverdelay
+            return 1
+
+        def selectigd(self):
+            called["selected"] = True
+
+        def addportmapping(
+            self, external_port, protocol, local_host, local_port, description, _
+        ):
+            called["mapping"] = (
+                external_port,
+                protocol,
+                local_host,
+                local_port,
+                description,
+            )
+            return True
+
+        def deleteportmapping(self, _external_port, _protocol):
+            return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "miniupnpc",
+        types.SimpleNamespace(UPnP=FakeUPnP),
+    )
+    monkeypatch.setattr("mentipy.public.resolve_public_ip", lambda: "198.51.100.8")
+
+    public_url = expose_upnp(8080)
+
+    assert public_url == "http://198.51.100.8:8080"
+    assert called["discoverdelay"] == UPNP_DISCOVER_DELAY_MS
+    assert called["selected"] is True
+    assert called["mapping"] == (
+        8080,
+        UPNP_PROTOCOL,
+        "192.0.2.10",
+        8080,
+        UPNP_DESCRIPTION,
+    )
+@
+
+The SSH path is pure stdlib, so the interesting cases are the command we spawn
+and the endpoint formats we accept.
+
+<<test functions>>=
+def test_expose_ssh_starts_a_reverse_tunnel(monkeypatch):
+    called = {}
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    def fake_popen(command, **kwargs):
+        called["command"] = command
+        called["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr(public_module.subprocess, "Popen", fake_popen)
+
+    process, public_url = expose_ssh(8080, "alice@example.test:9000")
+
+    assert process.__class__.__name__ == "FakeProcess"
+    assert public_url == "http://example.test:9000"
+    assert called["command"] == [
+        "ssh",
+        "-N",
+        "-R",
+        "9000:localhost:8080",
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-o",
+        f"ServerAliveInterval={SSH_KEEPALIVE_SECONDS}",
+        "alice@example.test",
+    ]
+
+
+def test_expose_ssh_rejects_malformed_endpoints():
+    with pytest.raises(PublicExposureError):
+        expose_ssh(8080, "example.test:9000")
+@
+
+Finally, the public context manager must actually run its teardown hook when
+the server stops.
+
+<<test functions>>=
+def test_expose_context_manager_runs_cleanup(monkeypatch):
+    state = {}
+
+    class FakeUPnP:
+        lanaddr = "192.0.2.10"
+
+        def __init__(self):
+            self.discoverdelay = None
+
+        def discover(self):
+            return 1
+
+        def selectigd(self):
+            return None
+
+        def addportmapping(
+            self, _external_port, _protocol, _local_host, _local_port, _desc, _
+        ):
+            return True
+
+        def deleteportmapping(self, external_port, protocol):
+            state["deleted"] = (external_port, protocol)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "miniupnpc",
+        types.SimpleNamespace(UPnP=FakeUPnP),
+    )
+    monkeypatch.setattr("mentipy.public.resolve_public_ip", lambda: "198.51.100.9")
+
+    with expose(PublicMode.upnp, 8080) as public_url:
+        assert public_url == "http://198.51.100.9:8080"
+        assert "deleted" not in state
+
+    assert state["deleted"] == (8080, UPNP_PROTOCOL)
+@
+
+<<test [[public.py]]>>=
+import sys
+import types
+
+import mentipy.public as public_module
+import pytest
+
+from mentipy.public import *
+
+<<test functions>>
+@

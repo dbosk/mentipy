@@ -16,6 +16,7 @@ from __future__ import annotations
 @
 
 <<imports>>=
+from contextlib import contextmanager
 import csv
 import io
 import json
@@ -24,6 +25,8 @@ from typing import Optional
 
 import typer
 
+from mentipy.latex import regenerate_qrs
+from mentipy.public import PublicExposureError, PublicMode, expose
 from mentipy.server import serve as serve_http
 from mentipy.store import (
     BASE_URL_CONFIG,
@@ -32,7 +35,9 @@ from mentipy.store import (
     DEFAULT_PORT,
     DEFAULT_STORE_PATH,
     HOST_CONFIG,
+    PUBLIC_BASE_URL_CONFIG,
     PORT_CONFIG,
+    SSH_TUNNEL_CONFIG,
     STORE_CONFIG,
     Store,
     get_setting,
@@ -44,11 +49,18 @@ from mentipy.store import (
 )
 @
 
-The watcher redraws the terminal, so we keep the ANSI escape sequence in one
-named constant instead of sprinkling it through the loop.
+The watcher redraws the terminal, and the public-exposure flow prints a fixed
+warning.  Keeping both strings here avoids repeating terminal-specific details
+inside the command bodies.
 
 <<constants>>=
 CLEAR_SCREEN = "\033[2J\033[H"
+
+WARNING_TEXT = (
+    "Warning: exposing mentipy makes its unauthenticated polling pages\n"
+    "reachable from the public internet. Anyone with the URL can submit\n"
+    "answers and, with --results, watch the live tally."
+)
 @
 
 The helpers below do the command-independent work: resolving prefixes,
@@ -127,6 +139,85 @@ def _results_csv(results: dict) -> str:
         writer.writerow([answer["ts"], value])
 
     return buffer.getvalue().rstrip()
+
+
+def _parse_public_mode(
+    ctx: typer.Context,
+    public: bool,
+) -> PublicMode | None:
+    extras = list(ctx.args)
+
+    if not public:
+        if extras:
+            raise typer.BadParameter(
+                f"unexpected extra argument {extras[0]!r}",
+                param_hint="serve",
+            )
+        return None
+
+    if not extras:
+        return PublicMode.upnp
+
+    try:
+        mode = PublicMode(extras[0].lower())
+    except ValueError as err:
+        raise typer.BadParameter(
+            "public mode must be either 'upnp' or 'ssh'",
+            param_hint="--public",
+        ) from err
+
+    if len(extras) > 1:
+        raise typer.BadParameter(
+            f"unexpected extra argument {extras[1]!r}",
+            param_hint="--public",
+        )
+
+    return mode
+
+
+def _serve_publicly(
+    active_store: Store,
+    chosen_host: str,
+    chosen_port: int,
+    *,
+    public: PublicMode,
+    results: bool,
+):
+    typer.echo(WARNING_TEXT, err=True)
+
+    ssh_endpoint = None
+    if public is PublicMode.ssh:
+        ssh_endpoint = get_setting(SSH_TUNNEL_CONFIG)
+        if not ssh_endpoint:
+            raise typer.BadParameter(
+                f"configure {SSH_TUNNEL_CONFIG} before using ssh mode",
+                param_hint="--public",
+            )
+
+    try:
+        with expose(public, chosen_port, ssh_endpoint=ssh_endpoint) as derived_url:
+            public_url = get_setting(PUBLIC_BASE_URL_CONFIG) or derived_url
+            configured_base = get_setting(BASE_URL_CONFIG, DEFAULT_BASE_URL)
+
+            if public_url == configured_base:
+                typer.echo(f"Public URL: {public_url}")
+            else:
+                count = regenerate_qrs(active_store, public_url)
+                typer.echo(
+                    f"Public URL: {public_url}\n"
+                    f"Regenerated {count} QR codes; recompile your slides so "
+                    "they embed the new images."
+                )
+
+            serve_http(
+                active_store,
+                chosen_host,
+                chosen_port,
+                public_results=results,
+            )
+    except PublicExposureError as err:
+        typer.echo(f"Could not expose the server: {err}", err=True)
+        raise typer.Exit(code=1)
 @
 
 Typer lets us keep the public CLI declaration close to the implementation.
@@ -137,11 +228,17 @@ config_cli = typer.Typer(help="Read and write mentipy configuration.")
 cli.add_typer(config_cli, name="config")
 
 
-@cli.command()
+@cli.command(context_settings={"allow_extra_args": True})
 def serve(
+    ctx: typer.Context,
     host: Optional[str] = typer.Option(None, help="Bind address."),
     port: Optional[int] = typer.Option(None, help="Bind port."),
     store: Optional[str] = typer.Option(None, help="Path to mentipy.json."),
+    public: bool = typer.Option(
+        False,
+        "--public",
+        help="Expose the server publicly. Bare --public defaults to upnp.",
+    ),
     results: bool = typer.Option(
         False,
         "--results",
@@ -152,11 +249,24 @@ def serve(
 
     chosen_host = host or get_setting(HOST_CONFIG, DEFAULT_HOST)
     chosen_port = int(port or get_setting(PORT_CONFIG, DEFAULT_PORT))
-    serve_http(
-        _configured_store(store),
+    active_store = _configured_store(store)
+    public_mode = _parse_public_mode(ctx, public)
+
+    if public_mode is None:
+        serve_http(
+            active_store,
+            chosen_host,
+            chosen_port,
+            public_results=results,
+        )
+        return
+
+    _serve_publicly(
+        active_store,
         chosen_host,
         chosen_port,
-        public_results=results,
+        public=public_mode,
+        results=results,
     )
 
 
@@ -320,6 +430,239 @@ def test_serve_command_passes_public_results_flag(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert called["path"] == tmp_path / "answers.json"
     assert called["public_results"] is True
+@
+
+The public mode adds configuration lookup and a managed exposure lifetime around
+the same server call, so the CLI tests can keep using stubs and assert the
+wiring at the command boundary.
+
+<<test functions>>=
+def test_serve_command_public_without_value_defaults_to_upnp(
+    tmp_path, monkeypatch
+):
+    runner = CliRunner()
+    config_path = tmp_path / "config.json"
+    monkeypatch.setenv("MENTIPY_CONFIG", str(config_path))
+    called = {}
+    state = {"closed": False}
+
+    @contextmanager
+    def fake_expose(mode, local_port, *, ssh_endpoint=None):
+        called["mode"] = mode
+        called["local_port"] = local_port
+        called["ssh_endpoint"] = ssh_endpoint
+        try:
+            yield "http://public.example:8080"
+        finally:
+            state["closed"] = True
+
+    def fake_serve(store, host, port, public_results=False):
+        called["path"] = store.path
+        called["host"] = host
+        called["port"] = port
+        called["public_results"] = public_results
+
+    monkeypatch.setattr("mentipy.cli.expose", fake_expose)
+    monkeypatch.setattr("mentipy.cli.regenerate_qrs", lambda _store, _base_url: 0)
+    monkeypatch.setattr("mentipy.cli.serve_http", fake_serve)
+
+    result = runner.invoke(
+        cli,
+        [
+            "serve",
+            "--public",
+            "--port",
+            "8080",
+            "--store",
+            str(tmp_path / "answers.json"),
+        ],
+        env={"MENTIPY_CONFIG": str(config_path)},
+    )
+
+    assert result.exit_code == 0
+    assert called["mode"] is PublicMode.upnp
+    assert called["local_port"] == 8080
+    assert called["ssh_endpoint"] is None
+    assert called["path"] == tmp_path / "answers.json"
+    assert state["closed"] is True
+
+
+def test_serve_command_public_ssh_reads_the_configured_endpoint(
+    tmp_path, monkeypatch
+):
+    runner = CliRunner()
+    config_path = tmp_path / "config.json"
+    monkeypatch.setenv("MENTIPY_CONFIG", str(config_path))
+    set_setting("ssh_tunnel", "alice@example.test:9000")
+    called = {}
+
+    @contextmanager
+    def fake_expose(mode, local_port, *, ssh_endpoint=None):
+        called["mode"] = mode
+        called["local_port"] = local_port
+        called["ssh_endpoint"] = ssh_endpoint
+        yield "http://example.test:9000"
+
+    monkeypatch.setattr("mentipy.cli.expose", fake_expose)
+    monkeypatch.setattr("mentipy.cli.regenerate_qrs", lambda _store, _base_url: 0)
+    monkeypatch.setattr("mentipy.cli.serve_http", lambda *_args, **_kwargs: None)
+
+    result = runner.invoke(
+        cli,
+        ["serve", "--public", "ssh", "--port", "8080"],
+        env={"MENTIPY_CONFIG": str(config_path)},
+    )
+
+    assert result.exit_code == 0
+    assert called == {
+        "mode": PublicMode.ssh,
+        "local_port": 8080,
+        "ssh_endpoint": "alice@example.test:9000",
+    }
+
+
+def test_serve_command_public_ssh_requires_configuration(tmp_path, monkeypatch):
+    runner = CliRunner()
+    config_path = tmp_path / "config.json"
+    monkeypatch.setenv("MENTIPY_CONFIG", str(config_path))
+
+    result = runner.invoke(
+        cli,
+        ["serve", "--public", "ssh"],
+        env={"MENTIPY_CONFIG": str(config_path)},
+    )
+
+    assert result.exit_code != 0
+    assert SSH_TUNNEL_CONFIG in result.output
+
+
+def test_public_base_url_overrides_the_derived_url(tmp_path, monkeypatch):
+    runner = CliRunner()
+    config_path = tmp_path / "config.json"
+    monkeypatch.setenv("MENTIPY_CONFIG", str(config_path))
+    set_setting("public_base_url", "https://polls.example")
+    called = {}
+
+    @contextmanager
+    def fake_expose(mode, local_port, *, ssh_endpoint=None):
+        yield "http://derived.example:8080"
+
+    def fake_regenerate(store, base_url):
+        called["path"] = store.path
+        called["base_url"] = base_url
+        return 2
+
+    monkeypatch.setattr("mentipy.cli.expose", fake_expose)
+    monkeypatch.setattr("mentipy.cli.regenerate_qrs", fake_regenerate)
+    monkeypatch.setattr("mentipy.cli.serve_http", lambda *_args, **_kwargs: None)
+
+    result = runner.invoke(
+        cli,
+        ["serve", "--public", "--store", str(tmp_path / "answers.json")],
+        env={"MENTIPY_CONFIG": str(config_path)},
+    )
+
+    assert result.exit_code == 0
+    assert called == {
+        "path": tmp_path / "answers.json",
+        "base_url": "https://polls.example",
+    }
+    assert "Public URL: https://polls.example" in result.stdout
+
+
+def test_matching_public_url_skips_qr_regeneration(tmp_path, monkeypatch):
+    runner = CliRunner()
+    config_path = tmp_path / "config.json"
+    monkeypatch.setenv("MENTIPY_CONFIG", str(config_path))
+    set_setting("base_url", "http://public.example:8080")
+    called = {"regenerated": False}
+
+    @contextmanager
+    def fake_expose(mode, local_port, *, ssh_endpoint=None):
+        yield "http://public.example:8080"
+
+    def fail_regenerate(_store, _base_url):
+        called["regenerated"] = True
+        raise AssertionError("regenerate_qrs should not be called")
+
+    monkeypatch.setattr("mentipy.cli.expose", fake_expose)
+    monkeypatch.setattr("mentipy.cli.regenerate_qrs", fail_regenerate)
+    monkeypatch.setattr("mentipy.cli.serve_http", lambda *_args, **_kwargs: None)
+
+    result = runner.invoke(
+        cli,
+        ["serve", "--public"],
+        env={"MENTIPY_CONFIG": str(config_path)},
+    )
+
+    assert result.exit_code == 0
+    assert called["regenerated"] is False
+    assert "Public URL: http://public.example:8080" in result.stdout
+
+
+def test_different_public_url_regenerates_qrs(tmp_path, monkeypatch):
+    runner = CliRunner()
+    config_path = tmp_path / "config.json"
+    monkeypatch.setenv("MENTIPY_CONFIG", str(config_path))
+    called = {}
+
+    @contextmanager
+    def fake_expose(mode, local_port, *, ssh_endpoint=None):
+        yield "http://public.example:8080"
+
+    def fake_regenerate(store, base_url):
+        called["path"] = store.path
+        called["base_url"] = base_url
+        return 3
+
+    monkeypatch.setattr("mentipy.cli.expose", fake_expose)
+    monkeypatch.setattr("mentipy.cli.regenerate_qrs", fake_regenerate)
+    monkeypatch.setattr("mentipy.cli.serve_http", lambda *_args, **_kwargs: None)
+
+    result = runner.invoke(
+        cli,
+        ["serve", "--public", "--store", str(tmp_path / "answers.json")],
+        env={"MENTIPY_CONFIG": str(config_path)},
+    )
+
+    assert result.exit_code == 0
+    assert called == {
+        "path": tmp_path / "answers.json",
+        "base_url": "http://public.example:8080",
+    }
+    assert "Regenerated 3 QR codes" in result.stdout
+
+
+def test_serve_command_closes_the_public_exposure_context(tmp_path, monkeypatch):
+    runner = CliRunner()
+    config_path = tmp_path / "config.json"
+    monkeypatch.setenv("MENTIPY_CONFIG", str(config_path))
+    state = {"entered": False, "closed": False}
+
+    @contextmanager
+    def fake_expose(mode, local_port, *, ssh_endpoint=None):
+        state["entered"] = True
+        try:
+            yield "http://public.example:8080"
+        finally:
+            state["closed"] = True
+
+    def fake_serve(*_args, **_kwargs):
+        assert state["entered"] is True
+        assert state["closed"] is False
+
+    monkeypatch.setattr("mentipy.cli.expose", fake_expose)
+    monkeypatch.setattr("mentipy.cli.regenerate_qrs", lambda _store, _base_url: 0)
+    monkeypatch.setattr("mentipy.cli.serve_http", fake_serve)
+
+    result = runner.invoke(
+        cli,
+        ["serve", "--public"],
+        env={"MENTIPY_CONFIG": str(config_path)},
+    )
+
+    assert result.exit_code == 0
+    assert state == {"entered": True, "closed": True}
 @
 
 The interactive watcher test interrupts the sleep call after the first redraw so

@@ -18,6 +18,9 @@ dependencies = [
 [project.scripts]
 mentipy = "mentipy.cli:main"
 
+[project.optional-dependencies]
+public = ["miniupnpc (>=2.2.5,<3.0.0)"]
+
 
 [tool.poetry]
 packages = [{include = "mentipy", from = "src"}]
