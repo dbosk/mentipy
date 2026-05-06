@@ -199,16 +199,19 @@ def _render_form(store: Store, full_hash: str) -> str:
         f"{value}</label>"
         for value in range(question.low, question.high + 1)
     )
-    labels = []
+    low_end_label = ""
     if question.low_label:
-        labels.append(f"<p>Low end: {escape(question.low_label)}</p>")
+        low_end_label = f"<p>Low end: {escape(question.low_label)}</p>"
+    high_end_label = ""
     if question.high_label:
-        labels.append(f"<p>High end: {escape(question.high_label)}</p>")
+        high_end_label = f"<p>High end: {escape(question.high_label)}</p>"
 
     return (
         f"<p>{escape(question.text)}</p>"
-        + "".join(labels)
-        + f'<form method="post" action="/{prefix}">{inputs}'
+        + f'<form method="post" action="/{prefix}">'
+        + low_end_label
+        + inputs
+        + high_end_label
         + "<button type=\"submit\">Submit</button></form>"
     )
 
@@ -692,6 +695,35 @@ def test_public_results_mode_redirects_to_results_and_allows_remote_view(
         server.shutdown()
         thread.join()
         server.server_close()
+@
+
+The scale form should place its human-readable anchors around the numbered
+options so the low end appears above the list and the high end below it.
+
+<<test functions>>=
+def test_scale_form_places_endpoints_around_the_scale(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(
+        ScaleQuestion(
+            "How fast is today's pace?",
+            low=1,
+            high=5,
+            low_label="Too slow",
+            high_label="Too fast",
+        )
+    )
+    full_hash = store.resolve(prefix)
+
+    assert full_hash is not None
+
+    rendered = server_module._render_form(store, full_hash)
+
+    low_pos = rendered.index("Low end: Too slow")
+    first_option_pos = rendered.index('value="1"')
+    last_option_pos = rendered.index('value="5"')
+    high_pos = rendered.index("High end: Too fast")
+
+    assert low_pos < first_option_pos < last_option_pos < high_pos
 @
 
 Ambiguous short prefixes should produce a Git-like [[300 Multiple Choices]] page
