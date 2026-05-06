@@ -40,8 +40,13 @@ from mentipy.store import (
     DEFAULT_PORT,
     DEFAULT_STORE_PATH,
     HOST_CONFIG,
+    MIN_PREFIX_CONFIG,
     PUBLIC_BASE_URL_CONFIG,
     PORT_CONFIG,
+    QR_DIR_CONFIG,
+    QR_FORMAT_CONFIG,
+    QUESTION_ENVIRONMENT_CONFIG,
+    SHOW_URL_CONFIG,
     SSH_TUNNEL_CONFIG,
     STORE_CONFIG,
     Store,
@@ -54,12 +59,58 @@ from mentipy.store import (
 )
 @
 
-The watcher redraws the terminal, and the public-exposure flow prints a fixed
-warning.  Keeping both strings here avoids repeating terminal-specific details
-inside the command bodies.
+The watcher redraws the terminal, the public-exposure flow prints a fixed
+warning, and several commands share the same configuration-backed defaults.
+Keeping the user-facing strings here makes the help text consistent and exposes
+the relevant configuration keys wherever users look for them.
 
 <<constants>>=
 CLEAR_SCREEN = "\033[2J\033[H"
+
+CONFIG_KEYS = (
+    BASE_URL_CONFIG,
+    HOST_CONFIG,
+    MIN_PREFIX_CONFIG,
+    PORT_CONFIG,
+    PUBLIC_BASE_URL_CONFIG,
+    QR_DIR_CONFIG,
+    QR_FORMAT_CONFIG,
+    QUESTION_ENVIRONMENT_CONFIG,
+    SHOW_URL_CONFIG,
+    SSH_TUNNEL_CONFIG,
+    STORE_CONFIG,
+)
+
+CONFIG_HELP = (
+    "Read and write mentipy configuration. Built-in settings: "
+    + ", ".join(key.split(".", 1)[1] for key in CONFIG_KEYS)
+    + "."
+)
+
+HOST_HELP = f"Bind address. Defaults to config setting {HOST_CONFIG}."
+PORT_HELP = f"Bind port. Defaults to config setting {PORT_CONFIG}."
+STORE_HELP = f"Path to mentipy.json. Defaults to config setting {STORE_CONFIG}."
+PUBLIC_HELP = (
+    "Expose the server publicly. Bare --public defaults to upnp. SSH mode "
+    f"reads {SSH_TUNNEL_CONFIG}, and QR regeneration prefers "
+    f"{PUBLIC_BASE_URL_CONFIG}."
+)
+ENVIRONMENT_HELP = (
+    "Wrap in a LaTeX environment. Defaults to config setting "
+    f"{QUESTION_ENVIRONMENT_CONFIG}."
+)
+URL_VISIBILITY_HELP = (
+    "Show the printed URL when the layout supports it. Defaults to config "
+    f"setting {SHOW_URL_CONFIG}."
+)
+BASE_URL_HELP = (
+    "Override the configured base URL from config setting "
+    f"{BASE_URL_CONFIG}."
+)
+QR_DIR_HELP = f"QR output directory. Defaults to config setting {QR_DIR_CONFIG}."
+QR_FORMAT_HELP = (
+    f"QR image format. Defaults to config setting {QR_FORMAT_CONFIG}."
+)
 
 WARNING_TEXT = (
     "Warning: exposing mentipy makes its unauthenticated polling pages\n"
@@ -252,7 +303,7 @@ Typer lets us keep the public CLI declaration close to the implementation.
 
 <<cli setup>>=
 cli = typer.Typer(help="Self-hosted classroom polling.")
-config_cli = typer.Typer(help="Read and write mentipy configuration.")
+config_cli = typer.Typer(help=CONFIG_HELP)
 render_cli = typer.Typer(help="Render question LaTeX.")
 cli.add_typer(config_cli, name="config")
 cli.add_typer(render_cli, name="render")
@@ -261,13 +312,13 @@ cli.add_typer(render_cli, name="render")
 @cli.command(context_settings={"allow_extra_args": True})
 def serve(
     ctx: typer.Context,
-    host: Optional[str] = typer.Option(None, help="Bind address."),
-    port: Optional[int] = typer.Option(None, help="Bind port."),
-    store: Optional[str] = typer.Option(None, help="Path to mentipy.json."),
+    host: Optional[str] = typer.Option(None, help=HOST_HELP),
+    port: Optional[int] = typer.Option(None, help=PORT_HELP),
+    store: Optional[str] = typer.Option(None, help=STORE_HELP),
     public: bool = typer.Option(
         False,
         "--public",
-        help="Expose the server publicly. Bare --public defaults to upnp.",
+        help=PUBLIC_HELP,
     ),
     results: bool = typer.Option(
         False,
@@ -305,13 +356,13 @@ def render_mc(
     text: str,
     options: list[str],
     multi: bool = typer.Option(False, "--multi", help="Allow multiple answers."),
-    environment: Optional[str] = typer.Option(None, "--env", help="Wrap in a LaTeX environment."),
+    environment: Optional[str] = typer.Option(None, "--env", help=ENVIRONMENT_HELP),
     layout: str = typer.Option("slide", "--layout", help=LAYOUT_HELP),
-    url: Optional[bool] = typer.Option(None, "--url/--no-url", help="Show the printed URL when the layout supports it."),
-    base_url: Optional[str] = typer.Option(None, "--base-url", help="Override the configured base URL."),
-    qr_dir: Optional[str] = typer.Option(None, "--qr-dir", help="QR output directory."),
-    qr_format: Optional[str] = typer.Option(None, "--qr-format", help="QR image format."),
-    store: Optional[str] = typer.Option(None, help="Path to mentipy.json."),
+    url: Optional[bool] = typer.Option(None, "--url/--no-url", help=URL_VISIBILITY_HELP),
+    base_url: Optional[str] = typer.Option(None, "--base-url", help=BASE_URL_HELP),
+    qr_dir: Optional[str] = typer.Option(None, "--qr-dir", help=QR_DIR_HELP),
+    qr_format: Optional[str] = typer.Option(None, "--qr-format", help=QR_FORMAT_HELP),
+    store: Optional[str] = typer.Option(None, help=STORE_HELP),
 ):
     """Render a multiple-choice question as LaTeX."""
 
@@ -337,13 +388,13 @@ def render_mc(
 def render_open(
     text: str,
     max_chars: int = typer.Option(280, "--max-chars", help="Maximum answer length."),
-    environment: Optional[str] = typer.Option(None, "--env", help="Wrap in a LaTeX environment."),
+    environment: Optional[str] = typer.Option(None, "--env", help=ENVIRONMENT_HELP),
     layout: str = typer.Option("slide", "--layout", help=LAYOUT_HELP),
-    url: Optional[bool] = typer.Option(None, "--url/--no-url", help="Show the printed URL when the layout supports it."),
-    base_url: Optional[str] = typer.Option(None, "--base-url", help="Override the configured base URL."),
-    qr_dir: Optional[str] = typer.Option(None, "--qr-dir", help="QR output directory."),
-    qr_format: Optional[str] = typer.Option(None, "--qr-format", help="QR image format."),
-    store: Optional[str] = typer.Option(None, help="Path to mentipy.json."),
+    url: Optional[bool] = typer.Option(None, "--url/--no-url", help=URL_VISIBILITY_HELP),
+    base_url: Optional[str] = typer.Option(None, "--base-url", help=BASE_URL_HELP),
+    qr_dir: Optional[str] = typer.Option(None, "--qr-dir", help=QR_DIR_HELP),
+    qr_format: Optional[str] = typer.Option(None, "--qr-format", help=QR_FORMAT_HELP),
+    store: Optional[str] = typer.Option(None, help=STORE_HELP),
 ):
     """Render an open-text question as LaTeX."""
 
@@ -371,13 +422,13 @@ def render_scale(
     high: int = typer.Option(5, "--high", help="Highest scale value."),
     low_label: str = typer.Option("", "--low-label", help="Label for the low endpoint."),
     high_label: str = typer.Option("", "--high-label", help="Label for the high endpoint."),
-    environment: Optional[str] = typer.Option(None, "--env", help="Wrap in a LaTeX environment."),
+    environment: Optional[str] = typer.Option(None, "--env", help=ENVIRONMENT_HELP),
     layout: str = typer.Option("slide", "--layout", help=LAYOUT_HELP),
-    url: Optional[bool] = typer.Option(None, "--url/--no-url", help="Show the printed URL when the layout supports it."),
-    base_url: Optional[str] = typer.Option(None, "--base-url", help="Override the configured base URL."),
-    qr_dir: Optional[str] = typer.Option(None, "--qr-dir", help="QR output directory."),
-    qr_format: Optional[str] = typer.Option(None, "--qr-format", help="QR image format."),
-    store: Optional[str] = typer.Option(None, help="Path to mentipy.json."),
+    url: Optional[bool] = typer.Option(None, "--url/--no-url", help=URL_VISIBILITY_HELP),
+    base_url: Optional[str] = typer.Option(None, "--base-url", help=BASE_URL_HELP),
+    qr_dir: Optional[str] = typer.Option(None, "--qr-dir", help=QR_DIR_HELP),
+    qr_format: Optional[str] = typer.Option(None, "--qr-format", help=QR_FORMAT_HELP),
+    store: Optional[str] = typer.Option(None, help=STORE_HELP),
 ):
     """Render a scale question as LaTeX."""
 
@@ -404,7 +455,7 @@ def render_scale(
 @cli.command()
 def watch(
     prefix: str,
-    store: Optional[str] = typer.Option(None, help="Path to mentipy.json."),
+    store: Optional[str] = typer.Option(None, help=STORE_HELP),
     interval: float = typer.Option(2.0, help="Refresh interval in seconds."),
 ):
     """Show live results for ``prefix`` in the terminal."""
@@ -424,7 +475,7 @@ def watch(
 def export(
     prefix: str,
     format: str = typer.Option("json", help="Output format: json or csv."),
-    store: Optional[str] = typer.Option(None, help="Path to mentipy.json."),
+    store: Optional[str] = typer.Option(None, help=STORE_HELP),
 ):
     """Export answers for ``prefix``."""
 
@@ -446,10 +497,10 @@ def export(
 @cli.command()
 def url(
     prefix: str,
-    store: Optional[str] = typer.Option(None, help="Path to mentipy.json."),
+    store: Optional[str] = typer.Option(None, help=STORE_HELP),
     base: Optional[str] = typer.Option(
         None,
-        help="Override the configured base URL.",
+        help=BASE_URL_HELP,
     ),
 ):
     """Print the canonical poll URL for ``prefix``."""
@@ -510,6 +561,39 @@ def test_config_set_get_round_trip(tmp_path, monkeypatch):
     assert result.stdout.strip() == "9000"
 
 
+def test_config_help_lists_the_built_in_settings():
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["config", "--help"])
+
+    assert result.exit_code == 0
+    for key in (
+        "base_url",
+        "host",
+        "min_prefix",
+        "port",
+        "public_base_url",
+        "qr_dir",
+        "qr_format",
+        "question_environment",
+        "show_url",
+        "ssh_tunnel",
+        "store",
+    ):
+        assert key in result.output
+
+
+def test_config_list_includes_nullable_defaults(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+
+    result = runner.invoke(cli, ["config", "list"])
+
+    assert result.exit_code == 0
+    assert "public_base_url = null" in result.stdout
+    assert "ssh_tunnel = null" in result.stdout
+
+
 def test_serve_command_uses_config_defaults(tmp_path, monkeypatch):
     runner = CliRunner()
     monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
@@ -533,6 +617,22 @@ def test_serve_command_uses_config_defaults(tmp_path, monkeypatch):
     assert called["host"] == "127.0.0.1"
     assert called["port"] == 9001
     assert called["public_results"] is False
+
+
+def test_serve_help_mentions_the_relevant_config_keys():
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["serve", "--help"])
+
+    assert result.exit_code == 0
+    for key in (
+        HOST_CONFIG,
+        PORT_CONFIG,
+        STORE_CONFIG,
+        SSH_TUNNEL_CONFIG,
+        PUBLIC_BASE_URL_CONFIG,
+    ):
+        assert key in result.output
 @
 
 The [[--results]] flag only changes the post-submit destination and the public
@@ -956,6 +1056,23 @@ def test_render_mc_environment_follows_env_var_unless_env_option_wins(
     assert result.exit_code == 0
     assert "\\begin{exercise}" in result.stdout
     assert "\\begin{exo}" not in result.stdout
+
+
+def test_render_help_mentions_the_relevant_config_keys():
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["render", "mc", "--help"])
+
+    assert result.exit_code == 0
+    for key in (
+        QUESTION_ENVIRONMENT_CONFIG,
+        SHOW_URL_CONFIG,
+        BASE_URL_CONFIG,
+        QR_DIR_CONFIG,
+        QR_FORMAT_CONFIG,
+        STORE_CONFIG,
+    ):
+        assert key in result.output
 @
 
 The interactive watcher test interrupts the sleep call after the first redraw so
@@ -1027,6 +1144,16 @@ def test_url_command_uses_the_canonical_prefix(tmp_path):
 
     assert result.exit_code == 0
     assert result.stdout.strip() == f"http://example.test:8080/{prefix}"
+
+
+def test_url_help_mentions_the_relevant_config_keys():
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["url", "--help"])
+
+    assert result.exit_code == 0
+    assert STORE_CONFIG in result.output
+    assert BASE_URL_CONFIG in result.output
 @
 
 <<test [[cli.py]]>>=

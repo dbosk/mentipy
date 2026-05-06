@@ -43,7 +43,9 @@ from mentipy.questions import (
 The configuration keys live here because both the LaTeX integration and the CLI
 need the same defaults, and they must agree even when the package is imported
 outside the [[mentipy]] command.  We therefore compute the config file path from
-the fixed application name, not from [[sys.argv[0]]].
+the fixed application name, not from [[sys.argv[0]]].  The built-in settings
+table also serves as the source for configuration discovery, so keys that
+default to [[None]] still belong there.
 
 <<constants>>=
 CONFIG_NAMESPACE = "mentipy"
@@ -78,6 +80,8 @@ DEFAULT_SETTINGS = {
     QR_DIR_CONFIG: DEFAULT_QR_DIR,
     QR_FORMAT_CONFIG: DEFAULT_QR_FORMAT,
     MIN_PREFIX_CONFIG: DEFAULT_MIN_PREFIX,
+    SSH_TUNNEL_CONFIG: None,
+    PUBLIC_BASE_URL_CONFIG: None,
     QUESTION_ENVIRONMENT_CONFIG: DEFAULT_QUESTION_ENVIRONMENT,
     SHOW_URL_CONFIG: DEFAULT_SHOW_URL,
 }
@@ -248,6 +252,8 @@ def test_missing_temp_configs_do_not_share_state(tmp_path, monkeypatch):
 
     assert get_setting(PUBLIC_BASE_URL_CONFIG) is None
     assert get_setting(BASE_URL_CONFIG, DEFAULT_BASE_URL) == DEFAULT_BASE_URL
+    assert list_settings()["public_base_url"] is None
+    assert list_settings()["ssh_tunnel"] is None
 
 
 def test_question_rendering_settings_have_defaults_and_round_trip(
