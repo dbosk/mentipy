@@ -1,0 +1,544 @@
+\chapter{Store}
+
+The store is where the design stops being a pure document generator and becomes
+a persistent polling system.  It has three jobs:
+\begin{description}
+\item[Configuration] locate the shared configuration file in a way that works
+  both from the CLI and from PythonTeX,
+\item[Registration] assign stable URL prefixes to questions, and
+\item[Persistence] append answers with an atomic rewrite so a half-written file
+  never replaces a valid one.
+\end{description}
+
+<<[[store.py]]>>=
+from __future__ import annotations
+
+<<imports>>
+
+<<constants>>
+<<functions>>
+<<classes>>
+@
+
+<<imports>>=
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import threading
+from typing import Any
+
+import typerconf
+
+from mentipy.questions import (
+    MCQuestion,
+    OpenQuestion,
+    Question,
+    ScaleQuestion,
+    question_from_dict,
+    question_hash,
+)
+@
+
+The configuration keys live here because both the LaTeX integration and the CLI
+need the same defaults, and they must agree even when the package is imported
+outside the [[mentipy]] command.  We therefore compute the config file path from
+the fixed application name, not from [[sys.argv[0]]].
+
+<<constants>>=
+CONFIG_NAMESPACE = "mentipy"
+
+BASE_URL_CONFIG = "mentipy.base_url"
+HOST_CONFIG = "mentipy.host"
+PORT_CONFIG = "mentipy.port"
+STORE_CONFIG = "mentipy.store"
+QR_DIR_CONFIG = "mentipy.qr_dir"
+QR_FORMAT_CONFIG = "mentipy.qr_format"
+MIN_PREFIX_CONFIG = "mentipy.min_prefix"
+
+DEFAULT_BASE_URL = "http://localhost:8080"
+DEFAULT_HOST = "0.0.0.0"
+DEFAULT_PORT = 8080
+DEFAULT_STORE_PATH = "./mentipy.json"
+DEFAULT_QR_DIR = "./build"
+DEFAULT_QR_FORMAT = "pdf"
+DEFAULT_MIN_PREFIX = 4
+
+DEFAULT_SETTINGS = {
+    BASE_URL_CONFIG: DEFAULT_BASE_URL,
+    HOST_CONFIG: DEFAULT_HOST,
+    PORT_CONFIG: DEFAULT_PORT,
+    STORE_CONFIG: DEFAULT_STORE_PATH,
+    QR_DIR_CONFIG: DEFAULT_QR_DIR,
+    QR_FORMAT_CONFIG: DEFAULT_QR_FORMAT,
+    MIN_PREFIX_CONFIG: DEFAULT_MIN_PREFIX,
+}
+
+STORE_TEMPLATE = {"questions": {}, "answers": {}}
+@
+
+The environment override makes tests cheap and also gives power users a simple
+escape hatch when they want a project-local config file.
+
+<<functions>>=
+def config_path() -> Path:
+    """Return the configuration file used by mentipy."""
+
+    if override := os.environ.get("MENTIPY_CONFIG"):
+        return Path(override)
+
+    dirs = typerconf.appdirs.AppDirs(CONFIG_NAMESPACE)
+    return Path(dirs.user_config_dir) / "config.json"
+@
+
+The CLI accepts short keys such as [[port]], but the stored JSON keeps them
+under the [[mentipy]] namespace so unrelated settings do not collide.
+
+<<functions>>=
+def normalize_config_key(key: str) -> str:
+    """Return the fully qualified config key for ``key``."""
+
+    if key.startswith(f"{CONFIG_NAMESPACE}."):
+        return key
+    return f"{CONFIG_NAMESPACE}.{key}"
+@
+
+The remaining configuration helpers are thin wrappers around [[typerconf]]'s
+[[Config]] object.  They keep the rest of the code free from path juggling and
+from repeated JSON parsing.
+
+<<functions>>=
+def load_config(*, writeback: bool = False) -> typerconf.Config:
+    """Return the mentipy configuration."""
+
+    config = typerconf.Config()
+    config.read_config(config_path(), writeback=writeback)
+    return config
+
+
+def get_setting(key: str, default: Any = None) -> Any:
+    """Return the configured value for ``key``, or ``default``."""
+
+    full_key = normalize_config_key(key)
+    fallback = DEFAULT_SETTINGS.get(full_key, default)
+
+    try:
+        return load_config().get(full_key)
+    except KeyError:
+        return fallback
+
+
+def set_setting(key: str, value: Any):
+    """Store ``value`` under ``key`` in the mentipy configuration."""
+
+    config = load_config(writeback=True)
+    config.set(normalize_config_key(key), value)
+
+
+def list_settings() -> dict[str, Any]:
+    """Return the effective values of the built-in mentipy settings."""
+
+    return {
+        full_key.split(".", 1)[1]: get_setting(full_key, default)
+        for full_key, default in DEFAULT_SETTINGS.items()
+    }
+
+
+def parse_config_value(raw: str) -> Any:
+    """Interpret ``raw`` as JSON when possible, else keep it as text."""
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
+def _blank_store() -> dict[str, Any]:
+    return {
+        "questions": dict(STORE_TEMPLATE["questions"]),
+        "answers": dict(STORE_TEMPLATE["answers"]),
+    }
+
+
+def _timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+@
+
+The store itself is small, but the class boundary matters: the HTTP server, the
+LaTeX integration, and the CLI can all share the same persistence rules.
+
+<<classes>>=
+class Store:
+    """Persist questions and answers in a JSON file."""
+
+    def __init__(self, path: str | Path | None = None, min_prefix: int | None = None):
+        chosen_path = path or get_setting(STORE_CONFIG, DEFAULT_STORE_PATH)
+        chosen_prefix = min_prefix
+        if chosen_prefix is None:
+            chosen_prefix = int(
+                get_setting(MIN_PREFIX_CONFIG, DEFAULT_MIN_PREFIX)
+            )
+
+        self.path = Path(chosen_path)
+        self.min_prefix = int(chosen_prefix)
+        self._lock = threading.Lock()
+
+    <<store methods>>
+@
+
+Reading the store on every operation is the simplest way to make the server see
+newly compiled questions without introducing cache invalidation.
+
+<<store methods>>=
+def _data(self) -> dict[str, Any]:
+    if not self.path.exists():
+        return _blank_store()
+
+    with self.path.open(encoding="utf-8") as handle:
+        data = json.load(handle)
+
+    data.setdefault("questions", {})
+    data.setdefault("answers", {})
+    return data
+
+
+def _write(self, data: dict[str, Any]):
+    self.path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = self.path.with_name(f"{self.path.name}.tmp")
+
+    with temp_path.open("w", encoding="utf-8") as handle:
+        json.dump(data, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.write("\n")
+
+    os.replace(temp_path, self.path)
+@
+
+Let's first pin the configuration helpers, because the CLI tests rely on them
+and they are easiest to validate in isolation.
+
+<<test functions>>=
+def test_setting_helpers_use_the_mentipy_namespace(tmp_path, monkeypatch):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+
+    set_setting("port", 9000)
+
+    assert get_setting("mentipy.port") == 9000
+    assert list_settings()["port"] == 9000
+@
+
+Registration needs two properties.  It must be idempotent for the same content,
+and it must keep old printed URLs stable even when a later question shares the
+same beginning of the hash.  We achieve that by treating issued prefixes as
+exact reservations and extending only the newer question.
+
+<<store methods>>=
+def register(self, question: Question) -> str:
+    """Register ``question`` and return its stable URL prefix."""
+
+    with self._lock:
+        data = self._data()
+        full_hash = question_hash(question)
+
+        if full_hash in data["questions"]:
+            return data["questions"][full_hash]["url_prefix"]
+
+        prefix = self._allocate_prefix(full_hash, data["questions"])
+        entry = question.to_dict()
+        entry["url_prefix"] = prefix
+        data["questions"][full_hash] = entry
+        data["answers"].setdefault(full_hash, [])
+        self._write(data)
+        return prefix
+
+
+def _allocate_prefix(
+    self, full_hash: str, questions: dict[str, dict[str, Any]]
+) -> str:
+    issued = {meta["url_prefix"] for meta in questions.values()}
+
+    for size in range(self.min_prefix, len(full_hash) + 1):
+        candidate = full_hash[:size]
+        matches = [hash_ for hash_ in questions if hash_.startswith(candidate)]
+        if not matches and candidate not in issued:
+            return candidate
+
+    raise RuntimeError("could not allocate a unique URL prefix")
+@
+
+The first test pins idempotence.  The second uses stub hashes so we can force
+the collision pattern that would otherwise be too rare to exercise naturally.
+
+<<test functions>>=
+def test_register_is_idempotent(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    question = OpenQuestion("One thing to change?")
+
+    first = store.register(question)
+    second = store.register(question)
+
+    assert first == second
+
+
+def test_register_uses_shortest_available_prefix(tmp_path, monkeypatch):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    hashes = {
+        "first": "abcd" + "1" * 60,
+        "second": "dcba" + "2" * 60,
+    }
+
+    monkeypatch.setattr(
+        "mentipy.store.question_hash",
+        lambda question: hashes[question.text],
+    )
+
+    first = store.register(OpenQuestion("first"))
+    second = store.register(OpenQuestion("second"))
+
+    assert first == "abcd"
+    assert second == "dcba"
+
+
+def test_register_extends_only_the_newer_prefix(tmp_path, monkeypatch):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    hashes = {
+        "first": "abcd1" + "0" * 59,
+        "second": "abcd2" + "0" * 59,
+    }
+
+    monkeypatch.setattr(
+        "mentipy.store.question_hash",
+        lambda question: hashes[question.text],
+    )
+
+    first = store.register(OpenQuestion("first"))
+    second = store.register(OpenQuestion("second"))
+
+    assert first == "abcd"
+    assert second == "abcd2"
+@
+
+Resolution prefers an exact issued prefix, because that is what keeps an old QR
+code valid after a newer question collides on the same early hash characters.
+When there is no such exact reservation, we fall back to Git-style unique full
+hash prefixes.
+
+<<store methods>>=
+def matches(self, prefix: str) -> list[str]:
+    """Return all stored hashes that start with ``prefix``."""
+
+    data = self._data()
+    return sorted(
+        full_hash for full_hash in data["questions"] if full_hash.startswith(prefix)
+    )
+
+
+def resolve(self, prefix: str) -> str | None:
+    """Return the full hash addressed by ``prefix``, if it is unambiguous."""
+
+    data = self._data()
+
+    for full_hash, meta in data["questions"].items():
+        if meta["url_prefix"] == prefix:
+            return full_hash
+
+    matches = [
+        full_hash for full_hash in data["questions"] if full_hash.startswith(prefix)
+    ]
+    return matches[0] if len(matches) == 1 else None
+@
+
+The resolver tests exercise all three interesting cases: exact issued prefix,
+unique longer prefix, and a genuinely ambiguous short prefix.
+
+<<test functions>>=
+def test_resolve_accepts_exact_and_unique_prefixes(tmp_path, monkeypatch):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    hashes = {
+        "first": "abcd1" + "0" * 59,
+        "second": "abcd2" + "0" * 59,
+    }
+
+    monkeypatch.setattr(
+        "mentipy.store.question_hash",
+        lambda question: hashes[question.text],
+    )
+
+    first_prefix = store.register(OpenQuestion("first"))
+    second_prefix = store.register(OpenQuestion("second"))
+
+    assert store.resolve(first_prefix) == hashes["first"]
+    assert store.resolve(second_prefix) == hashes["second"]
+    assert store.resolve("abcd20") == hashes["second"]
+    assert store.resolve("abc") is None
+    assert store.resolve("ffff") is None
+@
+
+The HTTP server needs cheap read helpers for rendering pages and the CLI needs a
+stable listing for index-like views.
+
+<<store methods>>=
+def metadata(self, full_hash: str) -> dict[str, Any]:
+    """Return the stored metadata for ``full_hash``."""
+
+    return dict(self._data()["questions"][full_hash])
+
+
+def question(self, full_hash: str) -> Question:
+    """Return the typed question for ``full_hash``."""
+
+    return question_from_dict(self.metadata(full_hash))
+
+
+def all_questions(self) -> list[dict[str, Any]]:
+    """Return all registered questions, ordered by issued prefix."""
+
+    data = self._data()
+    rows = []
+
+    for full_hash, meta in sorted(
+        data["questions"].items(),
+        key=lambda item: item[1]["url_prefix"],
+    ):
+        row = dict(meta)
+        row["hash"] = full_hash
+        rows.append(row)
+
+    return rows
+@
+
+Answer recording is the only mutating operation after registration, so it is
+where the atomic rewrite matters most.
+
+<<store methods>>=
+def record(self, full_hash: str, value: Any):
+    """Append ``value`` as a recorded answer to ``full_hash``."""
+
+    with self._lock:
+        data = self._data()
+
+        if full_hash not in data["questions"]:
+            raise KeyError(full_hash)
+
+        answers = data["answers"].setdefault(full_hash, [])
+        answers.append({"ts": _timestamp(), "value": value})
+        self._write(data)
+@
+
+We test atomicity by forcing [[os.replace]] to fail after the temporary file has
+been written.  The original JSON file must remain intact.  We also test the
+lock by recording from two threads through the same store instance.
+
+<<test functions>>=
+def test_record_leaves_the_original_file_intact_on_failed_replace(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "mentipy.json"
+    store = Store(path, min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    full_hash = store.resolve(prefix)
+    before = path.read_text(encoding="utf-8")
+
+    def fail_replace(_source, _target):
+        raise RuntimeError("replace failed")
+
+    monkeypatch.setattr("mentipy.store.os.replace", fail_replace)
+
+    with pytest.raises(RuntimeError):
+        store.record(full_hash, "hello")
+
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_record_keeps_answers_from_concurrent_threads(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+    full_hash = store.resolve(prefix)
+    start = threading.Barrier(3)
+
+    def worker(value):
+        start.wait()
+        store.record(full_hash, value)
+
+    first = threading.Thread(target=worker, args=(0,))
+    second = threading.Thread(target=worker, args=(1,))
+    first.start()
+    second.start()
+    start.wait()
+    first.join()
+    second.join()
+
+    answers = store.results(full_hash)["answers"]
+
+    assert len(answers) == 2
+    assert sorted(answer["value"] for answer in answers) == [0, 1]
+@
+
+Finally, the result view aggregates answers according to the question type.  We
+keep the raw answer log in the returned structure because the CLI export command
+and the localhost JSON results endpoint both need it.
+
+<<store methods>>=
+def results(self, full_hash: str) -> dict[str, Any]:
+    """Return aggregated results for ``full_hash``."""
+
+    data = self._data()
+    meta = data["questions"][full_hash]
+    question = question_from_dict(meta)
+    answers = list(data["answers"].get(full_hash, []))
+    results = {
+        "hash": full_hash,
+        "url_prefix": meta["url_prefix"],
+        "question": question.to_dict(),
+        "total": len(answers),
+        "answers": answers,
+    }
+
+    if isinstance(question, MCQuestion):
+        counts = [0] * len(question.options)
+        for answer in answers:
+            values = answer["value"] if question.multi else [answer["value"]]
+            for index in values:
+                if 0 <= index < len(counts):
+                    counts[index] += 1
+        results["counts"] = counts
+        return results
+
+    if isinstance(question, ScaleQuestion):
+        counts = {
+            value: 0 for value in range(question.low, question.high + 1)
+        }
+        for answer in answers:
+            value = answer["value"]
+            if value in counts:
+                counts[value] += 1
+        results["counts"] = counts
+
+    return results
+@
+
+The aggregation test keeps the counting contract explicit for the dashboard and
+the watcher.
+
+<<test functions>>=
+def test_results_aggregate_multiple_choice_answers(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B", "C")))
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, 0)
+    store.record(full_hash, 2)
+    store.record(full_hash, 2)
+
+    results = store.results(full_hash)
+
+    assert results["counts"] == [1, 0, 2]
+    assert results["total"] == 3
+@
+
+<<test [[store.py]]>>=
+import pytest
+
+from mentipy.questions import *
+from mentipy.store import *
+
+<<test functions>>
+@

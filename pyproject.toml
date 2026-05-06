@@ -7,9 +7,16 @@ authors = [
 ]
 license = {text = "MIT"}
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.13,<4.0"
 dependencies = [
+    "click (>=8.0.0,<8.2.0)",
+    "segno (>=1.6.6,<2.0.0)",
+    "typer (>=0.7.0,<0.8.0)",
+    "typerconf (>=1.1.0,<2.0.0)",
 ]
+
+[project.scripts]
+mentipy = "mentipy.cli:main"
 
 
 [tool.poetry]

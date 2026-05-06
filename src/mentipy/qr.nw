@@ -1,0 +1,68 @@
+\chapter{QR Codes}
+
+The QR module is intentionally thin.  The interesting design decision happened
+earlier: we chose [[segno]] because it stays in pure Python and writes PDF files
+directly, which keeps the slide-generation path dependency-light.
+
+<<[[qr.py]]>>=
+from __future__ import annotations
+
+<<imports>>
+
+<<constants>>
+<<functions>>
+@
+
+<<imports>>=
+from pathlib import Path
+
+import segno
+@
+
+The QR output should be readable from a projected slide, so we keep the chosen
+error correction level and pixel scale as named constants.
+
+<<constants>>=
+QR_ERROR_LEVEL = "m"
+QR_SCALE = 10
+@
+
+The only public function ensures that the parent directory exists and then lets
+Segno infer the output format from the extension.  This keeps the function easy
+to use both from slide compilation and from tests.
+
+<<functions>>=
+def make_qr(url: str, out_path: str | Path, fmt: str = "pdf") -> Path:
+    """Write a QR code for ``url`` to ``out_path`` and return the path."""
+
+    path = Path(out_path)
+    target = path if path.suffix else path.with_suffix(f".{fmt}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    segno.make(url, error=QR_ERROR_LEVEL).save(target, scale=QR_SCALE)
+    return target
+@
+
+The tests pin two properties we rely on downstream: that the PDF is real, and
+that regenerating the same QR code is deterministic.
+
+<<test functions>>=
+def test_make_qr_writes_a_pdf(tmp_path):
+    output = make_qr("http://localhost:8080/abcd", tmp_path / "Q-abcd.pdf")
+
+    assert output.exists()
+    assert output.stat().st_size > 0
+    assert output.read_bytes()[:5] == b"%PDF-"
+
+
+def test_make_qr_is_deterministic_for_the_same_url(tmp_path):
+    first = make_qr("http://localhost:8080/abcd", tmp_path / "first.pdf")
+    second = make_qr("http://localhost:8080/abcd", tmp_path / "second.pdf")
+
+    assert first.read_bytes() == second.read_bytes()
+@
+
+<<test [[qr.py]]>>=
+from mentipy.qr import *
+
+<<test functions>>
+@

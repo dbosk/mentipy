@@ -1,0 +1,284 @@
+\chapter{Questions}
+
+The polling system only stays stable across recompilations if a question's
+identity depends on its content, and on nothing else.  We therefore keep the
+question model deliberately small and make each variant able to describe itself
+ as ordinary JSON data.  The store hashes that canonical description, so the
+same slide source yields the same identifier every time.
+
+<<[[questions.py]]>>=
+from __future__ import annotations
+
+<<imports>>
+
+<<classes>>
+
+<<functions>>
+@
+
+We only need a handful of standard-library modules: dataclasses for the frozen
+question objects, and JSON plus SHA-256 for the canonical hash.
+
+<<imports>>=
+from dataclasses import dataclass
+import hashlib
+import json
+from typing import Any, Mapping
+@
+
+\section{Multiple Choice}
+
+Multiple-choice questions carry the prompt, the offered options, and whether
+the form should use radio buttons or checkboxes.  We require at least one
+option so the later rendering and counting logic can rely on the list being
+non-empty.
+
+<<classes>>=
+@dataclass(frozen=True)
+class MCQuestion:
+    """A multiple-choice question."""
+
+    text: str
+    options: tuple[str, ...]
+    multi: bool = False
+    kind: str = "mc"
+
+    def __post_init__(self):
+        if not self.options:
+            raise ValueError("multiple-choice questions need options")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly representation of the question."""
+
+        return {
+            "kind": self.kind,
+            "text": self.text,
+            "options": list(self.options),
+            "multi": self.multi,
+        }
+@
+
+Let's verify that the constructor rejects the degenerate case with no options:
+
+<<test functions>>=
+def test_mc_question_requires_options():
+    with pytest.raises(ValueError):
+        MCQuestion("Which one?", ())
+@
+
+\section{Open Questions}
+
+Open questions only need the prompt and a character limit.  The limit belongs
+to the question data because it affects both the HTTP form and the canonical
+hash.
+
+<<classes>>=
+@dataclass(frozen=True)
+class OpenQuestion:
+    """An open free-text question."""
+
+    text: str
+    max_chars: int = 280
+    kind: str = "open"
+
+    def __post_init__(self):
+        if self.max_chars <= 0:
+            raise ValueError("open questions need a positive character limit")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly representation of the question."""
+
+        return {
+            "kind": self.kind,
+            "text": self.text,
+            "max_chars": self.max_chars,
+        }
+@
+
+The limit validation is small, but it is what protects the rest of the system
+from impossible forms:
+
+<<test functions>>=
+def test_open_question_requires_positive_limit():
+    with pytest.raises(ValueError):
+        OpenQuestion("Feedback?", max_chars=0)
+@
+
+\section{Numeric Scales}
+
+Scale questions represent the common 
+\enquote{rate this from one to five} style
+interaction.  The labels are optional, but the range must be sensible.
+
+<<classes>>=
+@dataclass(frozen=True)
+class ScaleQuestion:
+    """A numeric scale question."""
+
+    text: str
+    low: int = 1
+    high: int = 5
+    low_label: str = ""
+    high_label: str = ""
+    kind: str = "scale"
+
+    def __post_init__(self):
+        if self.low >= self.high:
+            raise ValueError("scale questions need low < high")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly representation of the question."""
+
+        return {
+            "kind": self.kind,
+            "text": self.text,
+            "low": self.low,
+            "high": self.high,
+            "low_label": self.low_label,
+            "high_label": self.high_label,
+        }
+@
+
+Again, the validation matters because every later component assumes a proper
+closed interval:
+
+<<test functions>>=
+def test_scale_question_requires_ordered_bounds():
+    with pytest.raises(ValueError):
+        ScaleQuestion("Pace?", low=5, high=5)
+@
+
+\section{Canonicalisation}
+
+The rest of the system works on a question union.  The helper that rebuilds a
+question from stored JSON is the bridge between the typed model and the JSON
+registry.
+
+<<classes>>=
+Question = MCQuestion | OpenQuestion | ScaleQuestion
+@
+
+<<functions>>=
+def question_from_dict(data: Mapping[str, Any]) -> Question:
+    """Rebuild a question object from stored JSON data."""
+
+    kind = data["kind"]
+
+    if kind == "mc":
+        return MCQuestion(
+            text=str(data["text"]),
+            options=tuple(data["options"]),
+            multi=bool(data.get("multi", False)),
+        )
+
+    if kind == "open":
+        return OpenQuestion(
+            text=str(data["text"]),
+            max_chars=int(data.get("max_chars", 280)),
+        )
+
+    if kind == "scale":
+        return ScaleQuestion(
+            text=str(data["text"]),
+            low=int(data.get("low", 1)),
+            high=int(data.get("high", 5)),
+            low_label=str(data.get("low_label", "")),
+            high_label=str(data.get("high_label", "")),
+        )
+
+    raise ValueError(f"unknown question kind: {kind}")
+@
+
+The round-trip test fixes the storage contract.  If any field is lost or
+renamed later, the test fails before old data is silently corrupted.
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    ("payload", "expected_type"),
+    [
+        (
+            {
+                "kind": "mc",
+                "text": "How was the lecture?",
+                "options": ["Great", "OK", "Boring"],
+                "multi": True,
+            },
+            MCQuestion,
+        ),
+        (
+            {
+                "kind": "open",
+                "text": "One thing to change?",
+                "max_chars": 140,
+            },
+            OpenQuestion,
+        ),
+        (
+            {
+                "kind": "scale",
+                "text": "Pace?",
+                "low": 1,
+                "high": 7,
+                "low_label": "slow",
+                "high_label": "fast",
+            },
+            ScaleQuestion,
+        ),
+    ],
+)
+def test_question_round_trip(payload, expected_type):
+    question = question_from_dict(payload)
+
+    assert isinstance(question, expected_type)
+    assert question.to_dict() == payload
+@
+
+The canonical hash uses sorted JSON keys so that it depends on the meaning of
+the question, not on the incidental order in which Python produced a mapping.
+
+<<functions>>=
+def question_hash(question: Question) -> str:
+    """Return the full SHA-256 digest for ``question``."""
+
+    payload = json.dumps(
+        question.to_dict(),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+@
+
+The hash is the stable identity of a question.  We therefore pin both the happy
+path and a nearby change that must alter the digest.
+
+<<test functions>>=
+def test_question_hash_is_stable_for_identical_questions():
+    first = MCQuestion("How was it?", ("Great", "OK", "Boring"))
+    second = MCQuestion("How was it?", ("Great", "OK", "Boring"))
+
+    digest = question_hash(first)
+
+    assert digest == question_hash(second)
+    assert re.fullmatch(r"[0-9a-f]{64}", digest)
+
+
+def test_question_hash_changes_when_option_order_changes():
+    first = MCQuestion("Pick one", ("A", "B", "C"))
+    second = MCQuestion("Pick one", ("B", "A", "C"))
+
+    assert question_hash(first) != question_hash(second)
+@
+
+The test root is intentionally small: the interesting details live next to the
+sections they verify.
+
+<<test [[questions.py]]>>=
+import re
+
+import pytest
+
+from mentipy.questions import *
+
+<<test functions>>
+@
