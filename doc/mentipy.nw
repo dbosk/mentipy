@@ -10,7 +10,7 @@
 \input{preamble.tex}
 
 \title{%
-  mentipy
+  \texttt{mentipy}: A cloudless mentimeter for \LaTeX{} presentations
 }
 \author{%
   Daniel Bosk
