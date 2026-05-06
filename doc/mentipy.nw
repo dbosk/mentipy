@@ -1,0 +1,48 @@
+\documentclass[a4paper,oneside]{memoir}
+\maxtocdepth{subsection}
+\setsecnumdepth{subsection}
+\nouppercaseheads
+
+\usepackage[hyphens]{url}
+\usepackage[colorlinks]{hyperref}
+\usepackage{authblk}
+
+\input{preamble.tex}
+
+\title{%
+  mentipy
+}
+\author{%
+  Daniel Bosk
+}
+\affil{%
+  KTH Royal Institute of Technology\\
+  \texttt{dbosk@kth.se}
+}
+
+\begin{document}
+\frontmatter
+\maketitle
+\thispagestyle{empty}
+
+\begin{abstract}
+  \input{abstract.tex}
+\end{abstract}
+
+\vspace*{\fill}
+\VerbatimInput{../LICENSE}
+\clearpage
+
+\tableofcontents
+\clearpage
+
+\mainmatter
+
+\input{../src/mentipy/mentipy.tex}
+
+
+\backmatter
+\printbibliography
+
+
+\end{document}

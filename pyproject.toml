@@ -1,0 +1,36 @@
+[project]
+name = "mentipy"
+version = "0.1"
+description = "Lightweight classroom-polling library"
+authors = [
+    {name = "Daniel Bosk", email = "dbosk@kth.se"}
+]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+]
+
+
+[tool.poetry]
+packages = [{include = "mentipy", from = "src"}]
+include = [
+  { path = "src/**/*.py", format = "wheel" },
+]
+exclude = [
+  "src/mentipy/.gitignore",
+  "src/mentipy/Makefile",
+  "src/mentipy/*.nw",
+  "src/mentipy/*.tex",
+  "src/mentipy/CLAUDE.md",
+  "src/mentipy/ltxobj",
+]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+dev = [
+    "pytest (>=9.0.2,<10.0.0)"
+]
