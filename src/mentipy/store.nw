@@ -26,7 +26,7 @@ import json
 import os
 from pathlib import Path
 import threading
-from typing import Any
+from typing import Any, Iterator
 
 import typerconf
 
@@ -55,6 +55,8 @@ STORE_CONFIG = "mentipy.store"
 QR_DIR_CONFIG = "mentipy.qr_dir"
 QR_FORMAT_CONFIG = "mentipy.qr_format"
 MIN_PREFIX_CONFIG = "mentipy.min_prefix"
+SSH_TUNNEL_CONFIG = "mentipy.ssh_tunnel"
+PUBLIC_BASE_URL_CONFIG = "mentipy.public_base_url"
 
 DEFAULT_BASE_URL = "http://localhost:8080"
 DEFAULT_HOST = "0.0.0.0"
@@ -105,13 +107,15 @@ def normalize_config_key(key: str) -> str:
 
 The remaining configuration helpers are thin wrappers around [[typerconf]]'s
 [[Config]] object.  They keep the rest of the code free from path juggling and
-from repeated JSON parsing.
+from repeated JSON parsing.  We also seed the object with a fresh empty mapping,
+because [[typerconf.Config()]] otherwise reuses a mutable default across calls,
+which leaks settings from one missing config file into the next.
 
 <<functions>>=
 def load_config(*, writeback: bool = False) -> typerconf.Config:
     """Return the mentipy configuration."""
 
-    config = typerconf.Config()
+    config = typerconf.Config({})
     config.read_config(config_path(), writeback=writeback)
     return config
 
@@ -224,6 +228,20 @@ def test_setting_helpers_use_the_mentipy_namespace(tmp_path, monkeypatch):
 
     assert get_setting("mentipy.port") == 9000
     assert list_settings()["port"] == 9000
+
+
+def test_missing_temp_configs_do_not_share_state(tmp_path, monkeypatch):
+    first = tmp_path / "one.json"
+    second = tmp_path / "two.json"
+
+    monkeypatch.setenv("MENTIPY_CONFIG", str(first))
+    set_setting("public_base_url", "https://polls.example")
+    assert get_setting(PUBLIC_BASE_URL_CONFIG) == "https://polls.example"
+
+    monkeypatch.setenv("MENTIPY_CONFIG", str(second))
+
+    assert get_setting(PUBLIC_BASE_URL_CONFIG) is None
+    assert get_setting(BASE_URL_CONFIG, DEFAULT_BASE_URL) == DEFAULT_BASE_URL
 @
 
 Registration needs two properties.  It must be idempotent for the same content,
@@ -404,6 +422,16 @@ def all_questions(self) -> list[dict[str, Any]]:
         rows.append(row)
 
     return rows
+
+
+def iter_prefixes(self) -> Iterator[str]:
+    """Yield the URL prefix of every registered question."""
+
+    with self._lock:
+        data = self._data()
+
+    for meta in data["questions"].values():
+        yield meta["url_prefix"]
 @
 
 Answer recording is the only mutating operation after registration, so it is
@@ -429,6 +457,14 @@ been written.  The original JSON file must remain intact.  We also test the
 lock by recording from two threads through the same store instance.
 
 <<test functions>>=
+def test_iter_prefixes_lists_the_registered_prefixes(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first = store.register(OpenQuestion("One thing to change?"))
+    second = store.register(OpenQuestion("What should we repeat?"))
+
+    assert set(store.iter_prefixes()) == {first, second}
+
+
 def test_record_leaves_the_original_file_intact_on_failed_replace(
     tmp_path, monkeypatch
 ):

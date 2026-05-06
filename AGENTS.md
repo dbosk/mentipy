@@ -25,6 +25,7 @@
 - `src/mentipy/latex.nw`: PythonTeX-facing LaTeX helpers; handles registration and QR generation side effects.
 - `src/mentipy/server.nw`: standard-library threaded HTTP server and HTML results/forms.
 - `src/mentipy/cli.nw`: Typer CLI; thin wrapper over store/server/LaTeX helpers.
+- `src/mentipy/public.nw`: public exposure helpers for `mentipy serve` (UPnP and SSH reverse tunnels).
 - `src/mentipy/qr.nw`: QR generation via `segno`.
 - `tests/Makefile`: auto-discovers `<<test [[module.py]]>>` chunks in `src/**/*.nw` and tangles them into `tests/unit/test_*.py`.
 
@@ -41,6 +42,7 @@
 - Python requirement is `>=3.13,<4.0` (`pyproject.toml`).
 - The console entrypoint is `mentipy = "mentipy.cli:main"`.
 - Defaults and config keys live in `src/mentipy/store.nw`; both CLI and LaTeX helpers read settings from there.
+- Optional public exposure support is packaged as `mentipy[public]`, which installs `miniupnpc` for the UPnP mode; SSH mode stays stdlib-only.
 - `MENTIPY_CONFIG` overrides the config file location for tests and local runs.
 
 ## Commit hygiene for this repo

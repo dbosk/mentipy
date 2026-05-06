@@ -7,6 +7,8 @@ MODULES+= \
 	latex.py \
 	latex.tex \
 	mentipy.tex \
+	public.py \
+	public.tex \
 	qr.py \
 	qr.tex \
 	questions.py \

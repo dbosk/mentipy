@@ -60,6 +60,37 @@ examples write their state to [[doc/mentipy.json]] and their QR images to
 The URLs are content-derived, so they remain stable as long as the question text
 and options stay the same.
 
+When the lecturer needs to serve respondents outside the local network,
+[[mentipy serve]] can expose the same local server in two ways.
+
+\begin{description}
+\item[The [[--public upnp]] mode] asks a home or campus router for a temporary port
+  mapping and fits the common case where the lecture machine sits behind a
+  UPnP-capable gateway.
+\item[The [[--public ssh]] mode] creates an SSH reverse tunnel and fits the case where
+  the lecturer already controls a reachable server but not the local router.
+\end{description}
+
+The SSH mode needs one extra configuration value:
+[[mentipy config set ssh_tunnel danielb@server.tld:8080]].  The command starts a
+reverse tunnel to that endpoint and then prints the public URL that students can
+open.
+
+This exposure step is intentionally blunt about its security properties.  The
+polling server is unauthenticated: anyone with the URL can submit answers and,
+if [[--results]] is also enabled, watch the live results page.  That is useful
+for lectures, but it means the public URL should be treated like a shared room
+link rather than a private admin interface.
+
+The other workflow consequence is that QR codes are generated when slides
+compile, not when the server starts.  If [[mentipy serve --public]] derives a
+different base URL than the one used during slide compilation, it regenerates
+the QR images and tells the lecturer to recompile the slides so the PDF embeds
+the new codes.  Users who front the public endpoint with HTTPS can override the
+derived URL by setting [[mentipy.public_base_url]], for example to point the QR
+codes at a TLS-terminating reverse proxy while still using the same local
+[[mentipy serve --public ssh]] session.
+
 \section{Single-Choice Poll}
 
 This first example uses the common one-answer multiple-choice format.
@@ -206,6 +237,7 @@ Now, the rendered question:
 \input{../src/mentipy/store.tex}
 \input{../src/mentipy/latex.tex}
 \input{../src/mentipy/server.tex}
+\input{../src/mentipy/public.tex}
 \input{../src/mentipy/cli.tex}
 
 
