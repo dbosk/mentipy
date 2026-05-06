@@ -1,0 +1,643 @@
+\chapter{HTTP Server}
+
+The server intentionally stays in the standard library.  Classroom polling does
+not need a framework-sized dependency tree; it needs a dependable request loop,
+simple HTML forms, and a small amount of routing.
+
+<<[[server.py]]>>=
+from __future__ import annotations
+
+<<imports>>
+
+<<constants>>
+<<functions>>
+<<classes>>
+@
+
+<<imports>>=
+from html import escape
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
+from socketserver import ThreadingMixIn
+from string import Template
+from typing import Any
+from urllib.parse import parse_qs, urlparse
+
+from mentipy.questions import MCQuestion, OpenQuestion, ScaleQuestion
+from mentipy.store import Store
+@
+
+Using [[string.Template]] keeps the HTML easy to read without introducing a
+separate templating engine.
+
+<<constants>>=
+PAGE_TEMPLATE = Template(
+    """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>$title</title>
+  $refresh
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main>
+    <h1>$heading</h1>
+    $body
+  </main>
+</body>
+</html>
+"""
+)
+
+STYLE_CSS = """
+body {
+  background: #f4f4f4;
+  color: #111;
+  font-family: sans-serif;
+  margin: 0;
+}
+
+main {
+  background: white;
+  margin: 2rem auto;
+  max-width: 52rem;
+  padding: 2rem;
+}
+
+form label {
+  display: block;
+  margin: 0.5rem 0;
+}
+
+textarea {
+  min-height: 8rem;
+  width: 100%;
+}
+
+button {
+  margin-top: 1rem;
+}
+
+code {
+  background: #f0f0f0;
+  padding: 0.1rem 0.25rem;
+}
+""".strip()
+
+REFRESH_SECONDS = 2
+@
+
+The helper functions collect the logic that would otherwise be repeated across
+multiple routes.
+
+<<functions>>=
+def is_local_address(address: str) -> bool:
+    """Return whether ``address`` is considered localhost."""
+
+    return address in {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
+
+
+def _page(title: str, heading: str, body: str, *, refresh: bool = False) -> str:
+    refresh_tag = ""
+    if refresh:
+        refresh_tag = (
+            f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">'
+        )
+
+    return PAGE_TEMPLATE.substitute(
+        title=escape(title),
+        heading=escape(heading),
+        refresh=refresh_tag,
+        body=body,
+    )
+
+
+def _ambiguous_matches(store: Store, prefix: str) -> list[dict[str, Any]]:
+    matches = []
+
+    for full_hash in store.matches(prefix):
+        meta = store.metadata(full_hash)
+        matches.append(
+            {
+                "hash": full_hash,
+                "url_prefix": meta["url_prefix"],
+                "text": meta["text"],
+            }
+        )
+
+    return matches
+
+
+def _parse_answer(question, fields: dict[str, list[str]]) -> Any:
+    if isinstance(question, MCQuestion):
+        values = fields.get("value", [])
+        if question.multi:
+            return [int(value) for value in values]
+        if len(values) != 1:
+            raise ValueError("choose exactly one option")
+        return int(values[0])
+
+    if isinstance(question, OpenQuestion):
+        value = fields.get("value", [""])[0]
+        if len(value) > question.max_chars:
+            raise ValueError("text answer too long")
+        return value
+
+    value = int(fields.get("value", [str(question.low)])[0])
+    if value < question.low or value > question.high:
+        raise ValueError("scale answer outside the allowed range")
+    return value
+
+
+def _render_index(store: Store) -> str:
+    items = []
+
+    for entry in store.all_questions():
+        items.append(
+            "<li>"
+            f'<a href="/{entry["url_prefix"]}"><code>{entry["url_prefix"]}</code></a> '
+            f'{escape(entry["text"])} '
+            f'(<a href="/admin/{entry["url_prefix"]}">admin</a>)'
+            "</li>"
+        )
+
+    if not items:
+        return "<p>No questions have been registered yet.</p>"
+
+    return "<ul>" + "".join(items) + "</ul>"
+
+
+def _render_form(store: Store, full_hash: str) -> str:
+    question = store.question(full_hash)
+    prefix = store.metadata(full_hash)["url_prefix"]
+
+    if isinstance(question, MCQuestion):
+        input_type = "checkbox" if question.multi else "radio"
+        inputs = "".join(
+            f'<label><input type="{input_type}" name="value" value="{index}"> '
+            f"{escape(option)}</label>"
+            for index, option in enumerate(question.options)
+        )
+        return (
+            f"<p>{escape(question.text)}</p>"
+            f'<form method="post" action="/{prefix}">{inputs}'
+            "<button type=\"submit\">Submit</button></form>"
+        )
+
+    if isinstance(question, OpenQuestion):
+        return (
+            f"<p>{escape(question.text)}</p>"
+            f'<form method="post" action="/{prefix}">' 
+            f'<textarea name="value" maxlength="{question.max_chars}"></textarea>'
+            "<button type=\"submit\">Submit</button></form>"
+        )
+
+    inputs = "".join(
+        f'<label><input type="radio" name="value" value="{value}"> '
+        f"{value}</label>"
+        for value in range(question.low, question.high + 1)
+    )
+    labels = []
+    if question.low_label:
+        labels.append(f"<p>Low end: {escape(question.low_label)}</p>")
+    if question.high_label:
+        labels.append(f"<p>High end: {escape(question.high_label)}</p>")
+
+    return (
+        f"<p>{escape(question.text)}</p>"
+        + "".join(labels)
+        + f'<form method="post" action="/{prefix}">{inputs}'
+        + "<button type=\"submit\">Submit</button></form>"
+    )
+
+
+def _render_results(store: Store, full_hash: str) -> str:
+    results = store.results(full_hash)
+    question = store.question(full_hash)
+    lines = [f"<p>Total responses: <strong>{results['total']}</strong></p>"]
+
+    if isinstance(question, MCQuestion):
+        items = []
+        for option, count in zip(question.options, results["counts"]):
+            items.append(f"<li>{escape(option)}: {count}</li>")
+        lines.append("<ul>" + "".join(items) + "</ul>")
+        return "".join(lines)
+
+    if isinstance(question, ScaleQuestion):
+        items = []
+        for value, count in results["counts"].items():
+            items.append(f"<li>{value}: {count}</li>")
+        lines.append("<ul>" + "".join(items) + "</ul>")
+        return "".join(lines)
+
+    if results["answers"]:
+        items = []
+        for answer in results["answers"]:
+            items.append(
+                f"<li><code>{escape(answer['ts'])}</code>: "
+                f"{escape(answer['value'])}</li>"
+            )
+        lines.append("<ol>" + "".join(items) + "</ol>")
+    else:
+        lines.append("<p>No free-text answers yet.</p>")
+
+    return "".join(lines)
+
+
+def _json_results(store: Store, full_hash: str) -> str:
+    return json.dumps(store.results(full_hash), ensure_ascii=False, indent=2)
+@
+
+The custom server class only exists to enable threading and to keep worker
+threads from blocking shutdown.
+
+<<classes>>=
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    """A small threaded HTTP server for mentipy."""
+
+    daemon_threads = True
+@
+
+The handler is generated from the store instance.  A closure is the simplest way
+to make every request see the same persistence backend without resorting to
+global state.
+
+<<functions>>=
+def _build_handler(store: Store):
+    class MentipyHandler(BaseHTTPRequestHandler):
+        server_version = "mentipy/0.1"
+
+        def log_message(self, *_args):
+            return
+
+        def _is_local(self) -> bool:
+            return is_local_address(self.client_address[0])
+
+        def _send(
+            self,
+            status: HTTPStatus,
+            body: str,
+            *,
+            content_type: str = "text/html; charset=utf-8",
+            headers: dict[str, str] | None = None,
+        ):
+            payload = body.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(payload)))
+            if headers:
+                for name, value in headers.items():
+                    self.send_header(name, value)
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def _redirect(self, location: str):
+            self.send_response(HTTPStatus.SEE_OTHER)
+            self.send_header("Location", location)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def _resolve(self, prefix: str) -> str | None:
+            full_hash = store.resolve(prefix)
+            if full_hash is not None:
+                return full_hash
+
+            matches = _ambiguous_matches(store, prefix)
+            if len(matches) > 1:
+                items = "".join(
+                    "<li>"
+                    f'<a href="/{candidate["url_prefix"]}"><code>{candidate["url_prefix"]}</code></a> '
+                    f'{escape(candidate["text"])}'
+                    "</li>"
+                    for candidate in matches
+                )
+                self._send(
+                    HTTPStatus.MULTIPLE_CHOICES,
+                    _page(
+                        "Ambiguous prefix",
+                        "Ambiguous prefix",
+                        f"<p>{escape(prefix)} matches multiple questions.</p>"
+                        f"<ul>{items}</ul>",
+                    ),
+                )
+                return None
+
+            self._send(
+                HTTPStatus.NOT_FOUND,
+                _page(
+                    "Unknown question",
+                    "Unknown question",
+                    f"<p>No question matches <code>{escape(prefix)}</code>.</p>",
+                ),
+            )
+            return None
+
+        def do_GET(self):
+            parsed = urlparse(self.path)
+            path = parsed.path
+
+            if path == "/static/style.css":
+                self._send(
+                    HTTPStatus.OK,
+                    STYLE_CSS,
+                    content_type="text/css; charset=utf-8",
+                )
+                return
+
+            if path == "/":
+                if not self._is_local():
+                    self._send(
+                        HTTPStatus.FORBIDDEN,
+                        _page(
+                            "Forbidden",
+                            "Forbidden",
+                            "<p>The question index is only available on localhost.</p>",
+                        ),
+                    )
+                    return
+
+                self._send(
+                    HTTPStatus.OK,
+                    _page("Questions", "Questions", _render_index(store)),
+                )
+                return
+
+            segments = [segment for segment in path.split("/") if segment]
+            if not segments:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+
+            if segments[0] == "admin":
+                self._handle_admin(segments)
+                return
+
+            self._handle_question_get(segments)
+
+        def _handle_admin(self, segments: list[str]):
+            if not self._is_local():
+                self._send(
+                    HTTPStatus.FORBIDDEN,
+                    _page(
+                        "Forbidden",
+                        "Forbidden",
+                        "<p>Admin pages are only available on localhost.</p>",
+                    ),
+                )
+                return
+
+            if len(segments) not in {2, 3}:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+
+            full_hash = self._resolve(segments[1])
+            if full_hash is None:
+                return
+
+            if len(segments) == 2:
+                title = store.metadata(full_hash)["text"]
+                self._send(
+                    HTTPStatus.OK,
+                    _page(
+                        f"Results for {title}",
+                        title,
+                        _render_results(store, full_hash),
+                        refresh=True,
+                    ),
+                )
+                return
+
+            if segments[2] == "results.json":
+                self._send(
+                    HTTPStatus.OK,
+                    _json_results(store, full_hash),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+
+            self.send_error(HTTPStatus.NOT_FOUND)
+
+        def _handle_question_get(self, segments: list[str]):
+            if len(segments) == 2 and segments[1] == "thanks":
+                full_hash = self._resolve(segments[0])
+                if full_hash is None:
+                    return
+                title = store.metadata(full_hash)["text"]
+                self._send(
+                    HTTPStatus.OK,
+                    _page(
+                        "Thanks",
+                        title,
+                        "<p>Thanks, your answer was recorded.</p>",
+                    ),
+                )
+                return
+
+            if len(segments) != 1:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+
+            full_hash = self._resolve(segments[0])
+            if full_hash is None:
+                return
+
+            title = store.metadata(full_hash)["text"]
+            self._send(
+                HTTPStatus.OK,
+                _page(title, title, _render_form(store, full_hash)),
+            )
+
+        def do_POST(self):
+            parsed = urlparse(self.path)
+            segments = [segment for segment in parsed.path.split("/") if segment]
+            if len(segments) != 1 or segments[0] == "admin":
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+
+            full_hash = self._resolve(segments[0])
+            if full_hash is None:
+                return
+
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length).decode("utf-8")
+            fields = parse_qs(body, keep_blank_values=True)
+            question = store.question(full_hash)
+
+            try:
+                value = _parse_answer(question, fields)
+            except (TypeError, ValueError) as err:
+                self._send(
+                    HTTPStatus.BAD_REQUEST,
+                    _page(
+                        "Invalid answer",
+                        "Invalid answer",
+                        f"<p>{escape(str(err))}</p>",
+                    ),
+                )
+                return
+
+            store.record(full_hash, value)
+            prefix = store.metadata(full_hash)["url_prefix"]
+            self._redirect(f"/{prefix}/thanks")
+
+    return MentipyHandler
+
+
+def create_server(
+    store: Store, host: str = "0.0.0.0", port: int = 8080
+) -> ThreadingHTTPServer:
+    """Return a configured mentipy HTTP server."""
+
+    return ThreadingHTTPServer((host, port), _build_handler(store))
+
+
+def serve(store: Store, host: str = "0.0.0.0", port: int = 8080):
+    """Run the mentipy HTTP server until interrupted."""
+
+    server = create_server(store, host, port)
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+@
+
+The tests use a real ephemeral TCP port so that they exercise the routing stack
+instead of a mocked version of it.
+
+<<test functions>>=
+@pytest.fixture
+def live_server(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+    server = create_server(store, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        yield store, prefix, server.server_address[1]
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
+def _request(port, method, path, body=None, headers=None):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    connection.request(method, path, body=body, headers=headers or {})
+    response = connection.getresponse()
+    payload = response.read().decode("utf-8")
+    connection.close()
+    return response, payload
+@
+
+We first pin the localhost guard explicitly by faking the client address on the
+handler instance.
+
+<<test functions>>=
+def test_handler_marks_non_local_admin_clients_as_remote(tmp_path):
+    handler_class = server_module._build_handler(Store(tmp_path / "mentipy.json"))
+    handler = handler_class.__new__(handler_class)
+    handler.client_address = ("10.0.0.5", 1234)
+
+    assert handler._is_local() is False
+    assert is_local_address("127.0.0.1") is True
+@
+
+The route test covers the request/response surface the presenter actually uses.
+
+<<test functions>>=
+def test_server_routes_return_expected_status_codes(live_server):
+    store, prefix, port = live_server
+
+    response, body = _request(port, "GET", "/")
+    assert response.status == 200
+    assert prefix in body
+
+    response, body = _request(port, "GET", f"/{prefix}")
+    assert response.status == 200
+    assert "Pick one" in body
+
+    response, _body = _request(port, "GET", "/static/style.css")
+    assert response.status == 200
+
+    response, body = _request(port, "GET", f"/{prefix}/thanks")
+    assert response.status == 200
+    assert "recorded" in body
+
+    response, body = _request(port, "GET", f"/admin/{prefix}")
+    assert response.status == 200
+    assert "Total responses" in body
+
+    response, body = _request(port, "GET", f"/admin/{prefix}/results.json")
+    assert response.status == 200
+    assert json.loads(body)["url_prefix"] == prefix
+@
+
+Posting an answer should redirect and persist exactly one response.
+
+<<test functions>>=
+def test_post_records_answers(live_server):
+    store, prefix, port = live_server
+
+    response, _body = _request(
+        port,
+        "POST",
+        f"/{prefix}",
+        body="value=1",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+
+    assert response.status == 303
+    full_hash = store.resolve(prefix)
+    assert store.results(full_hash)["counts"] == [0, 1]
+@
+
+Ambiguous short prefixes should produce a Git-like [[300 Multiple Choices]] page
+so the user can pick the intended poll.
+
+<<test functions>>=
+def test_ambiguous_prefix_returns_multiple_choices(tmp_path, monkeypatch):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    hashes = {
+        "first": "abcd" + "1" * 60,
+        "second": "abce" + "2" * 60,
+    }
+
+    monkeypatch.setattr(
+        "mentipy.store.question_hash",
+        lambda question: hashes[question.text],
+    )
+
+    first_prefix = store.register(OpenQuestion("first"))
+    second_prefix = store.register(OpenQuestion("second"))
+    server = create_server(store, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        response, body = _request(server.server_address[1], "GET", "/abc")
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+    assert response.status == 300
+    assert first_prefix in body
+    assert second_prefix in body
+@
+
+<<test [[server.py]]>>=
+import http.client
+import json
+import threading
+
+import mentipy.server as server_module
+import pytest
+
+from mentipy.questions import *
+from mentipy.server import *
+from mentipy.store import *
+
+<<test functions>>
+@

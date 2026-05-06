@@ -1,6 +1,20 @@
 NOTANGLEFLAGS.py=
 
-MODULES+=	__init__.py mentipy.tex
+MODULES+= \
+	__init__.py \
+	cli.py \
+	cli.tex \
+	latex.py \
+	latex.tex \
+	mentipy.tex \
+	qr.py \
+	qr.tex \
+	questions.py \
+	questions.tex \
+	server.py \
+	server.tex \
+	store.py \
+	store.tex
 
 .PHONY: all
 all: ${MODULES}

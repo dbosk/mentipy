@@ -39,6 +39,12 @@
 \mainmatter
 
 \input{../src/mentipy/mentipy.tex}
+\input{../src/mentipy/questions.tex}
+\input{../src/mentipy/qr.tex}
+\input{../src/mentipy/store.tex}
+\input{../src/mentipy/latex.tex}
+\input{../src/mentipy/server.tex}
+\input{../src/mentipy/cli.tex}
 
 
 \backmatter

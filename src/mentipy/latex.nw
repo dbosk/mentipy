@@ -1,0 +1,304 @@
+\chapter{LaTeX Integration}
+
+The PythonTeX integration is where the design becomes visible to end users.
+The helper functions must do both the side-effect work of registration and QR
+generation, and the presentational work of emitting LaTeX that fits naturally
+into a Beamer slide.
+
+<<[[latex.py]]>>=
+from __future__ import annotations
+
+<<imports>>
+
+<<constants>>
+<<functions>>
+@
+
+<<imports>>=
+from pathlib import Path
+
+from mentipy.qr import make_qr
+from mentipy.questions import MCQuestion, OpenQuestion, Question, ScaleQuestion
+from mentipy.store import (
+    BASE_URL_CONFIG,
+    DEFAULT_BASE_URL,
+    DEFAULT_QR_DIR,
+    DEFAULT_QR_FORMAT,
+    QR_DIR_CONFIG,
+    QR_FORMAT_CONFIG,
+    Store,
+    get_setting,
+)
+@
+
+The generated LaTeX is intentionally plain.  The QR code should be easy to place
+in a Beamer slide without forcing the surrounding theme to change.
+
+<<constants>>=
+LATEX_ESCAPES = {
+    "\\": r"\textbackslash{}",
+    "&": r"\&",
+    "%": r"\%",
+    "$": r"\$",
+    "#": r"\#",
+    "_": r"\_",
+    "{": r"\{",
+    "}": r"\}",
+    "~": r"\textasciitilde{}",
+    "^": r"\textasciicircum{}",
+}
+@
+
+The escape helper is small, but it is what keeps ordinary poll questions from
+breaking TeX when they happen to contain an underscore, percent sign, or other
+special character.
+
+<<functions>>=
+def _escape_latex(text: str) -> str:
+    return "".join(LATEX_ESCAPES.get(char, char) for char in text)
+
+
+def _join_url(base_url: str, prefix: str) -> str:
+    return f"{base_url.rstrip('/')}/{prefix}"
+@
+
+Each question kind needs slightly different explanatory text on the left-hand
+side of the slide.  Keeping those renderers separate lets the public wrappers
+stay tiny.
+
+<<functions>>=
+def _render_multiple_choice(question: MCQuestion) -> str:
+    prompt = (
+        "Choose one or more:" if question.multi else "Choose exactly one:"
+    )
+    lines = ["\\emph{" + prompt + "}", "\\begin{itemize}"]
+    lines.extend(f"\\item {_escape_latex(option)}" for option in question.options)
+    lines.append("\\end{itemize}")
+    return "\n".join(lines)
+
+
+def _render_open(question: OpenQuestion) -> str:
+    return "\n".join(
+        [
+            "\\begin{description}",
+            "\\item[Type] Free-text answer",
+            f"\\item[Limit] {question.max_chars} characters",
+            "\\end{description}",
+        ]
+    )
+
+
+def _render_scale(question: ScaleQuestion) -> str:
+    lines = [
+        "\\begin{description}",
+        f"\\item[Range] {question.low}--{question.high}",
+    ]
+
+    if question.low_label:
+        lines.append(f"\\item[Low] {_escape_latex(question.low_label)}")
+    if question.high_label:
+        lines.append(f"\\item[High] {_escape_latex(question.high_label)}")
+
+    lines.append("\\end{description}")
+    return "\n".join(lines)
+@
+
+The overall slide fragment stays the same across question types: a short left
+column describing the poll and a right column containing the QR code.
+
+<<functions>>=
+def _render_body(question: Question) -> str:
+    if isinstance(question, MCQuestion):
+        return _render_multiple_choice(question)
+    if isinstance(question, OpenQuestion):
+        return _render_open(question)
+    return _render_scale(question)
+
+
+def _render_question(question: Question, qr_path: Path) -> str:
+    parts = [
+        "\\begin{columns}[T,onlytextwidth]",
+        "\\column{0.62\\textwidth}",
+        f"\\textbf{{{_escape_latex(question.text)}}}",
+        "",
+        _render_body(question),
+        "\\column{0.33\\textwidth}",
+        "\\centering",
+        f"\\includegraphics{{{qr_path.as_posix()}}}",
+        "\\end{columns}",
+    ]
+    return "\n".join(parts)
+@
+
+The generic factory performs the side effects once, and the public wrappers only
+need to construct the appropriate question object.
+
+<<functions>>=
+def question(
+    prompt: Question,
+    *,
+    store: Store | None = None,
+    base_url: str | None = None,
+    qr_dir: str | Path | None = None,
+    qr_format: str | None = None,
+) -> str:
+    """Register ``prompt``, render its QR code, and return LaTeX."""
+
+    active_store = store or Store()
+    chosen_base = base_url or get_setting(BASE_URL_CONFIG, DEFAULT_BASE_URL)
+    chosen_dir = Path(qr_dir or get_setting(QR_DIR_CONFIG, DEFAULT_QR_DIR))
+    chosen_format = qr_format or get_setting(QR_FORMAT_CONFIG, DEFAULT_QR_FORMAT)
+
+    prefix = active_store.register(prompt)
+    qr_path = make_qr(
+        _join_url(chosen_base, prefix),
+        chosen_dir / f"Q-{prefix}.{chosen_format}",
+        fmt=chosen_format,
+    )
+    return _render_question(prompt, qr_path)
+
+
+def mc(
+    text: str,
+    options: list[str] | tuple[str, ...],
+    *,
+    multi: bool = False,
+    store: Store | None = None,
+    base_url: str | None = None,
+    qr_dir: str | Path | None = None,
+    qr_format: str | None = None,
+) -> str:
+    """Return LaTeX for a multiple-choice question."""
+
+    return question(
+        MCQuestion(text=text, options=tuple(options), multi=multi),
+        store=store,
+        base_url=base_url,
+        qr_dir=qr_dir,
+        qr_format=qr_format,
+    )
+
+
+def open_text(
+    text: str,
+    *,
+    max_chars: int = 280,
+    store: Store | None = None,
+    base_url: str | None = None,
+    qr_dir: str | Path | None = None,
+    qr_format: str | None = None,
+) -> str:
+    """Return LaTeX for an open free-text question."""
+
+    return question(
+        OpenQuestion(text=text, max_chars=max_chars),
+        store=store,
+        base_url=base_url,
+        qr_dir=qr_dir,
+        qr_format=qr_format,
+    )
+
+
+def scale(
+    text: str,
+    *,
+    low: int = 1,
+    high: int = 5,
+    low_label: str = "",
+    high_label: str = "",
+    store: Store | None = None,
+    base_url: str | None = None,
+    qr_dir: str | Path | None = None,
+    qr_format: str | None = None,
+) -> str:
+    """Return LaTeX for a numeric scale question."""
+
+    return question(
+        ScaleQuestion(
+            text=text,
+            low=low,
+            high=high,
+            low_label=low_label,
+            high_label=high_label,
+        ),
+        store=store,
+        base_url=base_url,
+        qr_dir=qr_dir,
+        qr_format=qr_format,
+    )
+@
+
+The tests pin the contract that later slide code depends on: each helper must
+register the question, write the QR code to the configured build directory, and
+mention that file in the returned LaTeX.
+
+<<test functions>>=
+def test_mc_registers_the_question_and_references_the_qr(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    rendered = mc(
+        "How was the lecture?",
+        ["Great", "OK", "Boring"],
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir="build",
+    )
+
+    [entry] = store.all_questions()
+    prefix = entry["url_prefix"]
+
+    assert "How was the lecture?" in rendered
+    assert f"\\includegraphics{{build/Q-{prefix}.pdf}}" in rendered
+    assert (tmp_path / "build" / f"Q-{prefix}.pdf").exists()
+
+
+def test_open_text_registers_the_question_and_references_the_qr(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    rendered = open_text(
+        "One thing to change?",
+        max_chars=140,
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir="build",
+    )
+
+    [entry] = store.all_questions()
+    prefix = entry["url_prefix"]
+
+    assert "One thing to change?" in rendered
+    assert f"\\includegraphics{{build/Q-{prefix}.pdf}}" in rendered
+    assert store.resolve(prefix) == entry["hash"]
+
+
+def test_scale_registers_the_question_and_references_the_qr(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    rendered = scale(
+        "Pace?",
+        low_label="Too slow",
+        high_label="Too fast",
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir="build",
+    )
+
+    [entry] = store.all_questions()
+    prefix = entry["url_prefix"]
+
+    assert "Pace?" in rendered
+    assert f"\\includegraphics{{build/Q-{prefix}.pdf}}" in rendered
+    assert store.question(entry["hash"]).kind == "scale"
+@
+
+<<test [[latex.py]]>>=
+from mentipy.latex import *
+from mentipy.store import *
+
+<<test functions>>
+@

@@ -1,0 +1,366 @@
+\chapter{Command-Line Interface}
+
+The CLI glues the earlier modules together.  It is intentionally thin: the real
+behaviour lives in the store, server, and LaTeX helpers, while the command line
+mainly resolves configuration defaults and presents the results in formats that
+fit a terminal.
+
+<<[[cli.py]]>>=
+from __future__ import annotations
+
+<<imports>>
+
+<<constants>>
+<<functions>>
+<<cli setup>>
+@
+
+<<imports>>=
+import csv
+import io
+import json
+import time
+from typing import Optional
+
+import typer
+
+from mentipy.server import serve as serve_http
+from mentipy.store import (
+    BASE_URL_CONFIG,
+    DEFAULT_BASE_URL,
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    DEFAULT_STORE_PATH,
+    HOST_CONFIG,
+    PORT_CONFIG,
+    STORE_CONFIG,
+    Store,
+    get_setting,
+    list_settings,
+    load_config,
+    normalize_config_key,
+    parse_config_value,
+    set_setting,
+)
+@
+
+The watcher redraws the terminal, so we keep the ANSI escape sequence in one
+named constant instead of sprinkling it through the loop.
+
+<<constants>>=
+CLEAR_SCREEN = "\033[2J\033[H"
+@
+
+The helpers below do the command-independent work: resolving prefixes,
+serialising exports, and formatting live watcher output.
+
+<<functions>>=
+def _configured_store(path: str | None) -> Store:
+    return Store(path or get_setting(STORE_CONFIG, DEFAULT_STORE_PATH))
+
+
+def _join_url(base_url: str, prefix: str) -> str:
+    return f"{base_url.rstrip('/')}/{prefix}"
+
+
+def _resolve_full_hash(store: Store, prefix: str) -> str:
+    full_hash = store.resolve(prefix)
+    if full_hash is not None:
+        return full_hash
+
+    matches = store.matches(prefix)
+    if len(matches) > 1:
+        raise typer.BadParameter(f"{prefix!r} matches multiple questions")
+    raise typer.BadParameter(f"{prefix!r} does not match any question")
+
+
+def _canonical_prefix(store: Store, prefix: str) -> str:
+    full_hash = _resolve_full_hash(store, prefix)
+    return store.metadata(full_hash)["url_prefix"]
+
+
+def _format_value(value) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _watch_snapshot(store: Store, prefix: str) -> str:
+    full_hash = _resolve_full_hash(store, prefix)
+    results = store.results(full_hash)
+    question = results["question"]
+    lines = [
+        question["text"],
+        f"Prefix: {results['url_prefix']}",
+        f"Responses: {results['total']}",
+        "",
+    ]
+
+    if question["kind"] == "mc":
+        for option, count in zip(question["options"], results["counts"]):
+            lines.append(f"{option}: {count}")
+        return "\n".join(lines)
+
+    if question["kind"] == "scale":
+        for value, count in results["counts"].items():
+            lines.append(f"{value}: {count}")
+        return "\n".join(lines)
+
+    if results["answers"]:
+        for answer in results["answers"]:
+            lines.append(f"{answer['ts']}: {answer['value']}")
+    else:
+        lines.append("No answers yet.")
+
+    return "\n".join(lines)
+
+
+def _results_csv(results: dict) -> str:
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["ts", "value"])
+
+    for answer in results["answers"]:
+        value = answer["value"]
+        if isinstance(value, list):
+            value = "|".join(str(item) for item in value)
+        writer.writerow([answer["ts"], value])
+
+    return buffer.getvalue().rstrip()
+@
+
+Typer lets us keep the public CLI declaration close to the implementation.
+
+<<cli setup>>=
+cli = typer.Typer(help="Self-hosted classroom polling.")
+config_cli = typer.Typer(help="Read and write mentipy configuration.")
+cli.add_typer(config_cli, name="config")
+
+
+@cli.command()
+def serve(
+    host: Optional[str] = typer.Option(None, help="Bind address."),
+    port: Optional[int] = typer.Option(None, help="Bind port."),
+    store: Optional[str] = typer.Option(None, help="Path to mentipy.json."),
+):
+    """Run the local polling server."""
+
+    chosen_host = host or get_setting(HOST_CONFIG, DEFAULT_HOST)
+    chosen_port = int(port or get_setting(PORT_CONFIG, DEFAULT_PORT))
+    serve_http(_configured_store(store), chosen_host, chosen_port)
+
+
+@cli.command()
+def watch(
+    prefix: str,
+    store: Optional[str] = typer.Option(None, help="Path to mentipy.json."),
+    interval: float = typer.Option(2.0, help="Refresh interval in seconds."),
+):
+    """Show live results for ``prefix`` in the terminal."""
+
+    active_store = _configured_store(store)
+
+    try:
+        while True:
+            typer.echo(CLEAR_SCREEN, nl=False)
+            typer.echo(_watch_snapshot(active_store, prefix))
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        return
+
+
+@cli.command()
+def export(
+    prefix: str,
+    format: str = typer.Option("json", help="Output format: json or csv."),
+    store: Optional[str] = typer.Option(None, help="Path to mentipy.json."),
+):
+    """Export answers for ``prefix``."""
+
+    active_store = _configured_store(store)
+    full_hash = _resolve_full_hash(active_store, prefix)
+    results = active_store.results(full_hash)
+
+    if format == "json":
+        typer.echo(json.dumps(results, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+
+    if format == "csv":
+        typer.echo(_results_csv(results))
+        return
+
+    raise typer.BadParameter("format must be either 'json' or 'csv'")
+
+
+@cli.command()
+def url(
+    prefix: str,
+    store: Optional[str] = typer.Option(None, help="Path to mentipy.json."),
+    base: Optional[str] = typer.Option(
+        None,
+        help="Override the configured base URL.",
+    ),
+):
+    """Print the canonical poll URL for ``prefix``."""
+
+    active_store = _configured_store(store)
+    chosen_base = base or get_setting(BASE_URL_CONFIG, DEFAULT_BASE_URL)
+    typer.echo(_join_url(chosen_base, _canonical_prefix(active_store, prefix)))
+
+
+@config_cli.command("get")
+def config_get(key: str):
+    """Read a mentipy configuration value."""
+
+    full_key = normalize_config_key(key)
+
+    try:
+        value = load_config().get(full_key)
+    except KeyError:
+        value = get_setting(full_key)
+
+    typer.echo(_format_value(value))
+
+
+@config_cli.command("set")
+def config_set(key: str, value: str):
+    """Store a mentipy configuration value."""
+
+    set_setting(key, parse_config_value(value))
+
+
+@config_cli.command("list")
+def config_list():
+    """List the built-in mentipy settings."""
+
+    for key, value in sorted(list_settings().items()):
+        typer.echo(f"{key} = {_format_value(value)}")
+
+
+def main():
+    """Run the mentipy CLI."""
+
+    cli()
+@
+
+The command tests mostly verify wiring.  The heavy lifting has already been
+tested in the lower-level modules.
+
+<<test functions>>=
+def test_config_set_get_round_trip(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+
+    result = runner.invoke(cli, ["config", "set", "port", "9000"])
+    assert result.exit_code == 0
+
+    result = runner.invoke(cli, ["config", "get", "port"])
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "9000"
+
+
+def test_serve_command_uses_config_defaults(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("host", "127.0.0.1")
+    set_setting("port", 9001)
+    set_setting("store", str(tmp_path / "answers.json"))
+    called = {}
+
+    def fake_serve(store, host, port):
+        called["path"] = store.path
+        called["host"] = host
+        called["port"] = port
+
+    monkeypatch.setattr("mentipy.cli.serve_http", fake_serve)
+
+    result = runner.invoke(cli, ["serve"])
+
+    assert result.exit_code == 0
+    assert called["path"] == tmp_path / "answers.json"
+    assert called["host"] == "127.0.0.1"
+    assert called["port"] == 9001
+@
+
+The interactive watcher test interrupts the sleep call after the first redraw so
+the command remains a normal unit test.
+
+<<test functions>>=
+def test_watch_command_prints_a_snapshot(tmp_path, monkeypatch):
+    runner = CliRunner()
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, 1)
+
+    def stop_after_first_sleep(_interval):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("mentipy.cli.time.sleep", stop_after_first_sleep)
+
+    result = runner.invoke(
+        cli,
+        ["watch", prefix, "--store", str(store.path), "--interval", "0.01"],
+    )
+
+    assert result.exit_code == 0
+    assert "Responses: 1" in result.stdout
+    assert "B: 1" in result.stdout
+@
+
+Export and URL commands should be deterministic wrappers around the stored data.
+
+<<test functions>>=
+def test_export_json_and_csv(tmp_path):
+    runner = CliRunner()
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, "hello")
+
+    result = runner.invoke(cli, ["export", prefix, "--store", str(store.path)])
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["total"] == 1
+
+    result = runner.invoke(
+        cli,
+        ["export", prefix, "--format", "csv", "--store", str(store.path)],
+    )
+    assert result.exit_code == 0
+    assert "ts,value" in result.stdout
+    assert "hello" in result.stdout
+
+
+def test_url_command_uses_the_canonical_prefix(tmp_path):
+    runner = CliRunner()
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    full_hash = store.resolve(prefix)
+
+    result = runner.invoke(
+        cli,
+        [
+            "url",
+            full_hash,
+            "--store",
+            str(store.path),
+            "--base",
+            "http://example.test:8080",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == f"http://example.test:8080/{prefix}"
+@
+
+<<test [[cli.py]]>>=
+import json
+
+from typer.testing import CliRunner
+
+from mentipy.cli import *
+from mentipy.questions import *
+from mentipy.store import *
+
+<<test functions>>
+@

@@ -1,42 +1,84 @@
 \chapter{mentipy}
 \label{mentipy}
 
-\texttt{mentipy} is a lightweight classroom-polling library to be
-developed as described in issue~\#2.
+\texttt{mentipy} is a self-hosted classroom polling system built around one
+simple invariant: a question's content determines its identity.  That identity
+is then reused by the slide generator, the HTTP server, and the results viewer.
 
-\section{Module structure}
+\section{Package facade}
 
-We start with the high-level module layout and fill in the details as
-features are introduced in subsequent commits.
+The implementation lives in smaller modules, but user code should not need to
+remember where each public helper resides.  The package root therefore re-exports
+the small surface we expect PythonTeX users and CLI users to care about.
 
 <<[[__init__.py]]>>=
 <<imports>>
 
 <<constants>>
-<<classes>>
 <<functions>>
 @
 
 <<imports>>=
+from mentipy.latex import mc, open_text, question, scale
+from mentipy.questions import (
+    MCQuestion,
+    OpenQuestion,
+    Question,
+    ScaleQuestion,
+    question_from_dict,
+    question_hash,
+)
+from mentipy.server import serve
+from mentipy.store import Store
 @
+
+The version constant keeps the generated package self-describing, while
+[[__all__]] documents the intended public API explicitly.
 
 <<constants>>=
+__version__ = "0.1"
+
+__all__ = [
+    "MCQuestion",
+    "OpenQuestion",
+    "Question",
+    "ScaleQuestion",
+    "Store",
+    "mc",
+    "open_text",
+    "question",
+    "question_from_dict",
+    "question_hash",
+    "scale",
+    "serve",
+    "__version__",
+]
 @
 
-<<classes>>=
-@
+There is no runtime logic here beyond the re-exports, so the generated package
+body is intentionally empty apart from the constants above.
 
 <<functions>>=
 @
 
-We also want a corresponding test file.
+The facade test makes the public contract explicit.
 
 <<test [[mentipy.py]]>>=
-import pytest
 from mentipy import *
 
 <<test functions>>
 @
 
 <<test functions>>=
+def test_package_facade_reexports_the_public_api():
+    assert MCQuestion.__name__ == "MCQuestion"
+    assert OpenQuestion.__name__ == "OpenQuestion"
+    assert ScaleQuestion.__name__ == "ScaleQuestion"
+    assert callable(mc)
+    assert callable(open_text)
+    assert callable(question)
+    assert callable(scale)
+    assert callable(serve)
+    assert Store.__name__ == "Store"
+    assert __version__ == "0.1"
 @
