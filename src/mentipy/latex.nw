@@ -3,7 +3,7 @@
 The PythonTeX integration is where the design becomes visible to end users.
 The helper functions must do both the side-effect work of registration and QR
 generation, and the presentational work of emitting LaTeX that fits naturally
-into a Beamer slide.
+either into a Beamer slide or into the book-style manual.
 
 <<[[latex.py]]>>=
 from __future__ import annotations
@@ -32,7 +32,7 @@ from mentipy.store import (
 @
 
 The generated LaTeX is intentionally plain.  The QR code should be easy to place
-in a Beamer slide without forcing the surrounding theme to change.
+without forcing the surrounding document to adopt a special theme.
 
 <<constants>>=
 LATEX_ESCAPES = {
@@ -47,6 +47,15 @@ LATEX_ESCAPES = {
     "~": r"\textasciitilde{}",
     "^": r"\textasciicircum{}",
 }
+
+DEFAULT_LAYOUT = "slide"
+VALID_LAYOUTS = {"slide", "article"}
+
+SLIDE_TEXT_WIDTH = "0.62\\textwidth"
+SLIDE_QR_WIDTH = "0.33\\textwidth"
+ARTICLE_TEXT_WIDTH = "0.62\\textwidth"
+ARTICLE_QR_WIDTH = "0.32\\textwidth"
+ARTICLE_QR_IMAGE_WIDTH = "0.95\\linewidth"
 @
 
 The escape helper is small, but it is what keeps ordinary poll questions from
@@ -103,8 +112,9 @@ def _render_scale(question: ScaleQuestion) -> str:
     return "\n".join(lines)
 @
 
-The overall slide fragment stays the same across question types: a short left
-column describing the poll and a right column containing the QR code.
+The question-specific body stays the same across layouts.  Only the outer
+wrapper changes: slides want columns, while the manual wants an article-style
+layout with a printed URL under the QR code as a manual fallback.
 
 <<functions>>=
 def _render_body(question: Question) -> str:
@@ -115,19 +125,57 @@ def _render_body(question: Question) -> str:
     return _render_scale(question)
 
 
-def _render_question(question: Question, qr_path: Path) -> str:
+def _render_slide_question(question: Question, qr_path: Path) -> str:
     parts = [
         "\\begin{columns}[T,onlytextwidth]",
-        "\\column{0.62\\textwidth}",
+        f"\\column{{{SLIDE_TEXT_WIDTH}}}",
         f"\\textbf{{{_escape_latex(question.text)}}}",
         "",
         _render_body(question),
-        "\\column{0.33\\textwidth}",
+        f"\\column{{{SLIDE_QR_WIDTH}}}",
         "\\centering",
         f"\\includegraphics{{{qr_path.as_posix()}}}",
         "\\end{columns}",
     ]
     return "\n".join(parts)
+
+
+def _render_article_question(
+    question: Question,
+    qr_path: Path,
+    url: str,
+) -> str:
+    parts = [
+        "\\noindent",
+        f"\\begin{{minipage}}[t]{{{ARTICLE_TEXT_WIDTH}}}",
+        f"\\textbf{{{_escape_latex(question.text)}}}",
+        "",
+        _render_body(question),
+        "\\end{minipage}\\hfill",
+        f"\\begin{{minipage}}[t]{{{ARTICLE_QR_WIDTH}}}",
+        "\\centering",
+        (
+            f"\\includegraphics[width={ARTICLE_QR_IMAGE_WIDTH}]"
+            f"{{{qr_path.as_posix()}}}"
+        ),
+        "",
+        f"\\small\\texttt{{{_escape_latex(url)}}}",
+        "\\end{minipage}",
+        "\\par\\medskip",
+    ]
+    return "\n".join(parts)
+
+
+def _render_question(
+    question: Question,
+    qr_path: Path,
+    url: str,
+    *,
+    layout: str = DEFAULT_LAYOUT,
+) -> str:
+    if layout == "slide":
+        return _render_slide_question(question, qr_path)
+    return _render_article_question(question, qr_path, url)
 @
 
 The generic factory performs the side effects once, and the public wrappers only
@@ -141,8 +189,12 @@ def question(
     base_url: str | None = None,
     qr_dir: str | Path | None = None,
     qr_format: str | None = None,
+    layout: str = DEFAULT_LAYOUT,
 ) -> str:
     """Register ``prompt``, render its QR code, and return LaTeX."""
+
+    if layout not in VALID_LAYOUTS:
+        raise ValueError(f"unknown layout: {layout!r}")
 
     active_store = store or Store()
     chosen_base = base_url or get_setting(BASE_URL_CONFIG, DEFAULT_BASE_URL)
@@ -150,12 +202,13 @@ def question(
     chosen_format = qr_format or get_setting(QR_FORMAT_CONFIG, DEFAULT_QR_FORMAT)
 
     prefix = active_store.register(prompt)
+    url = _join_url(chosen_base, prefix)
     qr_path = make_qr(
-        _join_url(chosen_base, prefix),
+        url,
         chosen_dir / f"Q-{prefix}.{chosen_format}",
         fmt=chosen_format,
     )
-    return _render_question(prompt, qr_path)
+    return _render_question(prompt, qr_path, url, layout=layout)
 
 
 def mc(
@@ -167,6 +220,7 @@ def mc(
     base_url: str | None = None,
     qr_dir: str | Path | None = None,
     qr_format: str | None = None,
+    layout: str = DEFAULT_LAYOUT,
 ) -> str:
     """Return LaTeX for a multiple-choice question."""
 
@@ -176,6 +230,7 @@ def mc(
         base_url=base_url,
         qr_dir=qr_dir,
         qr_format=qr_format,
+        layout=layout,
     )
 
 
@@ -187,6 +242,7 @@ def open_text(
     base_url: str | None = None,
     qr_dir: str | Path | None = None,
     qr_format: str | None = None,
+    layout: str = DEFAULT_LAYOUT,
 ) -> str:
     """Return LaTeX for an open free-text question."""
 
@@ -196,6 +252,7 @@ def open_text(
         base_url=base_url,
         qr_dir=qr_dir,
         qr_format=qr_format,
+        layout=layout,
     )
 
 
@@ -210,6 +267,7 @@ def scale(
     base_url: str | None = None,
     qr_dir: str | Path | None = None,
     qr_format: str | None = None,
+    layout: str = DEFAULT_LAYOUT,
 ) -> str:
     """Return LaTeX for a numeric scale question."""
 
@@ -225,12 +283,13 @@ def scale(
         base_url=base_url,
         qr_dir=qr_dir,
         qr_format=qr_format,
+        layout=layout,
     )
 @
 
-The tests pin the contract that later slide code depends on: each helper must
-register the question, write the QR code to the configured build directory, and
-mention that file in the returned LaTeX.
+The default tests pin the existing slide contract: each helper must register the
+question, write the QR code to the configured build directory, and mention that
+file in the returned LaTeX.
 
 <<test functions>>=
 def test_mc_registers_the_question_and_references_the_qr(tmp_path, monkeypatch):
@@ -294,6 +353,31 @@ def test_scale_registers_the_question_and_references_the_qr(tmp_path, monkeypatc
     assert "Pace?" in rendered
     assert f"\\includegraphics{{build/Q-{prefix}.pdf}}" in rendered
     assert store.question(entry["hash"]).kind == "scale"
+@
+
+The manual needs an article-style layout with a printed fallback URL, so we pin
+that separately without disturbing the slide default.
+
+<<test functions>>=
+def test_article_layout_prints_the_canonical_url(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    rendered = mc(
+        "How was the lecture?",
+        ["Great", "OK", "Boring"],
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir="build",
+        layout="article",
+    )
+
+    [entry] = store.all_questions()
+    prefix = entry["url_prefix"]
+
+    assert "\\begin{minipage}[t]" in rendered
+    assert "\\begin{columns}[T,onlytextwidth]" not in rendered
+    assert f"\\texttt{{http://example.test:8080/{prefix}}}" in rendered
 @
 
 <<test [[latex.py]]>>=
