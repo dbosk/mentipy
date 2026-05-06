@@ -105,7 +105,7 @@ print(
         base_url="http://localhost:8080",
         qr_dir="build",
         qr_format="png",
-        layout="article",
+        layout="article+qr",
     )
 )
 \end{pyblock}
@@ -130,7 +130,7 @@ print(
         ["Very confident", "Somewhat confident", "Not yet"],
         qr_dir="build",
         qr_format="png",
-        layout="article",
+        layout="article+qr",
     )
 )
 \end{pyblock}
@@ -172,7 +172,7 @@ print(
         base_url="http://localhost:8080",
         qr_dir="build",
         qr_format="png",
-        layout="article",
+        layout="article+qr",
     )
 )
 \end{pyblock}
@@ -196,7 +196,7 @@ print(
         base_url="http://localhost:8080",
         qr_dir="build",
         qr_format="png",
-        layout="article",
+        layout="article+qr",
     )
 )
 \end{pyblock}
@@ -223,6 +223,32 @@ print(
         base_url="http://localhost:8080",
         qr_dir="build",
         qr_format="png",
+        layout="article+qr",
+    )
+)
+\end{pyblock}
+
+Now, the rendered question:
+\begin{center}\printpythontex\end{center}
+
+\subsection{Wrapping Questions in an Environment}
+
+Some lecture templates already provide a dedicated environment for exercises or
+polls.  In that case the helper can emit only the question content inside that
+environment and leave the surrounding styling, counters, and references to the
+document class.
+
+\begin{pyblock}
+from mentipy.latex import mc
+
+print(
+    mc(
+        "Which proof step should we revisit?",
+        ["Setup", "Reduction", "Advantage bound"],
+        base_url="http://localhost:8080",
+        qr_dir="build",
+        qr_format="png",
+        environment="exercise",
         layout="article",
     )
 )
@@ -230,6 +256,31 @@ print(
 
 Now, the rendered question:
 \begin{center}\printpythontex\end{center}
+
+The environment itself must be defined by the surrounding document.  This manual
+adds a tiny [[exercise]] wrapper in [[doc/preamble.tex]], but real lecture notes
+can point [[environment=]] at any existing LaTeX environment.
+
+\subsection{Rendering from the Command Line}
+
+The same rendering knobs are available without PythonTeX when a lecturer wants
+to inspect the generated LaTeX directly:
+
+\begin{minted}{text}
+mentipy render mc "Which proof step should we revisit?" Setup Reduction \
+  "Advantage bound" --env exercise --layout article
+\end{minted}
+
+Environment resolution follows a simple precedence chain: [[--env]] wins over
+[[MENTIPY_QUESTION_ENVIRONMENT]], which wins over
+[[mentipy.question_environment]] in the config file.  The corresponding URL
+toggle uses [[--url]] or [[--no-url]] when passed, and otherwise falls back to
+[[mentipy.show_url]].
+
+When the same Beamer source must build both slides and an article handout,
+[[layout="auto"]] emits a [[\mode<presentation>]] branch with the QR-bearing
+slide layout and a [[\mode<article>]] branch with the flat article layout.  The
+article branch can still print the canonical URL, but it omits the QR code.
 
 \input{../src/mentipy/mentipy.tex}
 \input{../src/mentipy/questions.tex}

@@ -25,7 +25,12 @@ from typing import Optional
 
 import typer
 
-from mentipy.latex import regenerate_qrs
+from mentipy.latex import (
+    mc as render_mc_question,
+    open_text as render_open_question,
+    regenerate_qrs,
+    scale as render_scale_question,
+)
 from mentipy.public import PublicExposureError, PublicMode, expose
 from mentipy.server import serve as serve_http
 from mentipy.store import (
@@ -61,6 +66,8 @@ WARNING_TEXT = (
     "reachable from the public internet. Anyone with the URL can submit\n"
     "answers and, with --results, watch the live tally."
 )
+
+LAYOUT_HELP = "Question layout: slide, article, article+qr, or auto."
 @
 
 The helpers below do the command-independent work: resolving prefixes,
@@ -69,6 +76,27 @@ serialising exports, and formatting live watcher output.
 <<functions>>=
 def _configured_store(path: str | None) -> Store:
     return Store(path or get_setting(STORE_CONFIG, DEFAULT_STORE_PATH))
+
+
+def _render_common_kwargs(
+    *,
+    store: str | None,
+    environment: str | None,
+    show_url: bool | None,
+    base_url: str | None,
+    qr_dir: str | None,
+    qr_format: str | None,
+    layout: str,
+) -> dict:
+    return {
+        "store": _configured_store(store),
+        "environment": environment,
+        "show_url": show_url,
+        "base_url": base_url,
+        "qr_dir": qr_dir,
+        "qr_format": qr_format,
+        "layout": layout,
+    }
 
 
 def _join_url(base_url: str, prefix: str) -> str:
@@ -225,7 +253,9 @@ Typer lets us keep the public CLI declaration close to the implementation.
 <<cli setup>>=
 cli = typer.Typer(help="Self-hosted classroom polling.")
 config_cli = typer.Typer(help="Read and write mentipy configuration.")
+render_cli = typer.Typer(help="Render question LaTeX.")
 cli.add_typer(config_cli, name="config")
+cli.add_typer(render_cli, name="render")
 
 
 @cli.command(context_settings={"allow_extra_args": True})
@@ -267,6 +297,107 @@ def serve(
         chosen_port,
         public=public_mode,
         results=results,
+    )
+
+
+@render_cli.command("mc")
+def render_mc(
+    text: str,
+    options: list[str],
+    multi: bool = typer.Option(False, "--multi", help="Allow multiple answers."),
+    environment: Optional[str] = typer.Option(None, "--env", help="Wrap in a LaTeX environment."),
+    layout: str = typer.Option("slide", "--layout", help=LAYOUT_HELP),
+    url: Optional[bool] = typer.Option(None, "--url/--no-url", help="Show the printed URL when the layout supports it."),
+    base_url: Optional[str] = typer.Option(None, "--base-url", help="Override the configured base URL."),
+    qr_dir: Optional[str] = typer.Option(None, "--qr-dir", help="QR output directory."),
+    qr_format: Optional[str] = typer.Option(None, "--qr-format", help="QR image format."),
+    store: Optional[str] = typer.Option(None, help="Path to mentipy.json."),
+):
+    """Render a multiple-choice question as LaTeX."""
+
+    typer.echo(
+        render_mc_question(
+            text,
+            options,
+            multi=multi,
+            **_render_common_kwargs(
+                store=store,
+                environment=environment,
+                show_url=url,
+                base_url=base_url,
+                qr_dir=qr_dir,
+                qr_format=qr_format,
+                layout=layout,
+            ),
+        )
+    )
+
+
+@render_cli.command("open")
+def render_open(
+    text: str,
+    max_chars: int = typer.Option(280, "--max-chars", help="Maximum answer length."),
+    environment: Optional[str] = typer.Option(None, "--env", help="Wrap in a LaTeX environment."),
+    layout: str = typer.Option("slide", "--layout", help=LAYOUT_HELP),
+    url: Optional[bool] = typer.Option(None, "--url/--no-url", help="Show the printed URL when the layout supports it."),
+    base_url: Optional[str] = typer.Option(None, "--base-url", help="Override the configured base URL."),
+    qr_dir: Optional[str] = typer.Option(None, "--qr-dir", help="QR output directory."),
+    qr_format: Optional[str] = typer.Option(None, "--qr-format", help="QR image format."),
+    store: Optional[str] = typer.Option(None, help="Path to mentipy.json."),
+):
+    """Render an open-text question as LaTeX."""
+
+    typer.echo(
+        render_open_question(
+            text,
+            max_chars=max_chars,
+            **_render_common_kwargs(
+                store=store,
+                environment=environment,
+                show_url=url,
+                base_url=base_url,
+                qr_dir=qr_dir,
+                qr_format=qr_format,
+                layout=layout,
+            ),
+        )
+    )
+
+
+@render_cli.command("scale")
+def render_scale(
+    text: str,
+    low: int = typer.Option(1, "--low", help="Lowest scale value."),
+    high: int = typer.Option(5, "--high", help="Highest scale value."),
+    low_label: str = typer.Option("", "--low-label", help="Label for the low endpoint."),
+    high_label: str = typer.Option("", "--high-label", help="Label for the high endpoint."),
+    environment: Optional[str] = typer.Option(None, "--env", help="Wrap in a LaTeX environment."),
+    layout: str = typer.Option("slide", "--layout", help=LAYOUT_HELP),
+    url: Optional[bool] = typer.Option(None, "--url/--no-url", help="Show the printed URL when the layout supports it."),
+    base_url: Optional[str] = typer.Option(None, "--base-url", help="Override the configured base URL."),
+    qr_dir: Optional[str] = typer.Option(None, "--qr-dir", help="QR output directory."),
+    qr_format: Optional[str] = typer.Option(None, "--qr-format", help="QR image format."),
+    store: Optional[str] = typer.Option(None, help="Path to mentipy.json."),
+):
+    """Render a scale question as LaTeX."""
+
+    typer.echo(
+        render_scale_question(
+            text,
+            low=low,
+            high=high,
+            low_label=low_label,
+            high_label=high_label,
+            **_render_common_kwargs(
+                store=store,
+                environment=environment,
+                show_url=url,
+                base_url=base_url,
+                qr_dir=qr_dir,
+                qr_format=qr_format,
+                layout=layout,
+            ),
+        )
     )
 
 
@@ -663,6 +794,168 @@ def test_serve_command_closes_the_public_exposure_context(tmp_path, monkeypatch)
 
     assert result.exit_code == 0
     assert state == {"entered": True, "closed": True}
+@
+
+The render subcommands should stay as thin as the rest of the CLI: they build a
+store, delegate to the LaTeX helpers, and print the returned fragment.
+
+<<test functions>>=
+def test_render_mc_prints_slide_latex_and_writes_the_question(tmp_path):
+    runner = CliRunner()
+    store_path = tmp_path / "mentipy.json"
+
+    result = runner.invoke(
+        cli,
+        [
+            "render",
+            "mc",
+            "How was the lecture?",
+            "Great",
+            "OK",
+            "Boring",
+            "--store",
+            str(store_path),
+            "--base-url",
+            "http://example.test:8080",
+            "--qr-dir",
+            str(tmp_path / "build"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "How was the lecture?" in result.stdout
+    assert "\\includegraphics{" in result.stdout
+    assert Store(store_path).all_questions()
+
+
+def test_render_mc_env_option_wraps_the_question(tmp_path):
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "render",
+            "mc",
+            "How was the lecture?",
+            "Great",
+            "OK",
+            "--env",
+            "exercise",
+            "--store",
+            str(tmp_path / "mentipy.json"),
+            "--base-url",
+            "http://example.test:8080",
+            "--qr-dir",
+            str(tmp_path / "build"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "\\begin{exercise}" in result.stdout
+
+
+def test_render_mc_auto_layout_prints_both_mode_branches(tmp_path):
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "render",
+            "mc",
+            "How was the lecture?",
+            "Great",
+            "OK",
+            "--layout",
+            "auto",
+            "--store",
+            str(tmp_path / "mentipy.json"),
+            "--base-url",
+            "http://example.test:8080",
+            "--qr-dir",
+            str(tmp_path / "build"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "\\mode<presentation>" in result.stdout
+    assert "\\mode<article>" in result.stdout
+
+
+def test_render_mc_article_no_url_suppresses_printed_url(tmp_path):
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "render",
+            "mc",
+            "How was the lecture?",
+            "Great",
+            "OK",
+            "--layout",
+            "article",
+            "--no-url",
+            "--store",
+            str(tmp_path / "mentipy.json"),
+            "--base-url",
+            "http://example.test:8080",
+            "--qr-dir",
+            str(tmp_path / "build"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "\\texttt{http://example.test:8080/" not in result.stdout
+
+
+def test_render_mc_environment_follows_env_var_unless_env_option_wins(
+    tmp_path, monkeypatch
+):
+    runner = CliRunner()
+    monkeypatch.setenv("MENTIPY_QUESTION_ENVIRONMENT", "exo")
+
+    result = runner.invoke(
+        cli,
+        [
+            "render",
+            "mc",
+            "How was the lecture?",
+            "Great",
+            "OK",
+            "--store",
+            str(tmp_path / "mentipy.json"),
+            "--base-url",
+            "http://example.test:8080",
+            "--qr-dir",
+            str(tmp_path / "build"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "\\begin{exo}" in result.stdout
+
+    result = runner.invoke(
+        cli,
+        [
+            "render",
+            "mc",
+            "How was the lecture?",
+            "Great",
+            "OK",
+            "--env",
+            "exercise",
+            "--store",
+            str(tmp_path / "mentipy.json"),
+            "--base-url",
+            "http://example.test:8080",
+            "--qr-dir",
+            str(tmp_path / "build"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "\\begin{exercise}" in result.stdout
+    assert "\\begin{exo}" not in result.stdout
 @
 
 The interactive watcher test interrupts the sleep call after the first redraw so

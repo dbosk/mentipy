@@ -57,6 +57,8 @@ QR_FORMAT_CONFIG = "mentipy.qr_format"
 MIN_PREFIX_CONFIG = "mentipy.min_prefix"
 SSH_TUNNEL_CONFIG = "mentipy.ssh_tunnel"
 PUBLIC_BASE_URL_CONFIG = "mentipy.public_base_url"
+QUESTION_ENVIRONMENT_CONFIG = "mentipy.question_environment"
+SHOW_URL_CONFIG = "mentipy.show_url"
 
 DEFAULT_BASE_URL = "http://localhost:8080"
 DEFAULT_HOST = "0.0.0.0"
@@ -65,6 +67,8 @@ DEFAULT_STORE_PATH = "./mentipy.json"
 DEFAULT_QR_DIR = "./build"
 DEFAULT_QR_FORMAT = "pdf"
 DEFAULT_MIN_PREFIX = 4
+DEFAULT_QUESTION_ENVIRONMENT = None
+DEFAULT_SHOW_URL = True
 
 DEFAULT_SETTINGS = {
     BASE_URL_CONFIG: DEFAULT_BASE_URL,
@@ -74,6 +78,8 @@ DEFAULT_SETTINGS = {
     QR_DIR_CONFIG: DEFAULT_QR_DIR,
     QR_FORMAT_CONFIG: DEFAULT_QR_FORMAT,
     MIN_PREFIX_CONFIG: DEFAULT_MIN_PREFIX,
+    QUESTION_ENVIRONMENT_CONFIG: DEFAULT_QUESTION_ENVIRONMENT,
+    SHOW_URL_CONFIG: DEFAULT_SHOW_URL,
 }
 
 STORE_TEMPLATE = {"questions": {}, "answers": {}}
@@ -242,6 +248,25 @@ def test_missing_temp_configs_do_not_share_state(tmp_path, monkeypatch):
 
     assert get_setting(PUBLIC_BASE_URL_CONFIG) is None
     assert get_setting(BASE_URL_CONFIG, DEFAULT_BASE_URL) == DEFAULT_BASE_URL
+
+
+def test_question_rendering_settings_have_defaults_and_round_trip(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+
+    assert get_setting(QUESTION_ENVIRONMENT_CONFIG) is None
+    assert get_setting(SHOW_URL_CONFIG) is True
+    assert list_settings()["question_environment"] is None
+    assert list_settings()["show_url"] is True
+
+    set_setting("question_environment", "exercise")
+    set_setting("show_url", False)
+
+    assert get_setting(QUESTION_ENVIRONMENT_CONFIG) == "exercise"
+    assert get_setting(SHOW_URL_CONFIG) is False
+    assert list_settings()["question_environment"] == "exercise"
+    assert list_settings()["show_url"] is False
 @
 
 Registration needs two properties.  It must be idempotent for the same content,

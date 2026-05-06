@@ -15,6 +15,7 @@ from __future__ import annotations
 @
 
 <<imports>>=
+import os
 from pathlib import Path
 
 from mentipy.qr import make_qr
@@ -22,10 +23,14 @@ from mentipy.questions import MCQuestion, OpenQuestion, Question, ScaleQuestion
 from mentipy.store import (
     BASE_URL_CONFIG,
     DEFAULT_BASE_URL,
+    DEFAULT_QUESTION_ENVIRONMENT,
     DEFAULT_QR_DIR,
     DEFAULT_QR_FORMAT,
+    DEFAULT_SHOW_URL,
+    QUESTION_ENVIRONMENT_CONFIG,
     QR_DIR_CONFIG,
     QR_FORMAT_CONFIG,
+    SHOW_URL_CONFIG,
     Store,
     get_setting,
 )
@@ -49,7 +54,7 @@ LATEX_ESCAPES = {
 }
 
 DEFAULT_LAYOUT = "slide"
-VALID_LAYOUTS = {"slide", "article"}
+VALID_LAYOUTS = {"slide", "article", "article+qr", "auto"}
 
 SLIDE_TEXT_WIDTH = "0.62\\textwidth"
 SLIDE_QR_WIDTH = "0.33\\textwidth"
@@ -69,6 +74,27 @@ def _escape_latex(text: str) -> str:
 
 def _join_url(base_url: str, prefix: str) -> str:
     return f"{base_url.rstrip('/')}/{prefix}"
+
+
+def _resolve_environment(explicit: str | None) -> str | None:
+    if explicit is not None:
+        return explicit or None
+
+    env_override = os.environ.get("MENTIPY_QUESTION_ENVIRONMENT")
+    if env_override:
+        return env_override
+
+    return get_setting(
+        QUESTION_ENVIRONMENT_CONFIG,
+        DEFAULT_QUESTION_ENVIRONMENT,
+    )
+
+
+def _resolve_show_url(explicit: bool | None) -> bool:
+    if explicit is not None:
+        return explicit
+
+    return bool(get_setting(SHOW_URL_CONFIG, DEFAULT_SHOW_URL))
 @
 
 Each question kind needs slightly different explanatory text on the left-hand
@@ -113,8 +139,9 @@ def _render_scale(question: ScaleQuestion) -> str:
 @
 
 The question-specific body stays the same across layouts.  Only the outer
-wrapper changes: slides want columns, while the manual wants an article-style
-layout with a printed URL under the QR code as a manual fallback.
+wrapper changes: slides want columns, article handouts want a flat text flow,
+some printed manuals still want a QR block, and Beamer can emit both shapes
+from one source via its mode switch.
 
 <<functions>>=
 def _render_body(question: Question) -> str:
@@ -125,13 +152,33 @@ def _render_body(question: Question) -> str:
     return _render_scale(question)
 
 
-def _render_slide_question(question: Question, qr_path: Path) -> str:
+def _render_question_content(
+    question: Question,
+    environment: str | None,
+) -> str:
+    prompt = _escape_latex(question.text)
+    body = _render_body(question)
+
+    if environment:
+        return (
+            f"\\begin{{{environment}}}\n"
+            f"{prompt}\n\n"
+            f"{body}\n"
+            f"\\end{{{environment}}}"
+        )
+
+    return f"\\textbf{{{prompt}}}\n\n{body}"
+
+
+def _render_slide_question(
+    question: Question,
+    qr_path: Path,
+    environment: str | None,
+) -> str:
     parts = [
         "\\begin{columns}[T,onlytextwidth]",
         f"\\column{{{SLIDE_TEXT_WIDTH}}}",
-        f"\\textbf{{{_escape_latex(question.text)}}}",
-        "",
-        _render_body(question),
+        _render_question_content(question, environment),
         f"\\column{{{SLIDE_QR_WIDTH}}}",
         "\\centering",
         f"\\includegraphics{{{qr_path.as_posix()}}}",
@@ -142,16 +189,32 @@ def _render_slide_question(question: Question, qr_path: Path) -> str:
 
 def _render_article_question(
     question: Question,
+    url: str,
+    environment: str | None,
+    show_url: bool,
+) -> str:
+    parts = [_render_question_content(question, environment)]
+
+    if show_url:
+        parts.append(
+            f"\\par\\small URL: \\texttt{{{_escape_latex(url)}}}\\par\\medskip"
+        )
+
+    return "\n".join(parts)
+
+
+def _render_article_qr_question(
+    question: Question,
     qr_path: Path,
     url: str,
+    environment: str | None,
+    show_url: bool,
 ) -> str:
     parts = [
         "\\noindent",
         f"\\begin{{minipage}}[t]{{{ARTICLE_TEXT_WIDTH}}}",
         "\\vspace{0pt}",
-        f"\\textbf{{{_escape_latex(question.text)}}}",
-        "",
-        _render_body(question),
+        _render_question_content(question, environment),
         "\\end{minipage}\\hfill",
         f"\\begin{{minipage}}[t]{{{ARTICLE_QR_WIDTH}}}",
         "\\vspace{0pt}",
@@ -160,12 +223,32 @@ def _render_article_question(
             f"\\includegraphics[width={ARTICLE_QR_IMAGE_WIDTH}]"
             f"{{{qr_path.as_posix()}}}"
         ),
-        "",
-        f"\\small\\texttt{{{_escape_latex(url)}}}",
-        "\\end{minipage}",
-        "\\par\\medskip",
     ]
+
+    if show_url:
+        parts.extend(["", f"\\small\\texttt{{{_escape_latex(url)}}}"])
+
+    parts.extend(["\\end{minipage}", "\\par\\medskip"])
     return "\n".join(parts)
+
+
+def _render_auto_question(
+    question: Question,
+    qr_path: Path,
+    url: str,
+    environment: str | None,
+    show_url: bool,
+) -> str:
+    presentation = _render_slide_question(question, qr_path, environment)
+    article = _render_article_question(question, url, environment, show_url)
+    return (
+        "\\mode<presentation>{%\n"
+        f"{presentation}\n"
+        "}\n"
+        "\\mode<article>{%\n"
+        f"{article}\n"
+        "}"
+    )
 
 
 def _render_question(
@@ -173,11 +256,23 @@ def _render_question(
     qr_path: Path,
     url: str,
     *,
+    environment: str | None,
+    show_url: bool,
     layout: str = DEFAULT_LAYOUT,
 ) -> str:
     if layout == "slide":
-        return _render_slide_question(question, qr_path)
-    return _render_article_question(question, qr_path, url)
+        return _render_slide_question(question, qr_path, environment)
+    if layout == "article":
+        return _render_article_question(question, url, environment, show_url)
+    if layout == "article+qr":
+        return _render_article_qr_question(
+            question,
+            qr_path,
+            url,
+            environment,
+            show_url,
+        )
+    return _render_auto_question(question, qr_path, url, environment, show_url)
 @
 
 The generic factory performs the side effects once, and the public wrappers only
@@ -215,6 +310,8 @@ def question(
     base_url: str | None = None,
     qr_dir: str | Path | None = None,
     qr_format: str | None = None,
+    environment: str | None = None,
+    show_url: bool | None = None,
     layout: str = DEFAULT_LAYOUT,
 ) -> str:
     """Register ``prompt``, render its QR code, and return LaTeX."""
@@ -226,6 +323,8 @@ def question(
     chosen_base = base_url or get_setting(BASE_URL_CONFIG, DEFAULT_BASE_URL)
     chosen_dir = Path(qr_dir or get_setting(QR_DIR_CONFIG, DEFAULT_QR_DIR))
     chosen_format = qr_format or get_setting(QR_FORMAT_CONFIG, DEFAULT_QR_FORMAT)
+    chosen_env = _resolve_environment(environment)
+    chosen_show_url = _resolve_show_url(show_url)
 
     prefix = active_store.register(prompt)
     url = _join_url(chosen_base, prefix)
@@ -234,7 +333,14 @@ def question(
         chosen_dir / f"Q-{prefix}.{chosen_format}",
         fmt=chosen_format,
     )
-    return _render_question(prompt, qr_path, url, layout=layout)
+    return _render_question(
+        prompt,
+        qr_path,
+        url,
+        environment=chosen_env,
+        show_url=chosen_show_url,
+        layout=layout,
+    )
 
 
 def mc(
@@ -246,6 +352,8 @@ def mc(
     base_url: str | None = None,
     qr_dir: str | Path | None = None,
     qr_format: str | None = None,
+    environment: str | None = None,
+    show_url: bool | None = None,
     layout: str = DEFAULT_LAYOUT,
 ) -> str:
     """Return LaTeX for a multiple-choice question."""
@@ -256,6 +364,8 @@ def mc(
         base_url=base_url,
         qr_dir=qr_dir,
         qr_format=qr_format,
+        environment=environment,
+        show_url=show_url,
         layout=layout,
     )
 
@@ -268,6 +378,8 @@ def open_text(
     base_url: str | None = None,
     qr_dir: str | Path | None = None,
     qr_format: str | None = None,
+    environment: str | None = None,
+    show_url: bool | None = None,
     layout: str = DEFAULT_LAYOUT,
 ) -> str:
     """Return LaTeX for an open free-text question."""
@@ -278,6 +390,8 @@ def open_text(
         base_url=base_url,
         qr_dir=qr_dir,
         qr_format=qr_format,
+        environment=environment,
+        show_url=show_url,
         layout=layout,
     )
 
@@ -293,6 +407,8 @@ def scale(
     base_url: str | None = None,
     qr_dir: str | Path | None = None,
     qr_format: str | None = None,
+    environment: str | None = None,
+    show_url: bool | None = None,
     layout: str = DEFAULT_LAYOUT,
 ) -> str:
     """Return LaTeX for a numeric scale question."""
@@ -309,6 +425,8 @@ def scale(
         base_url=base_url,
         qr_dir=qr_dir,
         qr_format=qr_format,
+        environment=environment,
+        show_url=show_url,
         layout=layout,
     )
 @
@@ -381,11 +499,33 @@ def test_scale_registers_the_question_and_references_the_qr(tmp_path, monkeypatc
     assert store.question(entry["hash"]).kind == "scale"
 @
 
-The manual needs an article-style layout with a printed fallback URL, so we pin
-that separately without disturbing the slide default.
+The slide default remains unchanged, but the article family now has a flat
+handout layout, a QR-carrying variant, and a mode-aware Beamer renderer.
 
 <<test functions>>=
-def test_article_layout_prints_the_canonical_url(tmp_path, monkeypatch):
+def test_article_qr_layout_prints_the_canonical_url(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    rendered = mc(
+        "How was the lecture?",
+        ["Great", "OK", "Boring"],
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir="build",
+        layout="article+qr",
+    )
+
+    [entry] = store.all_questions()
+    prefix = entry["url_prefix"]
+
+    assert "\\begin{minipage}[t]" in rendered
+    assert rendered.count("\\vspace{0pt}") == 2
+    assert "\\begin{columns}[T,onlytextwidth]" not in rendered
+    assert f"\\texttt{{http://example.test:8080/{prefix}}}" in rendered
+
+
+def test_article_layout_is_flat_and_qrless(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
 
@@ -401,10 +541,250 @@ def test_article_layout_prints_the_canonical_url(tmp_path, monkeypatch):
     [entry] = store.all_questions()
     prefix = entry["url_prefix"]
 
-    assert "\\begin{minipage}[t]" in rendered
-    assert rendered.count("\\vspace{0pt}") == 2
-    assert "\\begin{columns}[T,onlytextwidth]" not in rendered
+    assert "\\begin{minipage}[t]" not in rendered
+    assert "\\includegraphics" not in rendered
     assert f"\\texttt{{http://example.test:8080/{prefix}}}" in rendered
+@
+
+The new environment and URL toggles should apply uniformly no matter which
+public helper or layout a caller chooses, so the tests pin precedence and the
+mode-aware structure directly on [[mc()]].
+
+<<test functions>>=
+def test_default_slide_layout_remains_plain_without_environment(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    rendered = mc(
+        "How was the lecture?",
+        ["Great", "OK", "Boring"],
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir="build",
+    )
+
+    assert "\\textbf{" in rendered
+    assert "\\begin{exercise}" not in rendered
+    assert "\\mode<" not in rendered
+
+
+def test_environment_from_config_wraps_every_layout(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("question_environment", "exercise")
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    slide = mc(
+        "How was the lecture?",
+        ["Great", "OK", "Boring"],
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir="build",
+        layout="slide",
+    )
+    article = mc(
+        "How was the lecture?",
+        ["Great", "OK", "Boring"],
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir="build",
+        layout="article",
+    )
+    article_qr = mc(
+        "How was the lecture?",
+        ["Great", "OK", "Boring"],
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir="build",
+        layout="article+qr",
+    )
+    auto = mc(
+        "How was the lecture?",
+        ["Great", "OK", "Boring"],
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir="build",
+        layout="auto",
+    )
+
+    assert "\\begin{exercise}" in slide
+    assert "\\textbf{" not in slide
+    assert slide.index("\\end{exercise}") < slide.index("\\includegraphics")
+
+    assert "\\begin{exercise}" in article
+    assert "\\textbf{" not in article
+    assert "\\includegraphics" not in article
+
+    assert "\\begin{exercise}" in article_qr
+    assert "\\textbf{" not in article_qr
+    assert article_qr.index("\\end{exercise}") < article_qr.index(
+        "\\includegraphics"
+    )
+
+    assert auto.count("\\begin{exercise}") == 2
+    assert auto.count("\\end{exercise}") == 2
+    assert "\\textbf{" not in auto
+    assert "\\mode<presentation>{" in auto
+    assert "\\mode<article>{" in auto
+    article_branch = auto.split("\\mode<article>{%\n", 1)[1]
+    assert "\\includegraphics" not in article_branch
+
+
+def test_explicit_environment_wraps_question_content(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    rendered = mc(
+        "How was the lecture?",
+        ["Great", "OK", "Boring"],
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir="build",
+        environment="myexercise",
+    )
+
+    assert "\\begin{myexercise}" in rendered
+    assert "\\end{myexercise}" in rendered
+    assert "\\textbf{" not in rendered
+
+
+def test_environment_variable_applies_when_call_leaves_it_unset(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MENTIPY_QUESTION_ENVIRONMENT", "exo")
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    rendered = mc(
+        "How was the lecture?",
+        ["Great", "OK", "Boring"],
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir="build",
+    )
+
+    assert "\\begin{exo}" in rendered
+
+
+def test_auto_layout_separates_presentation_and_article_output(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    rendered = mc(
+        "How was the lecture?",
+        ["Great", "OK", "Boring"],
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir="build",
+        layout="auto",
+    )
+
+    [entry] = store.all_questions()
+    prefix = entry["url_prefix"]
+    presentation = rendered.split("\\mode<presentation>{%\n", 1)[1].split(
+        "\n}\n\\mode<article>{%\n",
+        1,
+    )[0]
+    article = rendered.split("\\mode<article>{%\n", 1)[1].rsplit("\n}", 1)[0]
+
+    assert "\\begin{columns}[T,onlytextwidth]" in presentation
+    assert f"\\includegraphics{{build/Q-{prefix}.pdf}}" in presentation
+    assert "How was the lecture?" in article
+    assert f"\\texttt{{http://example.test:8080/{prefix}}}" in article
+    assert "\\includegraphics" not in article
+    assert "\\begin{minipage}" not in article
+
+
+def test_empty_environment_override_disables_configured_wrap(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("question_environment", "exercise")
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    rendered = mc(
+        "How was the lecture?",
+        ["Great", "OK", "Boring"],
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir="build",
+        environment="",
+    )
+
+    assert "\\begin{exercise}" not in rendered
+    assert "\\textbf{" in rendered
+
+
+def test_show_url_false_suppresses_url_in_article_variants(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    article = mc(
+        "How was the lecture?",
+        ["Great", "OK", "Boring"],
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir="build",
+        layout="article",
+        show_url=False,
+    )
+    article_qr = mc(
+        "How was the lecture?",
+        ["Great", "OK", "Boring"],
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir="build",
+        layout="article+qr",
+        show_url=False,
+    )
+    auto = mc(
+        "How was the lecture?",
+        ["Great", "OK", "Boring"],
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir="build",
+        layout="auto",
+        show_url=False,
+    )
+
+    assert "\\texttt{http://example.test:8080/" not in article
+    assert "\\texttt{http://example.test:8080/" not in article_qr
+    assert "\\includegraphics" in article_qr
+    assert "\\texttt{http://example.test:8080/" not in auto.split(
+        "\\mode<article>{%\n",
+        1,
+    )[1]
+
+
+def test_show_url_config_is_used_unless_call_overrides_it(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("show_url", False)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    hidden = mc(
+        "How was the lecture?",
+        ["Great", "OK", "Boring"],
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir="build",
+        layout="article",
+    )
+    visible = mc(
+        "How was the lecture?",
+        ["Great", "OK", "Boring"],
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir="build",
+        layout="article",
+        show_url=True,
+    )
+
+    assert "\\texttt{http://example.test:8080/" not in hidden
+    assert "\\texttt{http://example.test:8080/" in visible
 @
 
 The server-side QR regeneration path should rewrite every registered question,
