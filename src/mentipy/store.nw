@@ -475,7 +475,7 @@ def test_record_keeps_answers_from_concurrent_threads(tmp_path):
 
 Finally, the result view aggregates answers according to the question type.  We
 keep the raw answer log in the returned structure because the CLI export command
-and the admin JSON endpoint both need it.
+and the localhost JSON results endpoint both need it.
 
 <<store methods>>=
 def results(self, full_hash: str) -> dict[str, Any]:

@@ -142,12 +142,22 @@ def serve(
     host: Optional[str] = typer.Option(None, help="Bind address."),
     port: Optional[int] = typer.Option(None, help="Bind port."),
     store: Optional[str] = typer.Option(None, help="Path to mentipy.json."),
+    results: bool = typer.Option(
+        False,
+        "--results",
+        help="Redirect respondents to the live results page.",
+    ),
 ):
     """Run the local polling server."""
 
     chosen_host = host or get_setting(HOST_CONFIG, DEFAULT_HOST)
     chosen_port = int(port or get_setting(PORT_CONFIG, DEFAULT_PORT))
-    serve_http(_configured_store(store), chosen_host, chosen_port)
+    serve_http(
+        _configured_store(store),
+        chosen_host,
+        chosen_port,
+        public_results=results,
+    )
 
 
 @cli.command()
@@ -267,10 +277,11 @@ def test_serve_command_uses_config_defaults(tmp_path, monkeypatch):
     set_setting("store", str(tmp_path / "answers.json"))
     called = {}
 
-    def fake_serve(store, host, port):
+    def fake_serve(store, host, port, public_results=False):
         called["path"] = store.path
         called["host"] = host
         called["port"] = port
+        called["public_results"] = public_results
 
     monkeypatch.setattr("mentipy.cli.serve_http", fake_serve)
 
@@ -280,6 +291,35 @@ def test_serve_command_uses_config_defaults(tmp_path, monkeypatch):
     assert called["path"] == tmp_path / "answers.json"
     assert called["host"] == "127.0.0.1"
     assert called["port"] == 9001
+    assert called["public_results"] is False
+@
+
+The [[--results]] flag only changes the post-submit destination and the public
+visibility of the HTML results page, so the CLI test can pin the wiring with a
+simple spy.
+
+<<test functions>>=
+def test_serve_command_passes_public_results_flag(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    called = {}
+
+    def fake_serve(store, host, port, public_results=False):
+        called["path"] = store.path
+        called["host"] = host
+        called["port"] = port
+        called["public_results"] = public_results
+
+    monkeypatch.setattr("mentipy.cli.serve_http", fake_serve)
+
+    result = runner.invoke(
+        cli,
+        ["serve", "--store", str(tmp_path / "answers.json"), "--results"],
+    )
+
+    assert result.exit_code == 0
+    assert called["path"] == tmp_path / "answers.json"
+    assert called["public_results"] is True
 @
 
 The interactive watcher test interrupts the sleep call after the first redraw so
