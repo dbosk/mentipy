@@ -1,0 +1,42 @@
+\chapter{mentipy}
+\label{mentipy}
+
+\texttt{mentipy} is a lightweight classroom-polling library to be
+developed as described in issue~\#2.
+
+\section{Module structure}
+
+We start with the high-level module layout and fill in the details as
+features are introduced in subsequent commits.
+
+<<[[__init__.py]]>>=
+<<imports>>
+
+<<constants>>
+<<classes>>
+<<functions>>
+@
+
+<<imports>>=
+@
+
+<<constants>>=
+@
+
+<<classes>>=
+@
+
+<<functions>>=
+@
+
+We also want a corresponding test file.
+
+<<test [[mentipy.py]]>>=
+import pytest
+from mentipy import *
+
+<<test functions>>
+@
+
+<<test functions>>=
+@
