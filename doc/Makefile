@@ -10,6 +10,8 @@ weave: mentipy.tex
 
 ../src/mentipy/mentipy.tex: ../src/mentipy/mentipy.nw
 
+mentipy.pdf: $(wildcard build/*)
+
 ../%::
 	${MAKE} -C $(dir $@) $(notdir $@)
 
