@@ -89,6 +89,7 @@ DEFAULT_SETTINGS = {
 }
 
 STORE_TEMPLATE = {"questions": {}, "answers": {}}
+QR_TARGETS_KEY = "qr_targets"
 @
 
 The environment override makes tests cheap and also gives power users a simple
@@ -429,11 +430,23 @@ def test_resolve_accepts_exact_and_unique_prefixes(tmp_path, monkeypatch):
 The HTTP server needs cheap read helpers for rendering pages and the CLI needs a
 stable listing for index-like views.
 
+Those read helpers should expose the question contract, not the store's local
+housekeeping.  In particular, remembered QR artifact paths are operational
+metadata for later regeneration and would leak document-local filesystem layout
+if they escaped through [[metadata()]] or [[all_questions()]].
+
+<<functions>>=
+def _public_question_metadata(meta: dict[str, Any]) -> dict[str, Any]:
+    visible = dict(meta)
+    visible.pop(QR_TARGETS_KEY, None)
+    return visible
+@
+
 <<store methods>>=
 def metadata(self, full_hash: str) -> dict[str, Any]:
     """Return the stored metadata for ``full_hash``."""
 
-    return dict(self._data()["questions"][full_hash])
+    return _public_question_metadata(self._data()["questions"][full_hash])
 
 
 def question(self, full_hash: str) -> Question:
@@ -452,7 +465,7 @@ def all_questions(self) -> list[dict[str, Any]]:
         data["questions"].items(),
         key=lambda item: item[1]["url_prefix"],
     ):
-        row = dict(meta)
+        row = _public_question_metadata(meta)
         row["hash"] = full_hash
         rows.append(row)
 
@@ -467,6 +480,60 @@ def iter_prefixes(self) -> Iterator[str]:
 
     for meta in data["questions"].values():
         yield meta["url_prefix"]
+@
+
+QR regeneration needs one extra piece of operational metadata that should not
+change the question's identity: the concrete files earlier renders wrote.  The
+same question can appear in more than one document directory or image format,
+so we remember a de-duplicated list of those QR targets beside the canonical
+question payload.  We store the resolved absolute paths, because later
+[[mentipy serve]] runs may happen from a different working directory than the
+original render and still need to refresh the same files.
+
+<<store methods>>=
+def remember_qr_target(self, full_hash: str, qr_path: str | Path):
+    """Remember that ``full_hash`` wrote a QR artifact to ``qr_path``."""
+
+    with self._lock:
+        data = self._data()
+
+        if full_hash not in data["questions"]:
+            raise KeyError(full_hash)
+
+        meta = data["questions"][full_hash]
+        target = Path(qr_path).resolve().as_posix()
+        targets = meta.setdefault(QR_TARGETS_KEY, [])
+        if target in targets:
+            return
+
+        targets.append(target)
+        self._write(data)
+
+
+def qr_targets(self, full_hash: str) -> list[Path]:
+    """Return remembered QR artifact paths for ``full_hash``."""
+
+    meta = self._data()["questions"][full_hash]
+    return [Path(path) for path in meta.get(QR_TARGETS_KEY, [])]
+@
+
+Rendering the same question again into the same file should not multiply the
+remembered targets, and the public metadata helpers should still hide those
+local paths.
+
+<<test functions>>=
+def test_remember_qr_target_deduplicates_repeated_paths(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    full_hash = store.resolve(prefix)
+    target = tmp_path / "build" / f"Q-{prefix}.pdf"
+
+    store.remember_qr_target(full_hash, target)
+    store.remember_qr_target(full_hash, target)
+
+    assert store.qr_targets(full_hash) == [target.resolve()]
+    assert QR_TARGETS_KEY not in store.metadata(full_hash)
+    assert QR_TARGETS_KEY not in store.all_questions()[0]
 @
 
 Answer recording is the only mutating operation after registration, so it is
