@@ -1,4 +1,4 @@
-# AGENTS.md
+# Mentipy Repository Guide
 
 ## Source of truth
 
