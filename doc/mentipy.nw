@@ -141,17 +141,21 @@ print(
 Now, the rendered question:
 \begin{center}\printpythontex\end{center}
 
-These two examples form a deliberate contrast.
+\ltnote{%
+  \textbf{Variation pattern}: Contrast
 
-\begin{description}
-\item[What varies] Whether [[base_url]] is passed explicitly.
-\item[What stays invariant] The [[mc()]] helper, the question text, the
-  options, the QR output directory, the QR format, and the article layout.
-\item[What this reveals] When [[base_url]] is omitted, the helper reads the
-  [[mentipy.base_url]] setting.  If that setting is absent, it resolves the
-  current LAN address together with [[mentipy.port]], so the QR is a
-  compile-time placeholder that [[mentipy serve]] can refresh later.
-\end{description}
+  \textbf{What varies}: Whether [[base_url]] is passed explicitly.
+
+  \textbf{What stays invariant}: The [[mc()]] helper, the question text,
+  the options, the QR output directory, the QR format, and the article
+  layout.
+
+  \textbf{What this reveals}: When [[base_url]] is omitted, the helper
+  reads the [[mentipy.base_url]] setting.  If that setting is absent, it
+  resolves the current LAN address together with [[mentipy.port]], so the
+  QR is a compile-time placeholder that [[mentipy serve]] can refresh
+  later.
+}
 
 \section{Multiple-Choice Poll}
 
@@ -288,18 +292,21 @@ print(
 Now, the rendered question:
 \printpythontex
 
-These two environment examples form a deliberate contrast.
+\ltnote{%
+  \textbf{Variation pattern}: Contrast
 
-\begin{description}
-\item[What varies] Whether [[show_url]] is left at its default value or set to
-  [[False]].
-\item[What stays invariant] The [[mc()]] helper, the question text, the
-  options, the base URL, the QR settings, the [[exercise]] environment, and the
-  article layout.
-\item[What this reveals] The environment wrapper and the question body are
-  independent from the trailing respondent URL, so article layouts can keep the
-  exercise styling while suppressing the printed link.
-\end{description}
+  \textbf{What varies}: Whether [[show_url]] is left at its default value
+  or set to [[False]].
+
+  \textbf{What stays invariant}: The [[mc()]] helper, the question text,
+  the options, the base URL, the QR settings, the [[exercise]]
+  environment, and the article layout.
+
+  \textbf{What this reveals}: The environment wrapper and the question
+  body are independent from the trailing respondent URL, so article
+  layouts can keep the exercise styling while suppressing the printed
+  link.
+}
 
 \subsection{Rendering from the Command Line}
 
