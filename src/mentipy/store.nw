@@ -45,7 +45,8 @@ need the same defaults, and they must agree even when the package is imported
 outside the [[mentipy]] command.  We therefore compute the config file path from
 the fixed application name, not from [[sys.argv[0]]].  The built-in settings
 table also serves as the source for configuration discovery, so keys that
-default to [[None]] still belong there.
+default to [[None]] still belong there.  In particular,
+[[mentipy.base_url]] uses [[None]] to mean \enquote{resolve the LAN URL later}.
 
 <<constants>>=
 CONFIG_NAMESPACE = "mentipy"
@@ -62,7 +63,7 @@ PUBLIC_BASE_URL_CONFIG = "mentipy.public_base_url"
 QUESTION_ENVIRONMENT_CONFIG = "mentipy.question_environment"
 SHOW_URL_CONFIG = "mentipy.show_url"
 
-DEFAULT_BASE_URL = "http://localhost:8080"
+DEFAULT_BASE_URL = None
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8080
 DEFAULT_STORE_PATH = "./mentipy.json"
@@ -251,7 +252,9 @@ def test_missing_temp_configs_do_not_share_state(tmp_path, monkeypatch):
     monkeypatch.setenv("MENTIPY_CONFIG", str(second))
 
     assert get_setting(PUBLIC_BASE_URL_CONFIG) is None
-    assert get_setting(BASE_URL_CONFIG, DEFAULT_BASE_URL) == DEFAULT_BASE_URL
+    assert DEFAULT_BASE_URL is None
+    assert get_setting(BASE_URL_CONFIG, DEFAULT_BASE_URL) is None
+    assert list_settings()["base_url"] is None
     assert list_settings()["public_base_url"] is None
     assert list_settings()["ssh_tunnel"] is None
 

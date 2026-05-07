@@ -83,12 +83,15 @@ for lectures, but it means the public URL should be treated like a shared room
 link rather than a private admin interface.
 
 The other workflow consequence is that QR codes are generated when slides
-compile, not when the server starts.  If [[mentipy serve --public]] derives a
-different base URL than the one used during slide compilation, it regenerates
-the QR images and tells the lecturer to recompile the slides so the PDF embeds
-the new codes.  Users who front the public endpoint with HTTPS can override the
-derived URL by setting [[mentipy.public_base_url]], for example to point the QR
-codes at a TLS-terminating reverse proxy while still using the same local
+compile, not when the server starts.  If [[mentipy.base_url]] is unset, that
+compile-time pass uses the current LAN address as a scratch placeholder.  Then
+[[mentipy serve]] resolves the address it will actually serve, rewrites the QR
+images, and tells the lecturer to recompile the slides so the PDF embeds the
+new codes.  If [[mentipy serve --public]] derives a different public URL, that
+public address still takes precedence over the LAN placeholder.  Users who
+front the public endpoint with HTTPS can override the derived URL by setting
+[[mentipy.public_base_url]], for example to point the QR codes at a
+TLS-terminating reverse proxy while still using the same local
 [[mentipy serve --public ssh]] session.
 
 \section{Single-Choice Poll}
@@ -118,7 +121,7 @@ instead of repeating it in every call.  The next example therefore keeps the
 same helper, question, and QR settings, but omits [[base_url]] so that the
 fallback path becomes visible.
 
-\subsection{The Same Poll with the Configured Default}
+\subsection{The Same Poll with the Auto-Resolved Default}
 
 The code used to generate the following question and QR code is shown below.
 \begin{pyblock}
@@ -145,9 +148,9 @@ These two examples form a deliberate contrast.
 \item[What stays invariant] The [[mc()]] helper, the question text, the
   options, the QR output directory, the QR format, and the article layout.
 \item[What this reveals] When [[base_url]] is omitted, the helper reads the
-  [[mentipy.base_url]] setting.  If that setting is absent, it falls back to
-  [[http://localhost:8080]], which is why the rendered URL still matches the
-  local server command shown at the start of the chapter.
+  [[mentipy.base_url]] setting.  If that setting is absent, it resolves the
+  current LAN address together with [[mentipy.port]], so the QR is a
+  compile-time placeholder that [[mentipy serve]] can refresh later.
 \end{description}
 
 \section{Multiple-Choice Poll}
@@ -271,11 +274,33 @@ mentipy render mc "Which proof step should we revisit?" Setup Reduction \
   "Advantage bound" --env exercise --layout article
 \end{minted}
 
+Once a question has been registered, [[mentipy url]] can recompute the
+respondent-facing link without starting the server:
+
+\begin{minted}{text}
+mentipy url a627 --port 9134
+mentipy url a627 --public ssh
+\end{minted}
+
 Environment resolution follows a simple precedence chain: [[--env]] wins over
 [[MENTIPY_QUESTION_ENVIRONMENT]], which wins over
 [[mentipy.question_environment]] in the config file.  The corresponding URL
 toggle uses [[--url]] or [[--no-url]] when passed, and otherwise falls back to
 [[mentipy.show_url]].
+
+The URL-affecting flags on [[mentipy url]] mirror [[mentipy serve]].
+[[--port]] chooses the listener port for local URLs, and [[--public]] reuses
+the same UPnP or SSH exposure logic.  Bare [[--public]] still defaults to
+UPnP, [[ssh]] mode reads [[mentipy.ssh_tunnel]], and
+[[mentipy.public_base_url]] overrides any derived public URL.  A manual
+[[--base]] override still works for local URLs, but it cannot be combined with
+[[--public]] because the public modes already compute the respondent-facing
+base URL.
+
+Since the exact public URL is only known after the exposure strategy runs,
+[[mentipy url --public]] briefly enters the same exposure context as
+[[mentipy serve --public]], prints the URL, and then tears that exposure down
+again.
 
 When the same Beamer source must build both slides and an article handout,
 [[layout="auto"]] emits a [[\mode<presentation>]] branch with the QR-bearing
@@ -286,6 +311,7 @@ article branch can still print the canonical URL, but it omits the QR code.
 \input{../src/mentipy/questions.tex}
 \input{../src/mentipy/qr.tex}
 \input{../src/mentipy/store.tex}
+\input{../src/mentipy/network.tex}
 \input{../src/mentipy/latex.tex}
 \input{../src/mentipy/server.tex}
 \input{../src/mentipy/public.tex}

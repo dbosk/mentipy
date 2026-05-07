@@ -18,15 +18,17 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from mentipy.network import resolve_base_url
 from mentipy.qr import make_qr
 from mentipy.questions import MCQuestion, OpenQuestion, Question, ScaleQuestion
 from mentipy.store import (
     BASE_URL_CONFIG,
-    DEFAULT_BASE_URL,
+    DEFAULT_PORT,
     DEFAULT_QUESTION_ENVIRONMENT,
     DEFAULT_QR_DIR,
     DEFAULT_QR_FORMAT,
     DEFAULT_SHOW_URL,
+    PORT_CONFIG,
     QUESTION_ENVIRONMENT_CONFIG,
     QR_DIR_CONFIG,
     QR_FORMAT_CONFIG,
@@ -276,7 +278,11 @@ def _render_question(
 @
 
 The generic factory performs the side effects once, and the public wrappers only
-need to construct the appropriate question object.
+need to construct the appropriate question object.  When no base URL is pinned,
+the helper still has to bake some URL into the QR image, so it resolves the
+current LAN address using the configured port.  That compile-time URL is only a
+placeholder: [[mentipy serve]] may later regenerate every QR image so the files
+match the address respondents should actually use.
 
 <<functions>>=
 def regenerate_qrs(
@@ -320,7 +326,11 @@ def question(
         raise ValueError(f"unknown layout: {layout!r}")
 
     active_store = store or Store()
-    chosen_base = base_url or get_setting(BASE_URL_CONFIG, DEFAULT_BASE_URL)
+    raw_base = base_url if base_url is not None else get_setting(BASE_URL_CONFIG)
+    chosen_base = resolve_base_url(
+        raw_base,
+        int(get_setting(PORT_CONFIG, DEFAULT_PORT)),
+    )
     chosen_dir = Path(qr_dir or get_setting(QR_DIR_CONFIG, DEFAULT_QR_DIR))
     chosen_format = qr_format or get_setting(QR_FORMAT_CONFIG, DEFAULT_QR_FORMAT)
     chosen_env = _resolve_environment(environment)
@@ -497,6 +507,35 @@ def test_scale_registers_the_question_and_references_the_qr(tmp_path, monkeypatc
     assert "Pace?" in rendered
     assert f"\\includegraphics{{build/Q-{prefix}.pdf}}" in rendered
     assert store.question(entry["hash"]).kind == "scale"
+
+
+def test_question_resolves_local_ip_when_base_url_unset(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("port", 9123)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    called = {}
+
+    def fake_resolve(value, port):
+        called["value"] = value
+        called["port"] = port
+        return f"http://192.0.2.25:{port}"
+
+    monkeypatch.setattr("mentipy.latex.resolve_base_url", fake_resolve)
+
+    rendered = mc(
+        "How was the lecture?",
+        ["Great", "OK", "Boring"],
+        store=store,
+        qr_dir="build",
+        layout="article",
+    )
+
+    [entry] = store.all_questions()
+    prefix = entry["url_prefix"]
+
+    assert called == {"value": None, "port": 9123}
+    assert f"\\texttt{{http://192.0.2.25:9123/{prefix}}}" in rendered
 @
 
 The slide default remains unchanged, but the article family now has a flat
