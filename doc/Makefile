@@ -10,8 +10,6 @@ weave: mentipy.tex
 
 ../src/mentipy/mentipy.tex: ../src/mentipy/mentipy.nw
 
-mentipy.pdf: $(wildcard build/*)
-
 ../%::
 	${MAKE} -C $(dir $@) $(notdir $@)
 
@@ -24,9 +22,18 @@ mentipy.pdf: ${TEX_OUTDIR}/build
 mentipy.pdf: mentipy.tex ../src/mentipy/mentipy.tex
 mentipy.pdf: bibliography.bib preamble.tex
 
+mentipy.pdf: $(wildcard build/*.pdf_tex)
+mentipy.pdf: $(wildcard build/*.pdf)
+
+.PHONY: serve
+serve: mentipy.pdf
+	mentipy serve --public --results &
+	pdflatex mentipy.tex
+
 .PHONY: clean
 clean:
 	${RM} mentipy.tex mentipy.pdf
+	${RM} -R build
 
 .PHONY: distclean
 distclean:
