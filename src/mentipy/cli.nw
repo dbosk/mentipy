@@ -20,23 +20,35 @@ from contextlib import contextmanager
 import csv
 import io
 import json
+import shutil
+import textwrap
 import time
 from typing import Optional
 
 import typer
 
-from mentipy.latex import regenerate_qrs
+from mentipy.latex import (
+    mc as render_mc_question,
+    open_text as render_open_question,
+    regenerate_qrs,
+    scale as render_scale_question,
+)
+from mentipy.network import resolve_base_url
 from mentipy.public import PublicExposureError, PublicMode, expose
 from mentipy.server import serve as serve_http
 from mentipy.store import (
     BASE_URL_CONFIG,
-    DEFAULT_BASE_URL,
     DEFAULT_HOST,
     DEFAULT_PORT,
     DEFAULT_STORE_PATH,
     HOST_CONFIG,
+    MIN_PREFIX_CONFIG,
     PUBLIC_BASE_URL_CONFIG,
     PORT_CONFIG,
+    QR_DIR_CONFIG,
+    QR_FORMAT_CONFIG,
+    QUESTION_ENVIRONMENT_CONFIG,
+    SHOW_URL_CONFIG,
     SSH_TUNNEL_CONFIG,
     STORE_CONFIG,
     Store,
@@ -49,12 +61,99 @@ from mentipy.store import (
 )
 @
 
-The watcher redraws the terminal, and the public-exposure flow prints a fixed
-warning.  Keeping both strings here avoids repeating terminal-specific details
-inside the command bodies.
+The watcher redraws the terminal, the public-exposure flow prints a fixed
+warning, and several commands share the same configuration-backed defaults.
+Keeping the user-facing strings here makes the help text consistent and exposes
+the relevant configuration keys wherever users look for them.
 
 <<constants>>=
 CLEAR_SCREEN = "\033[2J\033[H"
+
+CONFIG_KEYS = (
+    BASE_URL_CONFIG,
+    HOST_CONFIG,
+    MIN_PREFIX_CONFIG,
+    PORT_CONFIG,
+    PUBLIC_BASE_URL_CONFIG,
+    QR_DIR_CONFIG,
+    QR_FORMAT_CONFIG,
+    QUESTION_ENVIRONMENT_CONFIG,
+    SHOW_URL_CONFIG,
+    SSH_TUNNEL_CONFIG,
+    STORE_CONFIG,
+)
+
+CONFIG_HELP = (
+    "Read and write mentipy configuration. Built-in settings: "
+    + ", ".join(key.split(".", 1)[1] for key in CONFIG_KEYS)
+    + "."
+)
+
+HOST_HELP = f"Bind address. Defaults to config setting {HOST_CONFIG}."
+PORT_HELP = f"Bind port. Defaults to config setting {PORT_CONFIG}."
+STORE_HELP = f"Path to mentipy.json. Defaults to config setting {STORE_CONFIG}."
+PUBLIC_HELP = (
+    "Expose the server publicly. Bare --public defaults to upnp. SSH mode "
+    f"reads {SSH_TUNNEL_CONFIG}, and QR regeneration prefers "
+    f"{PUBLIC_BASE_URL_CONFIG}."
+)
+RESULTS_HELP = "Redirect respondents to the live results page."
+ENVIRONMENT_HELP = (
+    "Wrap in a LaTeX environment. Defaults to config setting "
+    f"{QUESTION_ENVIRONMENT_CONFIG}."
+)
+URL_VISIBILITY_HELP = (
+    "Show the printed URL when the layout supports it. Defaults to config "
+    f"setting {SHOW_URL_CONFIG}."
+)
+BASE_URL_HELP = (
+    "Override the configured base URL from config setting "
+    f"{BASE_URL_CONFIG}. Use 'auto' to resolve the current LAN address."
+)
+QR_DIR_HELP = f"QR output directory. Defaults to config setting {QR_DIR_CONFIG}."
+QR_FORMAT_HELP = (
+    f"QR image format. Defaults to config setting {QR_FORMAT_CONFIG}."
+)
+LAYOUT_HELP = "Question layout: slide, article, article+qr, or auto."
+
+HOST_OPTION = typer.Option(None, help=HOST_HELP)
+PORT_OPTION = typer.Option(None, help=PORT_HELP)
+STORE_OPTION = typer.Option(None, help=STORE_HELP)
+PUBLIC_OPTION = typer.Option(False, "--public", help=PUBLIC_HELP)
+RESULTS_OPTION = typer.Option(False, "--results", help=RESULTS_HELP)
+ENVIRONMENT_OPTION = typer.Option(None, "--env", help=ENVIRONMENT_HELP)
+LAYOUT_OPTION = typer.Option("slide", "--layout", help=LAYOUT_HELP)
+URL_VISIBILITY_OPTION = typer.Option(
+    None,
+    "--url/--no-url",
+    help=URL_VISIBILITY_HELP,
+)
+RENDER_BASE_URL_OPTION = typer.Option(
+    None,
+    "--base-url",
+    help=BASE_URL_HELP,
+)
+URL_BASE_OPTION = typer.Option(None, "--base", help=BASE_URL_HELP)
+QR_DIR_OPTION = typer.Option(None, "--qr-dir", help=QR_DIR_HELP)
+QR_FORMAT_OPTION = typer.Option(None, "--qr-format", help=QR_FORMAT_HELP)
+WATCH_INTERVAL_OPTION = typer.Option(
+    2.0,
+    help="Refresh interval in seconds.",
+)
+EXPORT_FORMAT_OPTION = typer.Option(
+    "json",
+    help="Output format: json or csv.",
+)
+LIST_FULL_OPTION = typer.Option(
+    False,
+    "--full",
+    help="Show the full question text in a wrapped table.",
+)
+
+LIST_PREVIEW_WIDTH = 30
+LIST_COLUMN_GAP = 2
+LIST_FALLBACK_WIDTH = 80
+LIST_MIN_TEXT_WIDTH = 20
 
 WARNING_TEXT = (
     "Warning: exposing mentipy makes its unauthenticated polling pages\n"
@@ -64,11 +163,42 @@ WARNING_TEXT = (
 @
 
 The helpers below do the command-independent work: resolving prefixes,
-serialising exports, and formatting live watcher output.
+serialising exports, and formatting question listings plus live watcher output.
 
 <<functions>>=
 def _configured_store(path: str | None) -> Store:
     return Store(path or get_setting(STORE_CONFIG, DEFAULT_STORE_PATH))
+
+
+def _configured_port(port: int | None) -> int:
+    return int(port or get_setting(PORT_CONFIG, DEFAULT_PORT))
+
+
+def _configured_base(base: str | None) -> str | None:
+    if base is not None:
+        return base
+    return get_setting(BASE_URL_CONFIG)
+
+
+def _render_common_kwargs(
+    *,
+    store: str | None,
+    environment: str | None,
+    show_url: bool | None,
+    base_url: str | None,
+    qr_dir: str | None,
+    qr_format: str | None,
+    layout: str,
+) -> dict:
+    return {
+        "store": _configured_store(store),
+        "environment": environment,
+        "show_url": show_url,
+        "base_url": base_url,
+        "qr_dir": qr_dir,
+        "qr_format": qr_format,
+        "layout": layout,
+    }
 
 
 def _join_url(base_url: str, prefix: str) -> str:
@@ -95,6 +225,56 @@ def _format_value(value) -> str:
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False)
+
+
+def _single_line_text(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _question_summary(text: str) -> str:
+    text = _single_line_text(text)
+    if len(text) <= LIST_PREVIEW_WIDTH:
+        return text
+    return text[: LIST_PREVIEW_WIDTH - 3] + "..."
+
+
+def _terminal_width() -> int:
+    return shutil.get_terminal_size((LIST_FALLBACK_WIDTH, 24)).columns
+
+
+def _question_listing(entries: list[dict[str, object]], *, full: bool) -> str:
+    if not entries:
+        return "No questions registered yet."
+
+    if not full:
+        return "\n".join(
+            f'{entry["url_prefix"]}  {_question_summary(str(entry["text"]))}'
+            for entry in entries
+        )
+
+    prefix_width = max(len(str(entry["url_prefix"])) for entry in entries)
+    text_width = max(
+        LIST_MIN_TEXT_WIDTH,
+        _terminal_width() - prefix_width - LIST_COLUMN_GAP,
+    )
+    lines = []
+
+    for entry in entries:
+        prefix = str(entry["url_prefix"])
+        wrapped = textwrap.wrap(
+            _single_line_text(str(entry["text"])),
+            width=text_width,
+            break_long_words=False,
+            break_on_hyphens=False,
+        ) or [""]
+        lines.append(
+            f"{prefix:<{prefix_width}}{' ' * LIST_COLUMN_GAP}{wrapped[0]}"
+        )
+        indent = " " * (prefix_width + LIST_COLUMN_GAP)
+        for line in wrapped[1:]:
+            lines.append(f"{indent}{line}")
+
+    return "\n".join(lines)
 
 
 def _watch_snapshot(store: Store, prefix: str) -> str:
@@ -144,6 +324,8 @@ def _results_csv(results: dict) -> str:
 def _parse_public_mode(
     ctx: typer.Context,
     public: bool,
+    *,
+    command: str,
 ) -> PublicMode | None:
     extras = list(ctx.args)
 
@@ -151,7 +333,7 @@ def _parse_public_mode(
         if extras:
             raise typer.BadParameter(
                 f"unexpected extra argument {extras[0]!r}",
-                param_hint="serve",
+                param_hint=command,
             )
         return None
 
@@ -174,14 +356,20 @@ def _parse_public_mode(
 
     return mode
 
+@
 
-def _serve_publicly(
-    active_store: Store,
-    chosen_host: str,
-    chosen_port: int,
-    *,
+Both [[serve]] and [[url]] need the same public URL semantics: SSH mode must
+read [[SSH_TUNNEL_CONFIG]], [[PUBLIC_BASE_URL_CONFIG]] must override any derived
+URL, and transport errors should surface as a short CLI diagnostic. A shared
+context manager keeps those rules in one place and lets [[serve]] hold the
+exposure open while [[url]] only borrows it long enough to print the matching
+URL.
+
+<<functions>>=
+@contextmanager
+def _public_url_context(
     public: PublicMode,
-    results: bool,
+    local_port: int,
 ):
     typer.echo(WARNING_TEXT, err=True)
 
@@ -195,64 +383,80 @@ def _serve_publicly(
             )
 
     try:
-        with expose(public, chosen_port, ssh_endpoint=ssh_endpoint) as derived_url:
-            public_url = get_setting(PUBLIC_BASE_URL_CONFIG) or derived_url
-            configured_base = get_setting(BASE_URL_CONFIG, DEFAULT_BASE_URL)
-
-            if public_url == configured_base:
-                typer.echo(f"Public URL: {public_url}")
-            else:
-                count = regenerate_qrs(active_store, public_url)
-                typer.echo(
-                    f"Public URL: {public_url}\n"
-                    f"Regenerated {count} QR codes; recompile your slides so "
-                    "they embed the new images."
-                )
-
-            serve_http(
-                active_store,
-                chosen_host,
-                chosen_port,
-                public_results=results,
-            )
+        with expose(public, local_port, ssh_endpoint=ssh_endpoint) as derived_url:
+            yield get_setting(PUBLIC_BASE_URL_CONFIG) or derived_url
     except PublicExposureError as err:
         typer.echo(f"Could not expose the server: {err}", err=True)
         raise typer.Exit(code=1)
+
+
+def _serve_publicly(
+    active_store: Store,
+    chosen_host: str,
+    chosen_port: int,
+    *,
+    public: PublicMode,
+    results: bool,
+):
+    with _public_url_context(public, chosen_port) as public_url:
+        configured_base = get_setting(BASE_URL_CONFIG)
+
+        if public_url == configured_base:
+            typer.echo(f"Public URL: {public_url}")
+        else:
+            count = regenerate_qrs(active_store, public_url)
+            typer.echo(
+                f"Public URL: {public_url}\n"
+                f"Regenerated {count} QR codes; recompile your slides so "
+                "they embed the new images."
+            )
+
+        serve_http(
+            active_store,
+            chosen_host,
+            chosen_port,
+            public_results=results,
+        )
 @
 
 Typer lets us keep the public CLI declaration close to the implementation.
 
 <<cli setup>>=
 cli = typer.Typer(help="Self-hosted classroom polling.")
-config_cli = typer.Typer(help="Read and write mentipy configuration.")
+config_cli = typer.Typer(help=CONFIG_HELP)
+render_cli = typer.Typer(help="Render question LaTeX.")
 cli.add_typer(config_cli, name="config")
+cli.add_typer(render_cli, name="render")
 
 
 @cli.command(context_settings={"allow_extra_args": True})
 def serve(
     ctx: typer.Context,
-    host: Optional[str] = typer.Option(None, help="Bind address."),
-    port: Optional[int] = typer.Option(None, help="Bind port."),
-    store: Optional[str] = typer.Option(None, help="Path to mentipy.json."),
-    public: bool = typer.Option(
-        False,
-        "--public",
-        help="Expose the server publicly. Bare --public defaults to upnp.",
-    ),
-    results: bool = typer.Option(
-        False,
-        "--results",
-        help="Redirect respondents to the live results page.",
-    ),
+    host: Optional[str] = HOST_OPTION,
+    port: Optional[int] = PORT_OPTION,
+    store: Optional[str] = STORE_OPTION,
+    public: bool = PUBLIC_OPTION,
+    results: bool = RESULTS_OPTION,
 ):
     """Run the local polling server."""
 
     chosen_host = host or get_setting(HOST_CONFIG, DEFAULT_HOST)
-    chosen_port = int(port or get_setting(PORT_CONFIG, DEFAULT_PORT))
+    chosen_port = _configured_port(port)
     active_store = _configured_store(store)
-    public_mode = _parse_public_mode(ctx, public)
+    public_mode = _parse_public_mode(ctx, public, command="serve")
 
     if public_mode is None:
+        configured_base = _configured_base(None)
+        if configured_base not in (None, "", "auto"):
+            typer.echo(f"Serving at {configured_base}")
+        else:
+            resolved = resolve_base_url(configured_base, chosen_port)
+            count = regenerate_qrs(active_store, resolved)
+            typer.echo(
+                f"Serving at {resolved}\n"
+                f"Regenerated {count} QR codes; recompile your slides so "
+                "they embed the new images."
+            )
         serve_http(
             active_store,
             chosen_host,
@@ -270,11 +474,128 @@ def serve(
     )
 
 
+@render_cli.command("mc")
+def render_mc(
+    text: str,
+    options: list[str],
+    multi: bool = typer.Option(False, "--multi", help="Allow multiple answers."),
+    environment: Optional[str] = ENVIRONMENT_OPTION,
+    layout: str = LAYOUT_OPTION,
+    url: Optional[bool] = URL_VISIBILITY_OPTION,
+    base_url: Optional[str] = RENDER_BASE_URL_OPTION,
+    qr_dir: Optional[str] = QR_DIR_OPTION,
+    qr_format: Optional[str] = QR_FORMAT_OPTION,
+    store: Optional[str] = STORE_OPTION,
+):
+    """Render a multiple-choice question as LaTeX."""
+
+    typer.echo(
+        render_mc_question(
+            text,
+            options,
+            multi=multi,
+            **_render_common_kwargs(
+                store=store,
+                environment=environment,
+                show_url=url,
+                base_url=base_url,
+                qr_dir=qr_dir,
+                qr_format=qr_format,
+                layout=layout,
+            ),
+        )
+    )
+
+
+@render_cli.command("open")
+def render_open(
+    text: str,
+    max_chars: int = typer.Option(280, "--max-chars", help="Maximum answer length."),
+    environment: Optional[str] = ENVIRONMENT_OPTION,
+    layout: str = LAYOUT_OPTION,
+    url: Optional[bool] = URL_VISIBILITY_OPTION,
+    base_url: Optional[str] = RENDER_BASE_URL_OPTION,
+    qr_dir: Optional[str] = QR_DIR_OPTION,
+    qr_format: Optional[str] = QR_FORMAT_OPTION,
+    store: Optional[str] = STORE_OPTION,
+):
+    """Render an open-text question as LaTeX."""
+
+    typer.echo(
+        render_open_question(
+            text,
+            max_chars=max_chars,
+            **_render_common_kwargs(
+                store=store,
+                environment=environment,
+                show_url=url,
+                base_url=base_url,
+                qr_dir=qr_dir,
+                qr_format=qr_format,
+                layout=layout,
+            ),
+        )
+    )
+
+
+@render_cli.command("scale")
+def render_scale(
+    text: str,
+    low: int = typer.Option(1, "--low", help="Lowest scale value."),
+    high: int = typer.Option(5, "--high", help="Highest scale value."),
+    low_label: str = typer.Option("", "--low-label", help="Label for the low endpoint."),
+    high_label: str = typer.Option("", "--high-label", help="Label for the high endpoint."),
+    environment: Optional[str] = ENVIRONMENT_OPTION,
+    layout: str = LAYOUT_OPTION,
+    url: Optional[bool] = URL_VISIBILITY_OPTION,
+    base_url: Optional[str] = RENDER_BASE_URL_OPTION,
+    qr_dir: Optional[str] = QR_DIR_OPTION,
+    qr_format: Optional[str] = QR_FORMAT_OPTION,
+    store: Optional[str] = STORE_OPTION,
+):
+    """Render a scale question as LaTeX."""
+
+    typer.echo(
+        render_scale_question(
+            text,
+            low=low,
+            high=high,
+            low_label=low_label,
+            high_label=high_label,
+            **_render_common_kwargs(
+                store=store,
+                environment=environment,
+                show_url=url,
+                base_url=base_url,
+                qr_dir=qr_dir,
+                qr_format=qr_format,
+                layout=layout,
+            ),
+        )
+    )
+@
+
+
+The list command gives a quick view of the registered questions.  The default
+format stays compact enough for scanning, while [[--full]] spends the terminal
+width on wrapped question text.
+
+<<cli setup>>=
+@cli.command("list")
+def list_questions(
+    full: bool = LIST_FULL_OPTION,
+    store: Optional[str] = STORE_OPTION,
+):
+    """List the registered questions."""
+
+    typer.echo(_question_listing(_configured_store(store).all_questions(), full=full))
+
+
 @cli.command()
 def watch(
     prefix: str,
-    store: Optional[str] = typer.Option(None, help="Path to mentipy.json."),
-    interval: float = typer.Option(2.0, help="Refresh interval in seconds."),
+    store: Optional[str] = STORE_OPTION,
+    interval: float = WATCH_INTERVAL_OPTION,
 ):
     """Show live results for ``prefix`` in the terminal."""
 
@@ -292,8 +613,8 @@ def watch(
 @cli.command()
 def export(
     prefix: str,
-    format: str = typer.Option("json", help="Output format: json or csv."),
-    store: Optional[str] = typer.Option(None, help="Path to mentipy.json."),
+    format: str = EXPORT_FORMAT_OPTION,
+    store: Optional[str] = STORE_OPTION,
 ):
     """Export answers for ``prefix``."""
 
@@ -312,19 +633,34 @@ def export(
     raise typer.BadParameter("format must be either 'json' or 'csv'")
 
 
-@cli.command()
+@cli.command(context_settings={"allow_extra_args": True})
 def url(
+    ctx: typer.Context,
     prefix: str,
-    store: Optional[str] = typer.Option(None, help="Path to mentipy.json."),
-    base: Optional[str] = typer.Option(
-        None,
-        help="Override the configured base URL.",
-    ),
+    store: Optional[str] = STORE_OPTION,
+    port: Optional[int] = PORT_OPTION,
+    public: bool = PUBLIC_OPTION,
+    base: Optional[str] = URL_BASE_OPTION,
 ):
     """Print the canonical poll URL for ``prefix``."""
 
     active_store = _configured_store(store)
-    chosen_base = base or get_setting(BASE_URL_CONFIG, DEFAULT_BASE_URL)
+    chosen_port = _configured_port(port)
+    public_mode = _parse_public_mode(ctx, public, command="url")
+
+    if public_mode is not None:
+        if base is not None:
+            raise typer.BadParameter(
+                "cannot combine --base with --public",
+                param_hint="--base",
+            )
+        with _public_url_context(public_mode, chosen_port) as chosen_base:
+            typer.echo(
+                _join_url(chosen_base, _canonical_prefix(active_store, prefix))
+            )
+        return
+
+    chosen_base = resolve_base_url(_configured_base(base), chosen_port)
     typer.echo(_join_url(chosen_base, _canonical_prefix(active_store, prefix)))
 
 
@@ -379,9 +715,44 @@ def test_config_set_get_round_trip(tmp_path, monkeypatch):
     assert result.stdout.strip() == "9000"
 
 
+def test_config_help_lists_the_built_in_settings():
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["config", "--help"])
+
+    assert result.exit_code == 0
+    for key in (
+        "base_url",
+        "host",
+        "min_prefix",
+        "port",
+        "public_base_url",
+        "qr_dir",
+        "qr_format",
+        "question_environment",
+        "show_url",
+        "ssh_tunnel",
+        "store",
+    ):
+        assert key in result.output
+
+
+def test_config_list_includes_nullable_defaults(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+
+    result = runner.invoke(cli, ["config", "list"])
+
+    assert result.exit_code == 0
+    assert "base_url = null" in result.stdout
+    assert "public_base_url = null" in result.stdout
+    assert "ssh_tunnel = null" in result.stdout
+
+
 def test_serve_command_uses_config_defaults(tmp_path, monkeypatch):
     runner = CliRunner()
     monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("base_url", "http://127.0.0.1:9001")
     set_setting("host", "127.0.0.1")
     set_setting("port", 9001)
     set_setting("store", str(tmp_path / "answers.json"))
@@ -402,6 +773,22 @@ def test_serve_command_uses_config_defaults(tmp_path, monkeypatch):
     assert called["host"] == "127.0.0.1"
     assert called["port"] == 9001
     assert called["public_results"] is False
+
+
+def test_serve_help_mentions_the_relevant_config_keys():
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["serve", "--help"])
+
+    assert result.exit_code == 0
+    for key in (
+        HOST_CONFIG,
+        PORT_CONFIG,
+        STORE_CONFIG,
+        SSH_TUNNEL_CONFIG,
+        PUBLIC_BASE_URL_CONFIG,
+    ):
+        assert key in result.output
 @
 
 The [[--results]] flag only changes the post-submit destination and the public
@@ -412,6 +799,7 @@ simple spy.
 def test_serve_command_passes_public_results_flag(tmp_path, monkeypatch):
     runner = CliRunner()
     monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("base_url", "http://example.test:8080")
     called = {}
 
     def fake_serve(store, host, port, public_results=False):
@@ -430,6 +818,97 @@ def test_serve_command_passes_public_results_flag(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert called["path"] == tmp_path / "answers.json"
     assert called["public_results"] is True
+
+
+def test_serve_regenerates_qrs_when_base_url_is_auto(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("base_url", "auto")
+    called = {}
+
+    def fake_resolve(value, port):
+        called["resolve"] = (value, port)
+        return f"http://192.0.2.25:{port}"
+
+    def fake_regenerate(store, base_url):
+        called["path"] = store.path
+        called["base_url"] = base_url
+        return 2
+
+    def fake_serve(store, host, port, public_results=False):
+        called["serve"] = (store.path, host, port, public_results)
+
+    monkeypatch.setattr("mentipy.cli.resolve_base_url", fake_resolve)
+    monkeypatch.setattr("mentipy.cli.regenerate_qrs", fake_regenerate)
+    monkeypatch.setattr("mentipy.cli.serve_http", fake_serve)
+
+    result = runner.invoke(
+        cli,
+        ["serve", "--port", "9123", "--store", str(tmp_path / "answers.json")],
+    )
+
+    assert result.exit_code == 0
+    assert called["resolve"] == ("auto", 9123)
+    assert called["path"] == tmp_path / "answers.json"
+    assert called["base_url"] == "http://192.0.2.25:9123"
+    assert called["serve"] == (
+        tmp_path / "answers.json",
+        DEFAULT_HOST,
+        9123,
+        False,
+    )
+    assert "Serving at http://192.0.2.25:9123" in result.stdout
+    assert "Regenerated 2 QR codes" in result.stdout
+
+
+def test_serve_skips_qr_regeneration_when_base_url_is_pinned(
+    tmp_path, monkeypatch
+):
+    runner = CliRunner()
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("base_url", "http://example.test:9000")
+    called = {}
+
+    def fail_regenerate(_store, _base_url):
+        raise AssertionError("regenerate_qrs should not be called")
+
+    def fake_serve(store, host, port, public_results=False):
+        called["serve"] = (store.path, host, port, public_results)
+
+    monkeypatch.setattr("mentipy.cli.regenerate_qrs", fail_regenerate)
+    monkeypatch.setattr("mentipy.cli.serve_http", fake_serve)
+
+    result = runner.invoke(cli, ["serve", "--store", str(tmp_path / "answers.json")])
+
+    assert result.exit_code == 0
+    assert called["serve"] == (
+        tmp_path / "answers.json",
+        DEFAULT_HOST,
+        DEFAULT_PORT,
+        False,
+    )
+    assert "Serving at http://example.test:9000" in result.stdout
+    assert "Regenerated" not in result.stdout
+
+
+def test_serve_uses_bind_port_for_resolved_url(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    called = {}
+
+    def fake_resolve(value, port):
+        called["resolve"] = (value, port)
+        return f"http://192.0.2.30:{port}"
+
+    monkeypatch.setattr("mentipy.cli.resolve_base_url", fake_resolve)
+    monkeypatch.setattr("mentipy.cli.regenerate_qrs", lambda _store, _base_url: 0)
+    monkeypatch.setattr("mentipy.cli.serve_http", lambda *_args, **_kwargs: None)
+
+    result = runner.invoke(cli, ["serve", "--port", "9123"])
+
+    assert result.exit_code == 0
+    assert called["resolve"] == (None, 9123)
+    assert "Serving at http://192.0.2.30:9123" in result.stdout
 @
 
 The public mode adds configuration lookup and a managed exposure lifetime around
@@ -665,10 +1144,234 @@ def test_serve_command_closes_the_public_exposure_context(tmp_path, monkeypatch)
     assert state == {"entered": True, "closed": True}
 @
 
+The render subcommands should stay as thin as the rest of the CLI: they build a
+store, delegate to the LaTeX helpers, and print the returned fragment.
+
+<<test functions>>=
+def test_render_mc_prints_slide_latex_and_writes_the_question(tmp_path):
+    runner = CliRunner()
+    store_path = tmp_path / "mentipy.json"
+
+    result = runner.invoke(
+        cli,
+        [
+            "render",
+            "mc",
+            "How was the lecture?",
+            "Great",
+            "OK",
+            "Boring",
+            "--store",
+            str(store_path),
+            "--base-url",
+            "http://example.test:8080",
+            "--qr-dir",
+            str(tmp_path / "build"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "How was the lecture?" in result.stdout
+    assert "\\includegraphics{" in result.stdout
+    assert Store(store_path).all_questions()
+
+
+def test_render_mc_env_option_wraps_the_question(tmp_path):
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "render",
+            "mc",
+            "How was the lecture?",
+            "Great",
+            "OK",
+            "--env",
+            "exercise",
+            "--store",
+            str(tmp_path / "mentipy.json"),
+            "--base-url",
+            "http://example.test:8080",
+            "--qr-dir",
+            str(tmp_path / "build"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "\\begin{exercise}" in result.stdout
+
+
+def test_render_mc_auto_layout_prints_both_mode_branches(tmp_path):
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "render",
+            "mc",
+            "How was the lecture?",
+            "Great",
+            "OK",
+            "--layout",
+            "auto",
+            "--store",
+            str(tmp_path / "mentipy.json"),
+            "--base-url",
+            "http://example.test:8080",
+            "--qr-dir",
+            str(tmp_path / "build"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "\\mode<presentation>" in result.stdout
+    assert "\\mode<article>" in result.stdout
+
+
+def test_render_mc_article_no_url_suppresses_printed_url(tmp_path):
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "render",
+            "mc",
+            "How was the lecture?",
+            "Great",
+            "OK",
+            "--layout",
+            "article",
+            "--no-url",
+            "--store",
+            str(tmp_path / "mentipy.json"),
+            "--base-url",
+            "http://example.test:8080",
+            "--qr-dir",
+            str(tmp_path / "build"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "\\texttt{http://example.test:8080/" not in result.stdout
+
+
+def test_render_mc_environment_follows_env_var_unless_env_option_wins(
+    tmp_path, monkeypatch
+):
+    runner = CliRunner()
+    monkeypatch.setenv("MENTIPY_QUESTION_ENVIRONMENT", "exo")
+
+    result = runner.invoke(
+        cli,
+        [
+            "render",
+            "mc",
+            "How was the lecture?",
+            "Great",
+            "OK",
+            "--store",
+            str(tmp_path / "mentipy.json"),
+            "--base-url",
+            "http://example.test:8080",
+            "--qr-dir",
+            str(tmp_path / "build"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "\\begin{exo}" in result.stdout
+
+    result = runner.invoke(
+        cli,
+        [
+            "render",
+            "mc",
+            "How was the lecture?",
+            "Great",
+            "OK",
+            "--env",
+            "exercise",
+            "--store",
+            str(tmp_path / "mentipy.json"),
+            "--base-url",
+            "http://example.test:8080",
+            "--qr-dir",
+            str(tmp_path / "build"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "\\begin{exercise}" in result.stdout
+    assert "\\begin{exo}" not in result.stdout
+
+
+def test_render_help_mentions_the_relevant_config_keys():
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["render", "mc", "--help"])
+
+    assert result.exit_code == 0
+    for key in (
+        QUESTION_ENVIRONMENT_CONFIG,
+        SHOW_URL_CONFIG,
+        BASE_URL_CONFIG,
+        QR_DIR_CONFIG,
+        QR_FORMAT_CONFIG,
+        STORE_CONFIG,
+    ):
+        assert key in result.output
+@
+
 The interactive watcher test interrupts the sleep call after the first redraw so
 the command remains a normal unit test.
 
 <<test functions>>=
+def test_list_command_reports_empty_store(tmp_path):
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        ["list", "--store", str(tmp_path / "mentipy.json")],
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "No questions registered yet."
+
+
+def test_list_command_shows_prefix_and_short_summary(tmp_path):
+    runner = CliRunner()
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    text = "abcdefghijklmnopqrstuvwxyz1234567890"
+    prefix = store.register(OpenQuestion(text))
+    full_hash = store.resolve(prefix)
+
+    result = runner.invoke(cli, ["list", "--store", str(store.path)])
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == f"{prefix}  abcdefghijklmnopqrstuvwxyz1..."
+    assert full_hash not in result.stdout
+
+
+def test_list_command_full_wraps_question_text(tmp_path, monkeypatch):
+    runner = CliRunner()
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    text = "one two three four five six seven"
+    prefix = store.register(OpenQuestion(text))
+    monkeypatch.setattr("mentipy.cli._terminal_width", lambda: 20)
+
+    result = runner.invoke(
+        cli,
+        ["list", "--full", "--store", str(store.path)],
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == (
+        f"{prefix}  one two three four\n"
+        f"{' ' * (len(prefix) + LIST_COLUMN_GAP)}five six seven"
+    )
+
+
 def test_watch_command_prints_a_snapshot(tmp_path, monkeypatch):
     runner = CliRunner()
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
@@ -734,6 +1437,152 @@ def test_url_command_uses_the_canonical_prefix(tmp_path):
 
     assert result.exit_code == 0
     assert result.stdout.strip() == f"http://example.test:8080/{prefix}"
+
+
+def test_url_command_resolves_auto_base_url_when_unset(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("port", 9123)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    called = {}
+
+    def fake_resolve(value, port):
+        called["value"] = value
+        called["port"] = port
+        return f"http://192.0.2.25:{port}"
+
+    monkeypatch.setattr("mentipy.cli.resolve_base_url", fake_resolve)
+
+    result = runner.invoke(cli, ["url", prefix, "--store", str(store.path)])
+
+    assert result.exit_code == 0
+    assert called == {"value": None, "port": 9123}
+    assert result.stdout.strip() == f"http://192.0.2.25:9123/{prefix}"
+
+
+def test_url_command_uses_the_explicit_port_for_auto_resolution(
+    tmp_path, monkeypatch
+):
+    runner = CliRunner()
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    called = {}
+
+    def fake_resolve(value, port):
+        called["value"] = value
+        called["port"] = port
+        return f"http://192.0.2.30:{port}"
+
+    monkeypatch.setattr("mentipy.cli.resolve_base_url", fake_resolve)
+
+    result = runner.invoke(
+        cli,
+        ["url", prefix, "--port", "9124", "--store", str(store.path)],
+    )
+
+    assert result.exit_code == 0
+    assert called == {"value": None, "port": 9124}
+    assert result.stdout.strip() == f"http://192.0.2.30:9124/{prefix}"
+
+
+def test_url_command_public_without_value_defaults_to_upnp(tmp_path, monkeypatch):
+    runner = CliRunner(mix_stderr=False)
+    config_path = tmp_path / "config.json"
+    monkeypatch.setenv("MENTIPY_CONFIG", str(config_path))
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    called = {}
+    state = {"closed": False}
+
+    @contextmanager
+    def fake_expose(mode, local_port, *, ssh_endpoint=None):
+        called["mode"] = mode
+        called["local_port"] = local_port
+        called["ssh_endpoint"] = ssh_endpoint
+        try:
+            yield "http://public.example:8080"
+        finally:
+            state["closed"] = True
+
+    monkeypatch.setattr("mentipy.cli.expose", fake_expose)
+
+    result = runner.invoke(
+        cli,
+        ["url", prefix, "--public", "--port", "8080", "--store", str(store.path)],
+        env={"MENTIPY_CONFIG": str(config_path)},
+    )
+
+    assert result.exit_code == 0
+    assert called == {
+        "mode": PublicMode.upnp,
+        "local_port": 8080,
+        "ssh_endpoint": None,
+    }
+    assert state["closed"] is True
+    assert WARNING_TEXT in result.stderr
+    assert result.stdout.strip() == f"http://public.example:8080/{prefix}"
+
+
+def test_url_command_public_prefers_public_base_url(tmp_path, monkeypatch):
+    runner = CliRunner(mix_stderr=False)
+    config_path = tmp_path / "config.json"
+    monkeypatch.setenv("MENTIPY_CONFIG", str(config_path))
+    set_setting("public_base_url", "https://polls.example")
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+
+    @contextmanager
+    def fake_expose(_mode, _local_port, *, ssh_endpoint=None):
+        yield "http://derived.example:8080"
+
+    monkeypatch.setattr("mentipy.cli.expose", fake_expose)
+
+    result = runner.invoke(
+        cli,
+        ["url", prefix, "--public", "--store", str(store.path)],
+        env={"MENTIPY_CONFIG": str(config_path)},
+    )
+
+    assert result.exit_code == 0
+    assert WARNING_TEXT in result.stderr
+    assert result.stdout.strip() == f"https://polls.example/{prefix}"
+
+
+def test_url_command_rejects_base_and_public_together(tmp_path):
+    runner = CliRunner()
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+
+    result = runner.invoke(
+        cli,
+        [
+            "url",
+            prefix,
+            "--public",
+            "--base",
+            "http://example.test:8080",
+            "--store",
+            str(store.path),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "cannot combine --base with --public" in result.output
+
+
+def test_url_help_mentions_the_relevant_config_keys():
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["url", "--help"])
+
+    assert result.exit_code == 0
+    assert STORE_CONFIG in result.output
+    assert BASE_URL_CONFIG in result.output
+    assert PORT_CONFIG in result.output
+    assert PUBLIC_BASE_URL_CONFIG in result.output
+    assert SSH_TUNNEL_CONFIG in result.output
 @
 
 <<test [[cli.py]]>>=

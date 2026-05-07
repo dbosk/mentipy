@@ -1,0 +1,142 @@
+\chapter{Network Helpers}
+
+The store keeps configuration values stable, but the effective base URL depends
+on runtime network state.  We therefore keep the LAN-resolution logic in its
+own small module: configuration can use [[None]] as the canonical
+\enquote{auto} sentinel, while the CLI and LaTeX helpers resolve that sentinel
+only when they actually need a URL.
+
+<<[[network.py]]>>=
+from __future__ import annotations
+
+<<imports>>
+
+<<constants>>
+<<functions>>
+@
+
+<<imports>>=
+import socket
+@
+
+The outbound address lookup uses the standard UDP-connect trick.  The kernel
+consults its routing table, which tells us which local IPv4 address would be
+used to reach a remote peer, but UDP does not send any packets just because we
+called [[connect()]].  The dummy peer therefore only needs to be a routable
+IPv4-looking address.
+
+<<constants>>=
+AUTO_BASE_URL_ALIAS = "auto"
+LOCAL_IP_FALLBACK = "127.0.0.1"
+LOCAL_IP_PROBE_HOST = "198.51.100.1"
+LOCAL_IP_PROBE_PORT = 80
+@
+
+The public helpers in this module are intentionally tiny.  [[local_ip()]] asks
+the kernel for the outbound IPv4 address and falls back to loopback if the host
+has no usable route.  [[resolve_base_url()]] then centralises the small sentinel
+family so callers do not each need to special-case [[None]], the empty string,
+and the user-facing [[auto]] alias.
+
+<<functions>>=
+def local_ip() -> str:
+    """Return the IPv4 address used for outbound LAN traffic."""
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect((LOCAL_IP_PROBE_HOST, LOCAL_IP_PROBE_PORT))
+            address = sock.getsockname()[0]
+    except OSError:
+        return LOCAL_IP_FALLBACK
+
+    return address or LOCAL_IP_FALLBACK
+
+
+def resolve_base_url(value: str | None, port: int) -> str:
+    """Return an explicit base URL or derive one from the local IP."""
+
+    if value not in (None, "", AUTO_BASE_URL_ALIAS):
+        return value
+
+    return f"http://{local_ip()}:{port}"
+@
+
+The tests pin both the routing-table lookup and the sentinel handling.  That
+keeps later CLI and LaTeX tests free to stub only the high-level helper.
+
+<<test functions>>=
+def test_local_ip_uses_the_kernel_route_lookup(monkeypatch):
+    called = {}
+
+    class FakeSocket:
+        def __init__(self, family, kind):
+            called["family"] = family
+            called["kind"] = kind
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def connect(self, address):
+            called["address"] = address
+
+        def getsockname(self):
+            return ("192.0.2.25", 54321)
+
+    monkeypatch.setattr(
+        "mentipy.network.socket.socket",
+        lambda family, kind: FakeSocket(family, kind),
+    )
+
+    assert local_ip() == "192.0.2.25"
+    assert called == {
+        "family": network_module.socket.AF_INET,
+        "kind": network_module.socket.SOCK_DGRAM,
+        "address": (LOCAL_IP_PROBE_HOST, LOCAL_IP_PROBE_PORT),
+    }
+
+
+def test_local_ip_falls_back_to_loopback_on_os_error(monkeypatch):
+    class FakeSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def connect(self, _address):
+            raise OSError("offline")
+
+    monkeypatch.setattr(
+        "mentipy.network.socket.socket",
+        lambda family, kind: FakeSocket(),
+    )
+
+    assert local_ip() == LOCAL_IP_FALLBACK
+
+
+def test_resolve_base_url_keeps_explicit_values(monkeypatch):
+    monkeypatch.setattr("mentipy.network.local_ip", lambda: "192.0.2.25")
+
+    assert resolve_base_url("http://example.test:9000", 8080) == (
+        "http://example.test:9000"
+    )
+
+
+def test_resolve_base_url_expands_auto_sentinels(monkeypatch):
+    monkeypatch.setattr("mentipy.network.local_ip", lambda: "192.0.2.25")
+
+    assert resolve_base_url(None, 8080) == "http://192.0.2.25:8080"
+    assert resolve_base_url("", 8080) == "http://192.0.2.25:8080"
+    assert resolve_base_url("auto", 8080) == "http://192.0.2.25:8080"
+@
+
+<<test [[network.py]]>>=
+import mentipy.network as network_module
+
+from mentipy.network import *
+
+<<test functions>>
+@
