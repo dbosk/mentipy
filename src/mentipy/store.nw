@@ -470,11 +470,73 @@ def iter_prefixes(self) -> Iterator[str]:
 @
 
 Answer recording is the only mutating operation after registration, so it is
-where the atomic rewrite matters most.
+where the atomic rewrite matters most.  It is also the last write boundary
+shared by the HTTP server and any direct library caller.  Later readers assume
+the stored value already matches the registered question type, so
+[[Store.record()]] validates and normalises answers before it appends them.
+
+The validation rules mirror the question types.  Single-choice and scale
+answers are bounded integers, multi-select answers are non-empty collections of
+unique indices, and open-text answers are strings within the configured limit.
+We normalise multi-select sequences to plain lists so the JSON shape on disk is
+stable no matter whether a caller passed a list or a tuple.
+
+<<functions>>=
+def _normalize_recorded_answer(question: Question, value: Any) -> Any:
+    if isinstance(question, MCQuestion):
+        if question.multi:
+            if not isinstance(value, (list, tuple)):
+                raise TypeError(
+                    "multi-select answers must be stored as a list or tuple"
+                )
+            if not value:
+                raise ValueError("choose at least one option")
+
+            indices = []
+            seen = set()
+            for index in value:
+                if type(index) is not int:
+                    raise TypeError(
+                        "multiple-choice answer indices must be integers"
+                    )
+                if index < 0 or index >= len(question.options):
+                    raise ValueError(
+                        "multiple-choice answer outside the allowed range"
+                    )
+                if index in seen:
+                    raise ValueError(
+                        "multiple-choice answer repeats the same option"
+                    )
+                seen.add(index)
+                indices.append(index)
+
+            return indices
+
+        if type(value) is not int:
+            raise TypeError(
+                "single-choice answers must be stored as an integer option index"
+            )
+        if value < 0 or value >= len(question.options):
+            raise ValueError("multiple-choice answer outside the allowed range")
+        return value
+
+    if isinstance(question, ScaleQuestion):
+        if type(value) is not int:
+            raise TypeError("scale answers must be stored as integers")
+        if value < question.low or value > question.high:
+            raise ValueError("scale answer outside the allowed range")
+        return value
+
+    if not isinstance(value, str):
+        raise TypeError("open-text answers must be stored as strings")
+    if len(value) > question.max_chars:
+        raise ValueError("open-text answer exceeds the question limit")
+    return value
+@
 
 <<store methods>>=
 def record(self, full_hash: str, value: Any):
-    """Append ``value`` as a recorded answer to ``full_hash``."""
+    """Append a validated answer to ``full_hash``."""
 
     with self._lock:
         data = self._data()
@@ -482,8 +544,10 @@ def record(self, full_hash: str, value: Any):
         if full_hash not in data["questions"]:
             raise KeyError(full_hash)
 
+        question = question_from_dict(data["questions"][full_hash])
+        normalized = _normalize_recorded_answer(question, value)
         answers = data["answers"].setdefault(full_hash, [])
-        answers.append({"ts": _timestamp(), "value": value})
+        answers.append({"ts": _timestamp(), "value": normalized})
         self._write(data)
 @
 
@@ -542,6 +606,53 @@ def test_record_keeps_answers_from_concurrent_threads(tmp_path):
 
     assert len(answers) == 2
     assert sorted(answer["value"] for answer in answers) == [0, 1]
+
+
+@pytest.mark.parametrize(
+    ("question", "value"),
+    [
+        (MCQuestion("Pick one", ("A", "B")), 3),
+        (MCQuestion("Pick many", ("A", "B"), multi=True), ["0"]),
+        (ScaleQuestion("How clear?", low=1, high=5), "3"),
+        (ScaleQuestion("How clear?", low=1, high=5), 6),
+        (OpenQuestion("Comment?", max_chars=5), 7),
+        (OpenQuestion("Comment?", max_chars=5), "too long"),
+    ],
+)
+def test_record_rejects_answers_that_do_not_match_the_question(
+    tmp_path, question, value
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(question)
+    full_hash = store.resolve(prefix)
+
+    with pytest.raises((TypeError, ValueError)):
+        store.record(full_hash, value)
+
+    assert store.results(full_hash)["total"] == 0
+
+
+def test_record_requires_non_empty_unique_multi_select_answers(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick", ("A", "B"), multi=True))
+    full_hash = store.resolve(prefix)
+
+    with pytest.raises(ValueError):
+        store.record(full_hash, [])
+    with pytest.raises(ValueError):
+        store.record(full_hash, [0, 0])
+
+    assert store.results(full_hash)["total"] == 0
+
+
+def test_record_normalizes_multi_select_tuples_to_lists(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick", ("A", "B", "C"), multi=True))
+    full_hash = store.resolve(prefix)
+
+    store.record(full_hash, (0, 2))
+
+    assert store.results(full_hash)["answers"][0]["value"] == [0, 2]
 @
 
 The result view aggregates answers according to the question type, but it
