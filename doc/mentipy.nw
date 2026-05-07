@@ -258,11 +258,48 @@ print(
 \end{pyblock}
 
 Now, the rendered question:
-\begin{center}\printpythontex\end{center}
+\printpythontex
 
 The environment itself must be defined by the surrounding document.  This manual
-adds a tiny [[exercise]] wrapper in [[doc/preamble.tex]], but real lecture notes
-can point [[environment=]] at any existing LaTeX environment.
+relies on the [[exercise]] environment from the [[didactic]] package, but real
+lecture notes can point [[environment=]] at any existing LaTeX environment.
+
+\subsection{The Same Environment Without the URL}
+
+The code used to generate the following question is shown below.
+
+\begin{pyblock}
+from mentipy.latex import mc
+
+print(
+    mc(
+        "Which proof step should we revisit?",
+        ["Setup", "Reduction", "Advantage bound"],
+        base_url="http://localhost:8080",
+        qr_dir="build",
+        qr_format="png",
+        environment="exercise",
+        layout="article",
+        show_url=False,
+    )
+)
+\end{pyblock}
+
+Now, the rendered question:
+\printpythontex
+
+These two environment examples form a deliberate contrast.
+
+\begin{description}
+\item[What varies] Whether [[show_url]] is left at its default value or set to
+  [[False]].
+\item[What stays invariant] The [[mc()]] helper, the question text, the
+  options, the base URL, the QR settings, the [[exercise]] environment, and the
+  article layout.
+\item[What this reveals] The environment wrapper and the question body are
+  independent from the trailing respondent URL, so article layouts can keep the
+  exercise styling while suppressing the printed link.
+\end{description}
 
 \subsection{Rendering from the Command Line}
 
