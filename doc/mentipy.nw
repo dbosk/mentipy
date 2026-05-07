@@ -107,7 +107,6 @@ print(
         ["Very confident", "Somewhat confident", "Not yet"],
         base_url="http://localhost:8080",
         qr_dir="build",
-        qr_format="png",
         layout="article+qr",
     )
 )
@@ -132,7 +131,6 @@ print(
         "How confident do you feel about the course goals?",
         ["Very confident", "Somewhat confident", "Not yet"],
         qr_dir="build",
-        qr_format="png",
         layout="article+qr",
     )
 )
@@ -141,17 +139,21 @@ print(
 Now, the rendered question:
 \begin{center}\printpythontex\end{center}
 
-These two examples form a deliberate contrast.
+\ltnote{%
+  \textbf{Variation pattern}: Contrast
 
-\begin{description}
-\item[What varies] Whether [[base_url]] is passed explicitly.
-\item[What stays invariant] The [[mc()]] helper, the question text, the
-  options, the QR output directory, the QR format, and the article layout.
-\item[What this reveals] When [[base_url]] is omitted, the helper reads the
-  [[mentipy.base_url]] setting.  If that setting is absent, it resolves the
-  current LAN address together with [[mentipy.port]], so the QR is a
-  compile-time placeholder that [[mentipy serve]] can refresh later.
-\end{description}
+  \textbf{What varies}: Whether [[base_url]] is passed explicitly.
+
+  \textbf{What stays invariant}: The [[mc()]] helper, the question text,
+  the options, the QR output directory, the QR format, and the article
+  layout.
+
+  \textbf{What this reveals}: When [[base_url]] is omitted, the helper
+  reads the [[mentipy.base_url]] setting.  If that setting is absent, it
+  resolves the current LAN address together with [[mentipy.port]], so the
+  QR is a compile-time placeholder that [[mentipy serve]] can refresh
+  later.
+}
 
 \section{Multiple-Choice Poll}
 
@@ -174,7 +176,6 @@ print(
         multi=True,
         base_url="http://localhost:8080",
         qr_dir="build",
-        qr_format="png",
         layout="article+qr",
     )
 )
@@ -198,7 +199,6 @@ print(
         max_chars=160,
         base_url="http://localhost:8080",
         qr_dir="build",
-        qr_format="png",
         layout="article+qr",
     )
 )
@@ -225,7 +225,6 @@ print(
         high_label="Too fast",
         base_url="http://localhost:8080",
         qr_dir="build",
-        qr_format="png",
         layout="article+qr",
     )
 )
@@ -250,7 +249,6 @@ print(
         ["Setup", "Reduction", "Advantage bound"],
         base_url="http://localhost:8080",
         qr_dir="build",
-        qr_format="png",
         environment="exercise",
         layout="article",
     )
@@ -258,11 +256,50 @@ print(
 \end{pyblock}
 
 Now, the rendered question:
-\begin{center}\printpythontex\end{center}
+\printpythontex
 
 The environment itself must be defined by the surrounding document.  This manual
-adds a tiny [[exercise]] wrapper in [[doc/preamble.tex]], but real lecture notes
-can point [[environment=]] at any existing LaTeX environment.
+relies on the [[exercise]] environment from the [[didactic]] package, but real
+lecture notes can point [[environment=]] at any existing LaTeX environment.
+
+\subsection{The Same Environment Without the URL}
+
+The code used to generate the following question is shown below.
+
+\begin{pyblock}
+from mentipy.latex import mc
+
+print(
+    mc(
+        "Which proof step should we revisit?",
+        ["Setup", "Reduction", "Advantage bound"],
+        base_url="http://localhost:8080",
+        qr_dir="build",
+        environment="exercise",
+        layout="article",
+        show_url=False,
+    )
+)
+\end{pyblock}
+
+Now, the rendered question:
+\printpythontex
+
+\ltnote{%
+  \textbf{Variation pattern}: Contrast
+
+  \textbf{What varies}: Whether [[show_url]] is left at its default value
+  or set to [[False]].
+
+  \textbf{What stays invariant}: The [[mc()]] helper, the question text,
+  the options, the base URL, the QR settings, the [[exercise]]
+  environment, and the article layout.
+
+  \textbf{What this reveals}: The environment wrapper and the question
+  body are independent from the trailing respondent URL, so article
+  layouts can keep the exercise styling while suppressing the printed
+  link.
+}
 
 \subsection{Rendering from the Command Line}
 

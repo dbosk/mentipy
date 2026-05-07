@@ -6,7 +6,7 @@
 % \documentclass but before \begin{document}.
 
 %\usepackage[utf8]{inputenc}
-%\usepackage[T1]{fontenc}
+\usepackage[T1]{fontenc}
 \usepackage[swedish,british]{babel}
 \usepackage{booktabs}
 
@@ -75,19 +75,3 @@
 }
 
 \usepackage[marginparmargin=right]{didactic}
-
-\makeatletter
-\@ifundefined{exercise}{%
-  \newenvironment{exercise}{%
-    \par\medskip\noindent\textbf{Exercise.}\quad
-  }{%
-    \par\medskip
-  }%
-}{%
-  \renewenvironment{exercise}{%
-    \par\medskip\noindent\textbf{Exercise.}\quad
-  }{%
-    \par\medskip
-  }%
-}
-\makeatother

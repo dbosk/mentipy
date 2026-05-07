@@ -1172,7 +1172,7 @@ def test_render_mc_prints_slide_latex_and_writes_the_question(tmp_path):
 
     assert result.exit_code == 0
     assert "How was the lecture?" in result.stdout
-    assert "\\includegraphics{" in result.stdout
+    assert "\\input{" in result.stdout
     assert Store(store_path).all_questions()
 
 

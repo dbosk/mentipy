@@ -62,7 +62,6 @@ SLIDE_TEXT_WIDTH = "0.62\\textwidth"
 SLIDE_QR_WIDTH = "0.33\\textwidth"
 ARTICLE_TEXT_WIDTH = "0.62\\textwidth"
 ARTICLE_QR_WIDTH = "0.32\\textwidth"
-ARTICLE_QR_IMAGE_WIDTH = "0.95\\linewidth"
 @
 
 The escape helper is small, but it is what keeps ordinary poll questions from
@@ -183,7 +182,7 @@ def _render_slide_question(
         _render_question_content(question, environment),
         f"\\column{{{SLIDE_QR_WIDTH}}}",
         "\\centering",
-        f"\\includegraphics{{{qr_path.as_posix()}}}",
+        f"\\input{{{qr_path.with_suffix('.pdf_tex').as_posix()}}}",
         "\\end{columns}",
     ]
     return "\n".join(parts)
@@ -208,9 +207,7 @@ def _render_article_question(
 def _render_article_qr_question(
     question: Question,
     qr_path: Path,
-    url: str,
     environment: str | None,
-    show_url: bool,
 ) -> str:
     parts = [
         "\\noindent",
@@ -221,16 +218,10 @@ def _render_article_qr_question(
         f"\\begin{{minipage}}[t]{{{ARTICLE_QR_WIDTH}}}",
         "\\vspace{0pt}",
         "\\centering",
-        (
-            f"\\includegraphics[width={ARTICLE_QR_IMAGE_WIDTH}]"
-            f"{{{qr_path.as_posix()}}}"
-        ),
+        f"\\input{{{qr_path.with_suffix('.pdf_tex').as_posix()}}}",
+        "\\end{minipage}",
+        "\\par\\medskip",
     ]
-
-    if show_url:
-        parts.extend(["", f"\\small\\texttt{{{_escape_latex(url)}}}"])
-
-    parts.extend(["\\end{minipage}", "\\par\\medskip"])
     return "\n".join(parts)
 
 
@@ -270,9 +261,7 @@ def _render_question(
         return _render_article_qr_question(
             question,
             qr_path,
-            url,
             environment,
-            show_url,
         )
     return _render_auto_question(question, qr_path, url, environment, show_url)
 @
@@ -282,7 +271,11 @@ need to construct the appropriate question object.  When no base URL is pinned,
 the helper still has to bake some URL into the QR image, so it resolves the
 current LAN address using the configured port.  That compile-time URL is only a
 placeholder: [[mentipy serve]] may later regenerate every QR image so the files
-match the address respondents should actually use.
+match the address respondents should actually use.  Because [[make_qr]] writes
+the QR PDF and its [[.pdf_tex]] sidecar in the same call, regeneration keeps
+the matrix and the printed URL caption tied together: any subsequent slide
+build reads a consistent pair from disk and the audience sees the same address
+they would scan.
 
 <<functions>>=
 def regenerate_qrs(
@@ -462,8 +455,9 @@ def test_mc_registers_the_question_and_references_the_qr(tmp_path, monkeypatch):
     prefix = entry["url_prefix"]
 
     assert "How was the lecture?" in rendered
-    assert f"\\includegraphics{{build/Q-{prefix}.pdf}}" in rendered
+    assert f"\\input{{build/Q-{prefix}.pdf_tex}}" in rendered
     assert (tmp_path / "build" / f"Q-{prefix}.pdf").exists()
+    assert (tmp_path / "build" / f"Q-{prefix}.pdf_tex").exists()
 
 
 def test_open_text_registers_the_question_and_references_the_qr(
@@ -484,7 +478,7 @@ def test_open_text_registers_the_question_and_references_the_qr(
     prefix = entry["url_prefix"]
 
     assert "One thing to change?" in rendered
-    assert f"\\includegraphics{{build/Q-{prefix}.pdf}}" in rendered
+    assert f"\\input{{build/Q-{prefix}.pdf_tex}}" in rendered
     assert store.resolve(prefix) == entry["hash"]
 
 
@@ -505,7 +499,7 @@ def test_scale_registers_the_question_and_references_the_qr(tmp_path, monkeypatc
     prefix = entry["url_prefix"]
 
     assert "Pace?" in rendered
-    assert f"\\includegraphics{{build/Q-{prefix}.pdf}}" in rendered
+    assert f"\\input{{build/Q-{prefix}.pdf_tex}}" in rendered
     assert store.question(entry["hash"]).kind == "scale"
 
 
@@ -557,11 +551,14 @@ def test_article_qr_layout_prints_the_canonical_url(tmp_path, monkeypatch):
 
     [entry] = store.all_questions()
     prefix = entry["url_prefix"]
+    sidecar = tmp_path / "build" / f"Q-{prefix}.pdf_tex"
 
     assert "\\begin{minipage}[t]" in rendered
     assert rendered.count("\\vspace{0pt}") == 2
     assert "\\begin{columns}[T,onlytextwidth]" not in rendered
-    assert f"\\texttt{{http://example.test:8080/{prefix}}}" in rendered
+    assert f"\\input{{build/Q-{prefix}.pdf_tex}}" in rendered
+    assert sidecar.exists()
+    assert f"http://example.test:8080/{prefix}" in sidecar.read_text()
 
 
 def test_article_layout_is_flat_and_qrless(tmp_path, monkeypatch):
@@ -581,7 +578,7 @@ def test_article_layout_is_flat_and_qrless(tmp_path, monkeypatch):
     prefix = entry["url_prefix"]
 
     assert "\\begin{minipage}[t]" not in rendered
-    assert "\\includegraphics" not in rendered
+    assert "\\input" not in rendered
     assert f"\\texttt{{http://example.test:8080/{prefix}}}" in rendered
 @
 
@@ -650,17 +647,15 @@ def test_environment_from_config_wraps_every_layout(tmp_path, monkeypatch):
 
     assert "\\begin{exercise}" in slide
     assert "\\textbf{" not in slide
-    assert slide.index("\\end{exercise}") < slide.index("\\includegraphics")
+    assert slide.index("\\end{exercise}") < slide.index("\\input")
 
     assert "\\begin{exercise}" in article
     assert "\\textbf{" not in article
-    assert "\\includegraphics" not in article
+    assert "\\input" not in article
 
     assert "\\begin{exercise}" in article_qr
     assert "\\textbf{" not in article_qr
-    assert article_qr.index("\\end{exercise}") < article_qr.index(
-        "\\includegraphics"
-    )
+    assert article_qr.index("\\end{exercise}") < article_qr.index("\\input")
 
     assert auto.count("\\begin{exercise}") == 2
     assert auto.count("\\end{exercise}") == 2
@@ -668,7 +663,7 @@ def test_environment_from_config_wraps_every_layout(tmp_path, monkeypatch):
     assert "\\mode<presentation>{" in auto
     assert "\\mode<article>{" in auto
     article_branch = auto.split("\\mode<article>{%\n", 1)[1]
-    assert "\\includegraphics" not in article_branch
+    assert "\\input" not in article_branch
 
 
 def test_explicit_environment_wraps_question_content(tmp_path, monkeypatch):
@@ -731,10 +726,10 @@ def test_auto_layout_separates_presentation_and_article_output(
     article = rendered.split("\\mode<article>{%\n", 1)[1].rsplit("\n}", 1)[0]
 
     assert "\\begin{columns}[T,onlytextwidth]" in presentation
-    assert f"\\includegraphics{{build/Q-{prefix}.pdf}}" in presentation
+    assert f"\\input{{build/Q-{prefix}.pdf_tex}}" in presentation
     assert "How was the lecture?" in article
     assert f"\\texttt{{http://example.test:8080/{prefix}}}" in article
-    assert "\\includegraphics" not in article
+    assert "\\input" not in article
     assert "\\begin{minipage}" not in article
 
 
@@ -791,7 +786,7 @@ def test_show_url_false_suppresses_url_in_article_variants(tmp_path, monkeypatch
 
     assert "\\texttt{http://example.test:8080/" not in article
     assert "\\texttt{http://example.test:8080/" not in article_qr
-    assert "\\includegraphics" in article_qr
+    assert "\\input" in article_qr
     assert "\\texttt{http://example.test:8080/" not in auto.split(
         "\\mode<article>{%\n",
         1,
