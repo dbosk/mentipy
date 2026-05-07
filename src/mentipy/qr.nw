@@ -174,8 +174,6 @@ _TEX_ESCAPES = {
 }
 @
 
-\section{Tests}
-
 The original tests pin two properties we rely on downstream: that the PDF is
 real, and that regenerating the same QR code is deterministic.
 
