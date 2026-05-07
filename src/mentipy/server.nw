@@ -15,10 +15,13 @@ from __future__ import annotations
 @
 
 <<imports>>=
+import errno
 from html import escape
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
+import logging
+import sys
 from socketserver import ThreadingMixIn
 from string import Template
 from typing import Any
@@ -640,14 +643,57 @@ def _json_results(
     )
 @
 
-The custom server class only exists to enable threading and to keep worker
-threads from blocking shutdown.
+The custom server class enables threading, keeps worker threads from blocking
+shutdown, and centralizes request-thread error reporting.
 
 <<classes>>=
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     """A small threaded HTTP server for mentipy."""
 
     daemon_threads = True
+
+    <<threading HTTP server methods>>
+@
+
+Routine client disconnects are normal on a live server.  Browsers can close the
+tab halfway through a response, and phones can switch networks while the server
+is writing.  The stdlib thread mixin already keeps the process alive in these
+cases, but its default [[handle_error()]] prints a traceback for every dropped
+socket.  We recognize the usual disconnect errnos and turn only those failures
+into warnings so genuine application bugs still keep their tracebacks.
+
+<<constants>>=
+LOGGER = logging.getLogger(__name__)
+DISCONNECT_ERRNOS = frozenset(
+    {errno.EPIPE, errno.ECONNRESET, errno.ECONNABORTED}
+)
+@
+
+<<functions>>=
+def _is_expected_network_error(err: BaseException | None) -> bool:
+    if isinstance(
+        err,
+        (
+            BrokenPipeError,
+            ConnectionResetError,
+            ConnectionAbortedError,
+        ),
+    ):
+        return True
+    return isinstance(err, OSError) and err.errno in DISCONNECT_ERRNOS
+@
+
+<<threading HTTP server methods>>=
+def handle_error(self, request, client_address):
+    err = sys.exc_info()[1]
+    if _is_expected_network_error(err):
+        LOGGER.warning(
+            "ignored network error while handling request from %s: %s",
+            client_address,
+            err,
+        )
+        return
+    super().handle_error(request, client_address)
 @
 
 The handler is generated from the store instance.  A closure is the simplest way
@@ -919,6 +965,100 @@ def serve(
         server.serve_forever()
     finally:
         server.server_close()
+@
+
+Let's verify that expected socket disconnects are logged as warnings instead of
+falling back to the stdlib traceback printer.
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    "error_factory",
+    [
+        pytest.param(
+            lambda: BrokenPipeError(errno.EPIPE, "broken pipe"),
+            id="broken-pipe",
+        ),
+        pytest.param(
+            lambda: ConnectionResetError(
+                errno.ECONNRESET, "connection reset"
+            ),
+            id="connection-reset",
+        ),
+        pytest.param(
+            lambda: ConnectionAbortedError(
+                errno.ECONNABORTED, "connection aborted"
+            ),
+            id="connection-aborted",
+        ),
+        pytest.param(
+            lambda: OSError(errno.EPIPE, "broken pipe"),
+            id="oserror-epipe",
+        ),
+    ],
+)
+def test_server_logs_expected_network_errors(
+    tmp_path, monkeypatch, caplog, error_factory
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    server = create_server(store, host="127.0.0.1", port=0)
+    fallback_calls = []
+
+    def fake_handle_error(self, request, client_address):
+        fallback_calls.append((request, client_address))
+
+    monkeypatch.setattr(
+        server_module.HTTPServer,
+        "handle_error",
+        fake_handle_error,
+    )
+    caplog.set_level(logging.WARNING, logger=server_module.LOGGER.name)
+
+    try:
+        raise error_factory()
+    except OSError:
+        server.handle_error(object(), ("127.0.0.1", 4321))
+    finally:
+        server.server_close()
+
+    assert not fallback_calls
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelno == logging.WARNING
+    assert caplog.records[0].getMessage().startswith(
+        "ignored network error while handling request"
+    )
+@
+
+Unexpected exceptions should still use the normal error path so real bugs keep
+their tracebacks during development.
+
+<<test functions>>=
+def test_server_delegates_unexpected_errors_to_superclass(
+    tmp_path, monkeypatch, caplog
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    server = create_server(store, host="127.0.0.1", port=0)
+    request = object()
+    fallback_calls = []
+
+    def fake_handle_error(self, request, client_address):
+        fallback_calls.append((request, client_address))
+
+    monkeypatch.setattr(
+        server_module.HTTPServer,
+        "handle_error",
+        fake_handle_error,
+    )
+    caplog.set_level(logging.WARNING, logger=server_module.LOGGER.name)
+
+    try:
+        raise RuntimeError("boom")
+    except RuntimeError:
+        server.handle_error(request, ("127.0.0.1", 4321))
+    finally:
+        server.server_close()
+
+    assert fallback_calls == [(request, ("127.0.0.1", 4321))]
+    assert not caplog.records
 @
 
 The tests use a real ephemeral TCP port so that they exercise the routing stack
@@ -1303,8 +1443,10 @@ def test_ambiguous_prefix_returns_multiple_choices(tmp_path, monkeypatch):
 
 <<test [[server.py]]>>=
 from contextlib import contextmanager
+import errno
 import http.client
 import json
+import logging
 import threading
 
 import mentipy.server as server_module
