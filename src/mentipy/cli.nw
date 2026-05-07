@@ -20,6 +20,8 @@ from contextlib import contextmanager
 import csv
 import io
 import json
+import shutil
+import textwrap
 import time
 from typing import Optional
 
@@ -142,6 +144,16 @@ EXPORT_FORMAT_OPTION = typer.Option(
     "json",
     help="Output format: json or csv.",
 )
+LIST_FULL_OPTION = typer.Option(
+    False,
+    "--full",
+    help="Show the full question text in a wrapped table.",
+)
+
+LIST_PREVIEW_WIDTH = 30
+LIST_COLUMN_GAP = 2
+LIST_FALLBACK_WIDTH = 80
+LIST_MIN_TEXT_WIDTH = 20
 
 WARNING_TEXT = (
     "Warning: exposing mentipy makes its unauthenticated polling pages\n"
@@ -151,7 +163,7 @@ WARNING_TEXT = (
 @
 
 The helpers below do the command-independent work: resolving prefixes,
-serialising exports, and formatting live watcher output.
+serialising exports, and formatting question listings plus live watcher output.
 
 <<functions>>=
 def _configured_store(path: str | None) -> Store:
@@ -213,6 +225,56 @@ def _format_value(value) -> str:
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False)
+
+
+def _single_line_text(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _question_summary(text: str) -> str:
+    text = _single_line_text(text)
+    if len(text) <= LIST_PREVIEW_WIDTH:
+        return text
+    return text[: LIST_PREVIEW_WIDTH - 3] + "..."
+
+
+def _terminal_width() -> int:
+    return shutil.get_terminal_size((LIST_FALLBACK_WIDTH, 24)).columns
+
+
+def _question_listing(entries: list[dict[str, object]], *, full: bool) -> str:
+    if not entries:
+        return "No questions registered yet."
+
+    if not full:
+        return "\n".join(
+            f'{entry["url_prefix"]}  {_question_summary(str(entry["text"]))}'
+            for entry in entries
+        )
+
+    prefix_width = max(len(str(entry["url_prefix"])) for entry in entries)
+    text_width = max(
+        LIST_MIN_TEXT_WIDTH,
+        _terminal_width() - prefix_width - LIST_COLUMN_GAP,
+    )
+    lines = []
+
+    for entry in entries:
+        prefix = str(entry["url_prefix"])
+        wrapped = textwrap.wrap(
+            _single_line_text(str(entry["text"])),
+            width=text_width,
+            break_long_words=False,
+            break_on_hyphens=False,
+        ) or [""]
+        lines.append(
+            f"{prefix:<{prefix_width}}{' ' * LIST_COLUMN_GAP}{wrapped[0]}"
+        )
+        indent = " " * (prefix_width + LIST_COLUMN_GAP)
+        for line in wrapped[1:]:
+            lines.append(f"{indent}{line}")
+
+    return "\n".join(lines)
 
 
 def _watch_snapshot(store: Store, prefix: str) -> str:
@@ -511,6 +573,22 @@ def render_scale(
             ),
         )
     )
+@
+
+
+The list command gives a quick view of the registered questions.  The default
+format stays compact enough for scanning, while [[--full]] spends the terminal
+width on wrapped question text.
+
+<<cli setup>>=
+@cli.command("list")
+def list_questions(
+    full: bool = LIST_FULL_OPTION,
+    store: Optional[str] = STORE_OPTION,
+):
+    """List the registered questions."""
+
+    typer.echo(_question_listing(_configured_store(store).all_questions(), full=full))
 
 
 @cli.command()
@@ -1249,6 +1327,51 @@ The interactive watcher test interrupts the sleep call after the first redraw so
 the command remains a normal unit test.
 
 <<test functions>>=
+def test_list_command_reports_empty_store(tmp_path):
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        ["list", "--store", str(tmp_path / "mentipy.json")],
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "No questions registered yet."
+
+
+def test_list_command_shows_prefix_and_short_summary(tmp_path):
+    runner = CliRunner()
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    text = "abcdefghijklmnopqrstuvwxyz1234567890"
+    prefix = store.register(OpenQuestion(text))
+    full_hash = store.resolve(prefix)
+
+    result = runner.invoke(cli, ["list", "--store", str(store.path)])
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == f"{prefix}  abcdefghijklmnopqrstuvwxyz1..."
+    assert full_hash not in result.stdout
+
+
+def test_list_command_full_wraps_question_text(tmp_path, monkeypatch):
+    runner = CliRunner()
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    text = "one two three four five six seven"
+    prefix = store.register(OpenQuestion(text))
+    monkeypatch.setattr("mentipy.cli._terminal_width", lambda: 20)
+
+    result = runner.invoke(
+        cli,
+        ["list", "--full", "--store", str(store.path)],
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == (
+        f"{prefix}  one two three four\n"
+        f"{' ' * (len(prefix) + LIST_COLUMN_GAP)}five six seven"
+    )
+
+
 def test_watch_command_prints_a_snapshot(tmp_path, monkeypatch):
     runner = CliRunner()
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
