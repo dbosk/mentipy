@@ -144,6 +144,15 @@ wrapper changes: slides want columns, article handouts want a flat text flow,
 some printed manuals still want a QR block, and Beamer can emit both shapes
 from one source via its mode switch.
 
+There is one visibility constraint hidden inside that wrapper choice.  The flat
+article layout prints the respondent URL directly in the returned LaTeX, so
+[[show_url]] can hide or show that line.  The QR-bearing layouts instead
+[[\input]] the [[.pdf_tex]] sidecar written by [[make_qr]], and that sidecar
+always carries the canonical URL caption that [[mentipy serve]] later
+regenerates together with the QR image.  This keeps the printed caption and the
+matrix in sync after public URL rewrites, but it also means [[show_url]] only
+affects layouts that do \\emph{not} embed the QR sidecar.
+
 <<functions>>=
 def _render_body(question: Question) -> str:
     if isinstance(question, MCQuestion):
@@ -582,9 +591,11 @@ def test_article_layout_is_flat_and_qrless(tmp_path, monkeypatch):
     assert f"\\texttt{{http://example.test:8080/{prefix}}}" in rendered
 @
 
-The new environment and URL toggles should apply uniformly no matter which
-public helper or layout a caller chooses, so the tests pin precedence and the
-mode-aware structure directly on [[mc()]].
+The environment toggle applies uniformly across layouts, but the URL toggle is
+deliberately narrower: only the QR-less article branches can hide the printed
+URL because QR-bearing layouts read that caption from the regenerated sidecar.
+The tests pin both the shared precedence rules and that visibility boundary
+directly on [[mc()]].
 
 <<test functions>>=
 def test_default_slide_layout_remains_plain_without_environment(
@@ -752,7 +763,9 @@ def test_empty_environment_override_disables_configured_wrap(tmp_path, monkeypat
     assert "\\textbf{" in rendered
 
 
-def test_show_url_false_suppresses_url_in_article_variants(tmp_path, monkeypatch):
+def test_show_url_false_suppresses_url_in_qrless_article_variants(
+    tmp_path, monkeypatch
+):
     monkeypatch.chdir(tmp_path)
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
 
@@ -763,15 +776,6 @@ def test_show_url_false_suppresses_url_in_article_variants(tmp_path, monkeypatch
         base_url="http://example.test:8080",
         qr_dir="build",
         layout="article",
-        show_url=False,
-    )
-    article_qr = mc(
-        "How was the lecture?",
-        ["Great", "OK", "Boring"],
-        store=store,
-        base_url="http://example.test:8080",
-        qr_dir="build",
-        layout="article+qr",
         show_url=False,
     )
     auto = mc(
@@ -785,12 +789,33 @@ def test_show_url_false_suppresses_url_in_article_variants(tmp_path, monkeypatch
     )
 
     assert "\\texttt{http://example.test:8080/" not in article
-    assert "\\texttt{http://example.test:8080/" not in article_qr
-    assert "\\input" in article_qr
     assert "\\texttt{http://example.test:8080/" not in auto.split(
         "\\mode<article>{%\n",
         1,
     )[1]
+
+
+def test_article_qr_layout_keeps_the_sidecar_url_caption(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    rendered = mc(
+        "How was the lecture?",
+        ["Great", "OK", "Boring"],
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir="build",
+        layout="article+qr",
+        show_url=False,
+    )
+
+    [entry] = store.all_questions()
+    prefix = entry["url_prefix"]
+    sidecar = tmp_path / "build" / f"Q-{prefix}.pdf_tex"
+
+    assert f"\\input{{build/Q-{prefix}.pdf_tex}}" in rendered
+    assert sidecar.exists()
+    assert f"http://example.test:8080/{prefix}" in sidecar.read_text()
 
 
 def test_show_url_config_is_used_unless_call_overrides_it(tmp_path, monkeypatch):

@@ -296,9 +296,11 @@ Now, the rendered question:
   environment, and the article layout.
 
   \textbf{What this reveals}: The environment wrapper and the question
-  body are independent from the trailing respondent URL, so article
-  layouts can keep the exercise styling while suppressing the printed
-  link.
+  body are independent from the trailing respondent URL, so the flat
+  article layout can keep the exercise styling while suppressing the
+  printed link.  The QR-bearing layout keeps the sidecar caption so
+  [[mentipy serve]] can later refresh the canonical URL together with
+  the QR image.
 }
 
 \subsection{Rendering from the Command Line}
@@ -323,7 +325,9 @@ Environment resolution follows a simple precedence chain: [[--env]] wins over
 [[MENTIPY_QUESTION_ENVIRONMENT]], which wins over
 [[mentipy.question_environment]] in the config file.  The corresponding URL
 toggle uses [[--url]] or [[--no-url]] when passed, and otherwise falls back to
-[[mentipy.show_url]].
+[[mentipy.show_url]] for flat article output.  QR-bearing layouts keep the
+canonical URL inside the regenerated [[.pdf_tex]] sidecar so that the caption
+and QR image stay in sync after [[mentipy serve]] rewrites the public address.
 
 The URL-affecting flags on [[mentipy url]] mirror [[mentipy serve]].
 [[--port]] chooses the listener port for local URLs, and [[--public]] reuses
