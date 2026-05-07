@@ -296,9 +296,20 @@ The render helpers still accept per-call [[qr_dir]] and [[qr_format]]
 overrides.  Later regeneration therefore cannot reconstruct the right artifact
 paths from today's global defaults alone.  After each render we remember the
 concrete QR targets in the store, and [[regenerate_qrs()]] reuses those exact
-files unless its caller passes an explicit override.
+files unless its caller passes an explicit override.  The remembered absolute
+paths are only for the runtime file write.  The sidecar keeps the original
+document-facing include path so slide sources do not suddenly switch to
+absolute [[\includegraphics]] paths after [[mentipy serve]] refreshes the URL.
 
 <<functions>>=
+def _latex_include_path(target: Path) -> Path:
+    cwd = Path.cwd().resolve()
+    try:
+        return target.resolve().relative_to(cwd)
+    except ValueError:
+        return target
+
+
 def _regeneration_targets(
     remembered: list[Path],
     prefix: str,
@@ -330,7 +341,12 @@ def regenerate_qrs(
         remembered = store.qr_targets(full_hash)
         for target in _regeneration_targets(remembered, prefix, qr_dir, qr_format):
             fmt = target.suffix.lstrip(".") or DEFAULT_QR_FORMAT
-            make_qr(url, target, fmt=fmt)
+            make_qr(
+                url,
+                target,
+                fmt=fmt,
+                include_path=_latex_include_path(target),
+            )
             count += 1
 
     return count
@@ -883,8 +899,8 @@ def test_regenerate_qrs_rewrites_every_registered_question(tmp_path, monkeypatch
     second = store.register(OpenQuestion("What should we repeat?"))
     calls = []
 
-    def fake_make_qr(url, out_path, fmt="pdf"):
-        calls.append((url, Path(out_path), fmt))
+    def fake_make_qr(url, out_path, fmt="pdf", include_path=None):
+        calls.append((url, Path(out_path), fmt, Path(include_path)))
         return Path(out_path)
 
     monkeypatch.setattr("mentipy.latex.make_qr", fake_make_qr)
@@ -893,11 +909,17 @@ def test_regenerate_qrs_rewrites_every_registered_question(tmp_path, monkeypatch
 
     assert count == 2
     assert calls == [
-        (f"http://public.example:9000/{first}", tmp_path / f"Q-{first}.pdf", "pdf"),
+        (
+            f"http://public.example:9000/{first}",
+            tmp_path / f"Q-{first}.pdf",
+            "pdf",
+            tmp_path / f"Q-{first}.pdf",
+        ),
         (
             f"http://public.example:9000/{second}",
             tmp_path / f"Q-{second}.pdf",
             "pdf",
+            tmp_path / f"Q-{second}.pdf",
         ),
     ]
 
@@ -932,8 +954,8 @@ def test_regenerate_qrs_reuses_all_remembered_qr_targets(tmp_path, monkeypatch):
 
     calls = []
 
-    def fake_make_qr(url, out_path, fmt="pdf"):
-        calls.append((url, Path(out_path), fmt))
+    def fake_make_qr(url, out_path, fmt="pdf", include_path=None):
+        calls.append((url, Path(out_path), fmt, Path(include_path)))
         return Path(out_path)
 
     monkeypatch.setattr("mentipy.latex.make_qr", fake_make_qr)
@@ -946,11 +968,13 @@ def test_regenerate_qrs_reuses_all_remembered_qr_targets(tmp_path, monkeypatch):
             f"http://public.example:9000/{prefix}",
             tmp_path / "slides" / f"Q-{prefix}.pdf",
             "pdf",
+            Path("slides") / f"Q-{prefix}.pdf",
         ),
         (
             f"http://public.example:9000/{prefix}",
             tmp_path / "handout" / f"Q-{prefix}.png",
             "png",
+            Path("handout") / f"Q-{prefix}.png",
         ),
     ]
 @
