@@ -21,10 +21,11 @@ from __future__ import annotations
 @
 
 <<imports>>=
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import statistics
 import threading
 from typing import Any, Iterator
 
@@ -543,51 +544,180 @@ def test_record_keeps_answers_from_concurrent_threads(tmp_path):
     assert sorted(answer["value"] for answer in answers) == [0, 1]
 @
 
-Finally, the result view aggregates answers according to the question type.  We
-keep the raw answer log in the returned structure because the CLI export command
-and the localhost JSON results endpoint both need it.
+The result view aggregates answers according to the question type, but it
+also has to support two cross-cutting concerns the lecturer expects from a
+classroom poll.
+\begin{description}
+\item[Time-window filtering] A question reused across lectures, or even
+  across years, accumulates every answer it has ever received under the
+  same canonical hash.  The lecturer wants to see \emph{just this hour}
+  or \emph{just today} as easily as the lifetime view, without that
+  pooling becoming an obstacle.
+\item[Descriptive statistics] Counts alone do not tell a lecturer whether
+  the class agrees, splits, or drifts; means and standard deviations make
+  scale results actionable, and a mode callout makes multiple-choice
+  results readable at a glance.
+\end{description}
+Both concerns are read-side filters and computations over the same answer
+log---no schema change is needed because every answer already carries a
+UTC timestamp.  We keep the (filtered) raw log in the returned structure
+because the CLI export and the JSON results endpoint still need it;
+aggregated counts and statistics ride on top so HTML, JSON, and CLI
+consumers all read the same numbers.
+
+<<constants>>=
+RESULTS_WINDOW_DELTAS = {
+    "hour": timedelta(hours=1),
+    "day": timedelta(days=1),
+    "all": None,
+}
+@
+
+Unknown values fall back to [[\"all\"]] so a stray query string can never
+wedge the page; the explicit allow-list also keeps the policy auditable
+in one place.
 
 <<store methods>>=
-def results(self, full_hash: str) -> dict[str, Any]:
-    """Return aggregated results for ``full_hash``."""
+def results(self, full_hash: str,
+            *, window: str = "all") -> dict[str, Any]:
+    """Return aggregated results for ``full_hash``.
 
-    data = self._data()
-    meta = data["questions"][full_hash]
-    question = question_from_dict(meta)
-    answers = list(data["answers"].get(full_hash, []))
-    results = {
-        "hash": full_hash,
-        "url_prefix": meta["url_prefix"],
-        "question": question.to_dict(),
-        "total": len(answers),
-        "answers": answers,
-    }
+    The optional ``window`` keyword filters the answer log by recency.
+    Accepted values are ``"hour"`` (the last 60 minutes), ``"day"``
+    (the last 24 hours), and ``"all"`` (default; the entire history).
+    Unknown values are treated as ``"all"``.
+    """
+
+    <<load metadata and apply window filter>>
+    <<assemble base results dict>>
 
     if isinstance(question, MCQuestion):
-        counts = [0] * len(question.options)
-        for answer in answers:
-            values = answer["value"] if question.multi else [answer["value"]]
-            for index in values:
-                if 0 <= index < len(counts):
-                    counts[index] += 1
-        results["counts"] = counts
-        return results
-
-    if isinstance(question, ScaleQuestion):
-        counts = {
-            value: 0 for value in range(question.low, question.high + 1)
-        }
-        for answer in answers:
-            value = answer["value"]
-            if value in counts:
-                counts[value] += 1
-        results["counts"] = counts
+        <<add MC counts and stats>>
+    elif isinstance(question, ScaleQuestion):
+        <<add scale counts and stats>>
+    elif isinstance(question, OpenQuestion):
+        <<add open-text stats>>
 
     return results
 @
 
-The aggregation test keeps the counting contract explicit for the dashboard and
-the watcher.
+Loading metadata is unchanged from the previous implementation; the new
+behaviour is the window filter.  We compute the cutoff once and keep
+answers whose ISO timestamp is at or after it.  Storing UTC throughout
+means [[datetime.fromisoformat]] (which understands the [[Z]] suffix
+from Python~3.11 onwards) parses the stored timestamps directly, so we
+do not need a separate parser.
+
+<<load metadata and apply window filter>>=
+data = self._data()
+meta = data["questions"][full_hash]
+question = question_from_dict(meta)
+all_answers = list(data["answers"].get(full_hash, []))
+
+delta = RESULTS_WINDOW_DELTAS.get(window)
+if window == "all" or delta is None:
+    answers = all_answers
+else:
+    cutoff = datetime.now(timezone.utc) - delta
+    answers = [
+        answer for answer in all_answers
+        if datetime.fromisoformat(answer["ts"]) >= cutoff
+    ]
+@
+
+The base structure echoes back which window actually applied so HTML
+and JSON consumers can render the right active filter; mismatched values
+collapse to [[\"all\"]] before they reach the response.
+
+<<assemble base results dict>>=
+applied_window = (
+    window if window in RESULTS_WINDOW_DELTAS else "all"
+)
+results = {
+    "hash": full_hash,
+    "url_prefix": meta["url_prefix"],
+    "question": question.to_dict(),
+    "window": applied_window,
+    "total": len(answers),
+    "answers": answers,
+}
+@
+
+For multiple-choice questions we count per option and add a percentage
+breakdown plus the modal index.  Percentages are computed against the
+number of \emph{respondents} so a single-choice poll's bars sum to
+100\,\%; for a multi-select poll the bars are independently meaningful
+(\enquote{60\,\% of respondents picked A}), even though they may sum
+past 100\,\%.
+
+<<add MC counts and stats>>=
+counts = [0] * len(question.options)
+for answer in answers:
+    selections = (
+        answer["value"] if question.multi else [answer["value"]]
+    )
+    for index in selections:
+        if 0 <= index < len(counts):
+            counts[index] += 1
+denominator = len(answers) or 1
+results["counts"] = counts
+results["percentages"] = [
+    count / denominator * 100 for count in counts
+]
+results["mode_index"] = (
+    max(range(len(counts)), key=counts.__getitem__)
+    if answers else None
+)
+@
+
+For scale questions we keep the per-bucket histogram and add descriptive
+statistics over the flat list of numeric answers.  We use the population
+standard deviation [[statistics.pstdev]] because each poll \emph{is} the
+whole population we sampled---there is no larger population we are
+estimating from a sample, so the Bessel correction would only confuse a
+lecturer reading the number.
+
+<<add scale counts and stats>>=
+counts = {
+    value: 0 for value in range(question.low, question.high + 1)
+}
+values = []
+for answer in answers:
+    value = answer["value"]
+    values.append(value)
+    if value in counts:
+        counts[value] += 1
+results["counts"] = counts
+if values:
+    results["mean"] = statistics.mean(values)
+    results["median"] = statistics.median(values)
+    results["stddev"] = (
+        statistics.pstdev(values) if len(values) > 1 else 0.0
+    )
+    results["min"] = min(values)
+    results["max"] = max(values)
+else:
+    results["mean"] = None
+    results["median"] = None
+    results["stddev"] = None
+    results["min"] = None
+    results["max"] = None
+@
+
+For free-text answers, the summary that helps a lecturer most is the
+average answer length.  It discriminates between one-word reactions and
+substantive paragraphs at a glance, and it is invariant to the actual
+content (which the JSON export carries verbatim for downstream analysis).
+
+<<add open-text stats>>=
+lengths = [len(answer["value"]) for answer in answers]
+results["avg_length"] = (
+    statistics.mean(lengths) if lengths else None
+)
+@
+
+The aggregation test keeps the counting contract explicit for the
+dashboard and the watcher.
 
 <<test functions>>=
 def test_results_aggregate_multiple_choice_answers(tmp_path):
@@ -602,6 +732,142 @@ def test_results_aggregate_multiple_choice_answers(tmp_path):
 
     assert results["counts"] == [1, 0, 2]
     assert results["total"] == 3
+@
+
+The window filter is the cross-cutting concern, so we test it
+independently of question type.  We backdate one of the answers by
+editing the on-disk store directly: monkeypatching [[_timestamp]] would
+only affect future writes, not the existing log entry we want to age.
+
+<<test functions>>=
+def test_results_window_filter_keeps_only_recent_answers(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, 0)
+    store.record(full_hash, 1)
+
+    data = store._data()
+    aged = datetime.now(timezone.utc) - timedelta(hours=2)
+    data["answers"][full_hash][0]["ts"] = (
+        aged.isoformat().replace("+00:00", "Z")
+    )
+    store._write(data)
+
+    last_hour = store.results(full_hash, window="hour")
+    all_time = store.results(full_hash, window="all")
+
+    assert last_hour["total"] == 1
+    assert all_time["total"] == 2
+    assert last_hour["window"] == "hour"
+    assert all_time["window"] == "all"
+
+
+def test_results_window_unknown_falls_back_to_all(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, 0)
+
+    garbled = store.results(full_hash, window="garbage")
+
+    assert garbled["window"] == "all"
+    assert garbled["total"] == 1
+@
+
+For multiple-choice questions we test the new mode and percentage
+fields together with the existing counts contract, so future changes
+cannot silently break either part.
+
+<<test functions>>=
+def test_results_mc_reports_mode_and_percentages(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B", "C")))
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, 0)
+    store.record(full_hash, 0)
+    store.record(full_hash, 0)
+    store.record(full_hash, 2)
+
+    summary = store.results(full_hash)
+
+    assert summary["counts"] == [3, 0, 1]
+    assert summary["mode_index"] == 0
+    assert summary["percentages"][0] == pytest.approx(75.0)
+    assert summary["percentages"][1] == pytest.approx(0.0)
+    assert summary["percentages"][2] == pytest.approx(25.0)
+@
+
+For scale questions, the descriptive statistics must agree with the
+[[statistics]] module so that any future change of dispersion measure is
+deliberate and visible in the diff.
+
+<<test functions>>=
+def test_results_scale_reports_descriptive_statistics(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(ScaleQuestion("How clear?", low=1, high=5))
+    full_hash = store.resolve(prefix)
+    for value in [1, 2, 2, 3, 5]:
+        store.record(full_hash, value)
+
+    summary = store.results(full_hash)
+
+    assert summary["mean"] == pytest.approx(2.6)
+    assert summary["median"] == 2
+    assert summary["stddev"] == pytest.approx(
+        statistics.pstdev([1, 2, 2, 3, 5])
+    )
+    assert summary["min"] == 1
+    assert summary["max"] == 5
+@
+
+For open-text questions, the average length lets the dashboard show
+whether students are writing substantive paragraphs or one-word
+reactions.
+
+<<test functions>>=
+def test_results_open_reports_average_length(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, "abcde")
+    store.record(full_hash, "abcdefghi")
+
+    summary = store.results(full_hash)
+
+    assert summary["avg_length"] == pytest.approx(7.0)
+@
+
+When the window filter empties the answer log, every per-type statistic
+collapses to [[None]] so consumers can render an explicit \enquote{no
+answers yet} state without having to distinguish a missing field from a
+genuine zero.
+
+<<test functions>>=
+def test_results_empty_window_collapses_stats_to_none(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    scale_prefix = store.register(
+        ScaleQuestion("How clear?", low=1, high=5)
+    )
+    open_prefix = store.register(OpenQuestion("Comment?"))
+    mc_prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+
+    scale = store.results(store.resolve(scale_prefix), window="hour")
+    opened = store.results(store.resolve(open_prefix), window="hour")
+    mc = store.results(store.resolve(mc_prefix), window="hour")
+
+    assert scale["total"] == 0
+    assert scale["mean"] is None
+    assert scale["median"] is None
+    assert scale["stddev"] is None
+    assert scale["min"] is None
+    assert scale["max"] is None
+
+    assert opened["total"] == 0
+    assert opened["avg_length"] is None
+
+    assert mc["total"] == 0
+    assert mc["mode_index"] is None
 @
 
 <<test [[store.py]]>>=

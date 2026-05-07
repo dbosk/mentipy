@@ -24,6 +24,8 @@ from string import Template
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from markdown_it import MarkdownIt
+
 from mentipy.questions import MCQuestion, OpenQuestion, ScaleQuestion
 from mentipy.store import Store
 @
@@ -84,6 +86,66 @@ code {
   background: #f0f0f0;
   padding: 0.1rem 0.25rem;
 }
+
+.window-filter {
+  align-items: center;
+  background: #fafafa;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0 0 1.25rem;
+  padding: 0.5rem 0.75rem;
+}
+.window-filter label { display: inline; margin: 0; }
+.window-filter button { margin: 0; }
+
+.bar-chart {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.75rem 0 1rem;
+}
+.bar-row {
+  align-items: center;
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: minmax(5rem, 12rem) 1fr minmax(5rem, auto);
+}
+.bar-label { font-weight: bold; text-align: right; }
+.bar-bar {
+  background: #eee;
+  border-radius: 3px;
+  display: block;
+  height: 1.5rem;
+  overflow: hidden;
+}
+.bar-fill {
+  background: #4a90d9;
+  display: block;
+  height: 100%;
+}
+.bar-count { font-variant-numeric: tabular-nums; }
+
+.stats {
+  background: #fafafa;
+  border-radius: 4px;
+  margin: 0.5rem 0 1rem;
+  padding: 0.5rem 0.75rem;
+}
+.stats .stat-label { color: #555; font-weight: bold; }
+
+.mode-callout {
+  background: #f0f7ff;
+  border-left: 3px solid #4a90d9;
+  margin: 0.5rem 0 1rem;
+  padding: 0.5rem 0.75rem;
+}
+
+.md-answer { margin: 0 0 0.5rem; }
+.md-answer > :first-child { margin-top: 0; }
+.md-answer > :last-child { margin-bottom: 0; }
+.md-answer ul, .md-answer ol { margin: 0.25rem 0 0.25rem 1.5rem; }
 """.strip()
 
 REFRESH_SECONDS = 2
@@ -216,41 +278,366 @@ def _render_form(store: Store, full_hash: str) -> str:
     )
 
 
-def _render_results(store: Store, full_hash: str) -> str:
-    results = store.results(full_hash)
+@
+
+\section{Rendering results}
+
+The results page has three jobs: it shows the lecturer how many people
+have answered, how those answers distribute, and which answers came in.
+A classroom polling tool benefits from one extra concern that a generic
+dashboard would not need: a \emph{time window} the lecturer can scope
+to, so a question reused across lectures (or even across years, all
+sharing the same canonical hash) can be inspected as \enquote{just this
+hour} or \enquote{everything ever}.  The store already filters and
+aggregates by window, so the renderer only chooses a window from the
+query string, asks the store, and lays out the result.
+
+We split the rendering into small helpers so each piece can be tested
+in isolation and the pedagogical flow---read input, fetch data, lay
+out output---reads from top to bottom.
+
+\subsection{Picking the window from the query string}
+
+The window arrives as a query-string parameter on [[/<prefix>/results]].
+We allow only the strings the store accepts; anything else collapses to
+[[\"all\"]] before it reaches the store, mirroring the store's own
+fallback so the layers stay consistent.
+
+<<functions>>=
+def _parse_window(query_string: str) -> str:
+    candidate = parse_qs(query_string).get("window", ["all"])[0]
+    if candidate in {"hour", "day", "all"}:
+        return candidate
+    return "all"
+@
+
+<<test functions>>=
+def test_parse_window_keeps_known_values_and_falls_back():
+    assert server_module._parse_window("window=hour") == "hour"
+    assert server_module._parse_window("window=day") == "day"
+    assert server_module._parse_window("window=all") == "all"
+    assert server_module._parse_window("") == "all"
+    assert server_module._parse_window("window=garbage") == "all"
+@
+
+\subsection{The window filter form}
+
+The filter is a plain [[<form method="get">]] with a [[<select>]] and
+a submit button.  Three reasons to keep it boring: there is no
+JavaScript elsewhere in the project, the URL stays bookmarkable, and
+the existing two-second [[<meta http-equiv="refresh">]] preserves the
+query string because it reloads the current URL verbatim---so the
+lecturer's filter choice survives every refresh tick without us
+writing any client-side state.
+
+<<functions>>=
+def _render_window_filter(prefix: str, current: str) -> str:
+    options = [
+        ("hour", "Last hour"),
+        ("day", "Last day"),
+        ("all", "All time"),
+    ]
+    rendered = "".join(
+        f'<option value="{value}"'
+        f'{" selected" if value == current else ""}>'
+        f'{escape(label)}</option>'
+        for value, label in options
+    )
+    return (
+        f'<form class="window-filter" method="get" '
+        f'action="/{prefix}/results">'
+        f'<label for="window">Show:</label> '
+        f'<select id="window" name="window">{rendered}</select> '
+        f'<button type="submit">Apply</button>'
+        f'</form>'
+    )
+@
+
+<<test functions>>=
+def test_window_filter_marks_only_the_current_selection():
+    rendered = server_module._render_window_filter("abcd", "hour")
+    assert 'value="hour" selected' in rendered
+    assert 'value="day" selected' not in rendered
+    assert 'value="all" selected' not in rendered
+    assert 'action="/abcd/results"' in rendered
+@
+
+\subsection{Counts as a horizontal bar chart}
+
+The histogram is one CSS-only bar per category.  Each row carries the
+label, a track that fills proportionally to the count, and the count
+itself with its share as a percentage.  Inline [[width:]] styles avoid
+inventing a JavaScript charting layer for what is fundamentally a
+single linear scale.
+
+<<functions>>=
+def _render_bar_chart(
+    labels: list[str],
+    counts: list[int],
+    percentages: list[float],
+) -> str:
+    rows = []
+    for label, count, percentage in zip(labels, counts, percentages):
+        rows.append(
+            f'<div class="bar-row">'
+            f'<span class="bar-label">{escape(str(label))}</span>'
+            f'<span class="bar-bar">'
+            f'<span class="bar-fill" '
+            f'style="width:{percentage:.1f}%"></span>'
+            f'</span>'
+            f'<span class="bar-count">{count} '
+            f'({percentage:.0f}%)</span>'
+            f'</div>'
+        )
+    return '<div class="bar-chart">' + "".join(rows) + '</div>'
+@
+
+<<test functions>>=
+def test_bar_chart_emits_one_row_per_label_with_inline_width():
+    rendered = server_module._render_bar_chart(
+        ["A", "B"], [3, 1], [75.0, 25.0]
+    )
+    assert rendered.count('class="bar-row"') == 2
+    assert 'style="width:75.0%"' in rendered
+    assert 'style="width:25.0%"' in rendered
+    assert ">A<" in rendered and ">B<" in rendered
+@
+
+\subsection{Per-type stats lines}
+
+Multiple-choice questions get a mode callout: which option the class
+landed on most.  Scale questions get the descriptive statistics inline
+in one row.  Open questions get the average answer length.  Each helper
+returns an empty string when there are no answers, so the page degrades
+gracefully to just the window filter and the \enquote{Total responses:
+0} line.
+
+<<functions>>=
+def _render_mc_stats(
+    question: MCQuestion, summary: dict[str, Any]
+) -> str:
+    mode_index = summary.get("mode_index")
+    if mode_index is None:
+        return ""
+    label = question.options[mode_index]
+    percentage = summary["percentages"][mode_index]
+    return (
+        f'<p class="mode-callout">'
+        f'Mode: <strong>{escape(label)}</strong> '
+        f'({percentage:.0f}%)'
+        f'</p>'
+    )
+@
+
+<<functions>>=
+def _render_scale_stats(summary: dict[str, Any]) -> str:
+    if summary.get("mean") is None:
+        return ""
+    pairs = [
+        ("Mean", f'{summary["mean"]:.2f}'),
+        ("Median", f'{summary["median"]}'),
+        ("Std", f'{summary["stddev"]:.2f}'),
+        ("Min", f'{summary["min"]}'),
+        ("Max", f'{summary["max"]}'),
+    ]
+    body = " · ".join(
+        f'<span class="stat-label">{label}:</span> '
+        f'<strong>{value}</strong>'
+        for label, value in pairs
+    )
+    return f'<p class="stats">{body}</p>'
+@
+
+<<functions>>=
+def _render_open_stats(summary: dict[str, Any]) -> str:
+    avg = summary.get("avg_length")
+    if avg is None:
+        return ""
+    return (
+        f'<p class="stats">'
+        f'<span class="stat-label">Avg length:</span> '
+        f'<strong>{avg:.0f}</strong> chars'
+        f'</p>'
+    )
+@
+
+\subsection{Markdown for free-text answers}
+
+Free-text answers benefit from light formatting---emphasis, lists, code
+spans, links to references---so they read as prose rather than as a wall
+of plain text.  Markdown is the de-facto convention for that, and
+[[markdown-it-py]] is a pure-Python CommonMark engine without external
+binaries to install.
+
+The danger of rendering user-submitted content is XSS.  We close two
+common vectors:
+\begin{description}
+\item[Raw HTML] [[html=False]] makes the parser escape any literal
+  [[<script>]], [[<iframe>]], or other tag in the input.
+\item[Hostile URLs] An explicit allow-list of [[http]], [[https]], and
+  [[mailto]] sits in front of the engine's default validator (which
+  already blocks [[javascript:]], [[vbscript:]], [[data:]], and
+  [[file:]] URLs).  Replacing the default with an explicit allow-list
+  keeps the policy auditable in one place and prevents a future library
+  upgrade from quietly broadening the accepted scheme set.
+\end{description}
+Storage stays as the raw markdown source; rendering happens only at
+view time, so the JSON export remains a faithful, lossless copy of what
+the student typed.
+
+<<constants>>=
+_MARKDOWN = MarkdownIt(
+    "commonmark",
+    {
+        "html": False,
+        "linkify": False,
+        "typographer": False,
+    },
+)
+
+_SAFE_URL_SCHEMES = {"http", "https", "mailto"}
+@
+
+The validator runs on every link the parser sees and is bound to
+[[_MARKDOWN]] once at import time.  A relative URL (no colon) is
+rejected: the polling server does not host arbitrary local pages, and
+resolving relative links at render time is outside the threat model.
+
+<<functions>>=
+def _is_safe_url(url: str) -> bool:
+    if ":" not in url:
+        return False
+    scheme = url.split(":", 1)[0].strip().lower()
+    return scheme in _SAFE_URL_SCHEMES
+
+
+_MARKDOWN.validateLink = _is_safe_url
+
+
+def _render_open_answer_markdown(text: str) -> str:
+    """Render a student's free-text answer as safe HTML."""
+    return _MARKDOWN.render(text)
+@
+
+<<test functions>>=
+def test_open_answer_renders_basic_markdown():
+    rendered = server_module._render_open_answer_markdown(
+        "**bold**\n\n- a\n- b"
+    )
+    assert "<strong>bold</strong>" in rendered
+    assert "<ul>" in rendered
+    assert "<li>a</li>" in rendered
+
+
+def test_open_answer_escapes_raw_html_tags():
+    rendered = server_module._render_open_answer_markdown(
+        "<script>alert(1)</script>"
+    )
+    assert "<script>alert" not in rendered
+    assert "&lt;script&gt;" in rendered
+
+
+def test_open_answer_strips_javascript_url():
+    rendered = server_module._render_open_answer_markdown(
+        "[click](javascript:alert(1))"
+    )
+    assert 'href="javascript' not in rendered
+
+
+def test_open_answer_allows_https_url():
+    rendered = server_module._render_open_answer_markdown(
+        "[ok](https://example.com)"
+    )
+    assert '<a href="https://example.com">ok</a>' in rendered
+
+
+def test_open_answer_blocks_relative_url():
+    rendered = server_module._render_open_answer_markdown(
+        "[here](relative/path)"
+    )
+    assert 'href="relative/path"' not in rendered
+@
+
+\subsection{Rendering open-text answers}
+
+Each answer becomes one [[<li>]] containing the markdown-rendered HTML.
+The wrapping class lets the stylesheet tighten margins on inner
+[[<p>]], [[<ul>]], and [[<ol>]] so multi-paragraph answers do not
+sprawl across the page.  The previously rendered ISO timestamp is gone
+from this view---it remains in the JSON export for downstream analysis,
+but a screen full of timestamps does not help the lecturer scan
+free-text reactions during a live lecture.
+
+<<functions>>=
+def _render_open_answers(answers: list[dict[str, Any]]) -> str:
+    if not answers:
+        return "<p>No free-text answers yet.</p>"
+    items = "".join(
+        f'<li class="md-answer">'
+        f'{_render_open_answer_markdown(answer["value"])}'
+        f'</li>'
+        for answer in answers
+    )
+    return f'<ol>{items}</ol>'
+@
+
+\subsection{Dispatching by question type}
+
+The top-level renderer reads the window-filtered summary from the store
+and dispatches to the per-type helpers.  The window filter sits at the
+top so the lecturer can rescope without scrolling; the total responses
+line follows because that is the first number every lecturer asks for;
+then come the type-specific stats and the visualization.
+
+<<functions>>=
+def _render_results(
+    store: Store, full_hash: str, *, window: str = "all"
+) -> str:
+    summary = store.results(full_hash, window=window)
     question = store.question(full_hash)
-    lines = [f"<p>Total responses: <strong>{results['total']}</strong></p>"]
+
+    parts = [
+        _render_window_filter(
+            summary["url_prefix"], summary["window"]
+        ),
+        f'<p>Total responses: '
+        f'<strong>{summary["total"]}</strong></p>',
+    ]
 
     if isinstance(question, MCQuestion):
-        items = []
-        for option, count in zip(question.options, results["counts"]):
-            items.append(f"<li>{escape(option)}: {count}</li>")
-        lines.append("<ul>" + "".join(items) + "</ul>")
-        return "".join(lines)
-
-    if isinstance(question, ScaleQuestion):
-        items = []
-        for value, count in results["counts"].items():
-            items.append(f"<li>{value}: {count}</li>")
-        lines.append("<ul>" + "".join(items) + "</ul>")
-        return "".join(lines)
-
-    if results["answers"]:
-        items = []
-        for answer in results["answers"]:
-            items.append(
-                f"<li><code>{escape(answer['ts'])}</code>: "
-                f"{escape(answer['value'])}</li>"
+        parts.append(_render_mc_stats(question, summary))
+        parts.append(
+            _render_bar_chart(
+                list(question.options),
+                summary["counts"],
+                summary["percentages"],
             )
-        lines.append("<ol>" + "".join(items) + "</ol>")
-    else:
-        lines.append("<p>No free-text answers yet.</p>")
+        )
+    elif isinstance(question, ScaleQuestion):
+        parts.append(_render_scale_stats(summary))
+        bucket_range = range(question.low, question.high + 1)
+        labels = [str(value) for value in bucket_range]
+        counts = [summary["counts"][value] for value in bucket_range]
+        denominator = summary["total"] or 1
+        percentages = [
+            count / denominator * 100 for count in counts
+        ]
+        parts.append(_render_bar_chart(labels, counts, percentages))
+    elif isinstance(question, OpenQuestion):
+        parts.append(_render_open_stats(summary))
+        parts.append(_render_open_answers(summary["answers"]))
 
-    return "".join(lines)
+    return "".join(parts)
 
 
-def _json_results(store: Store, full_hash: str) -> str:
-    return json.dumps(store.results(full_hash), ensure_ascii=False, indent=2)
+def _json_results(
+    store: Store, full_hash: str, *, window: str = "all"
+) -> str:
+    return json.dumps(
+        store.results(full_hash, window=window),
+        ensure_ascii=False,
+        indent=2,
+    )
 @
 
 The custom server class only exists to enable threading and to keep worker
@@ -373,9 +760,11 @@ def _build_handler(store: Store, *, public_results: bool = False):
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
 
-            self._handle_question_get(segments)
+            self._handle_question_get(segments, parsed.query)
 
-        def _handle_question_get(self, segments: list[str]):
+        def _handle_question_get(
+            self, segments: list[str], query: str
+        ):
             if len(segments) == 2 and segments[1] == "thanks":
                 full_hash = self._resolve(segments[0])
                 if full_hash is None:
@@ -408,12 +797,15 @@ def _build_handler(store: Store, *, public_results: bool = False):
                     return
 
                 title = store.metadata(full_hash)["text"]
+                window = _parse_window(query)
                 self._send(
                     HTTPStatus.OK,
                     _page(
                         f"Results for {title}",
                         title,
-                        _render_results(store, full_hash),
+                        _render_results(
+                            store, full_hash, window=window
+                        ),
                         refresh=True,
                     ),
                 )
@@ -435,9 +827,12 @@ def _build_handler(store: Store, *, public_results: bool = False):
                 if full_hash is None:
                     return
 
+                window = _parse_window(query)
                 self._send(
                     HTTPStatus.OK,
-                    _json_results(store, full_hash),
+                    _json_results(
+                        store, full_hash, window=window
+                    ),
                     content_type="application/json; charset=utf-8",
                 )
                 return
@@ -553,6 +948,26 @@ def _request(port, method, path, body=None, headers=None):
     payload = response.read().decode("utf-8")
     connection.close()
     return response, payload
+
+
+@contextmanager
+def _running_server(store, *, public_results=False):
+    server = create_server(
+        store,
+        host="127.0.0.1",
+        port=0,
+        public_results=public_results,
+    )
+    thread = threading.Thread(
+        target=server.serve_forever, daemon=True
+    )
+    thread.start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
 @
 
 We first pin the localhost guard explicitly by faking the client address on the
@@ -697,6 +1112,132 @@ def test_public_results_mode_redirects_to_results_and_allows_remote_view(
         server.server_close()
 @
 
+The integration tests put it all together: a real server, a real store,
+and the full HTML/JSON response.  We verify that the window filter
+form, the bar chart, the markdown-rendered open answers, the omitted
+timestamps, and the lossless JSON export all behave end-to-end---each
+of these is one of the user-visible promises of this change.
+
+<<test functions>>=
+def test_results_page_includes_window_filter_form(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+
+    with _running_server(store) as port:
+        response, body = _request(
+            port, "GET", f"/{prefix}/results"
+        )
+
+    assert response.status == 200
+    assert 'name="window"' in body
+    assert 'value="hour"' in body
+    assert 'value="day"' in body
+    assert 'value="all"' in body
+    assert 'value="all" selected' in body
+
+
+def test_results_page_window_query_filters_recent_only(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, 0)
+    store.record(full_hash, 1)
+
+    data = store._data()
+    aged = (
+        datetime.now(timezone.utc) - timedelta(hours=2)
+    ).isoformat().replace("+00:00", "Z")
+    data["answers"][full_hash][0]["ts"] = aged
+    store._write(data)
+
+    with _running_server(store) as port:
+        _, last_hour = _request(
+            port, "GET", f"/{prefix}/results?window=hour"
+        )
+        _, all_time = _request(
+            port, "GET", f"/{prefix}/results?window=all"
+        )
+
+    assert "Total responses: <strong>1</strong>" in last_hour
+    assert "Total responses: <strong>2</strong>" in all_time
+    assert 'value="hour" selected' in last_hour
+    assert 'value="all" selected' in all_time
+
+
+def test_results_page_renders_bar_chart_for_scale(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(
+        ScaleQuestion("How clear?", low=1, high=5)
+    )
+    full_hash = store.resolve(prefix)
+    for value in [3, 3, 4, 5]:
+        store.record(full_hash, value)
+
+    with _running_server(store) as port:
+        _, body = _request(port, "GET", f"/{prefix}/results")
+
+    assert 'class="bar-fill"' in body
+    assert 'style="width:' in body
+    assert 'class="stats"' in body
+    assert "Mean:" in body
+    assert "Median:" in body
+
+
+def test_results_page_open_question_renders_md_without_timestamp(
+    tmp_path,
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, "**important** observation")
+
+    with _running_server(store) as port:
+        _, body = _request(port, "GET", f"/{prefix}/results")
+
+    assert "<strong>important</strong>" in body
+    answers = store.results(full_hash)["answers"]
+    assert answers[0]["ts"] not in body
+
+
+def test_results_json_keeps_raw_markdown_value(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, "**bold**")
+
+    with _running_server(store) as port:
+        _, body = _request(port, "GET", f"/{prefix}/results.json")
+
+    payload = json.loads(body)
+    assert payload["answers"][0]["value"] == "**bold**"
+    assert payload["answers"][0]["ts"]
+
+
+def test_results_json_window_filter_is_applied(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, "first")
+    store.record(full_hash, "second")
+
+    data = store._data()
+    aged = (
+        datetime.now(timezone.utc) - timedelta(hours=2)
+    ).isoformat().replace("+00:00", "Z")
+    data["answers"][full_hash][0]["ts"] = aged
+    store._write(data)
+
+    with _running_server(store) as port:
+        _, body = _request(
+            port, "GET", f"/{prefix}/results.json?window=hour"
+        )
+
+    payload = json.loads(body)
+    assert payload["window"] == "hour"
+    assert payload["total"] == 1
+    assert payload["answers"][0]["value"] == "second"
+@
+
 The scale form should place its human-readable anchors around the numbered
 options so the low end appears above the list and the high end below it.
 
@@ -761,6 +1302,7 @@ def test_ambiguous_prefix_returns_multiple_choices(tmp_path, monkeypatch):
 @
 
 <<test [[server.py]]>>=
+from contextlib import contextmanager
 import http.client
 import json
 import threading
