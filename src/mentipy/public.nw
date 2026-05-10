@@ -24,9 +24,9 @@ import urllib.error
 import urllib.request
 @
 
-We keep the external echo service, the UPnP tuning, and the SSH keepalive as
-named constants so the behaviour stays explicit in both tests and user-facing
-errors.
+We keep the external echo service, the UPnP tuning, and the SSH startup,
+keepalive, and shutdown timings as named constants so the behaviour stays
+explicit in both tests and user-facing errors.
 
 <<constants>>=
 IPIFY_URL = "https://api.ipify.org"
@@ -35,6 +35,7 @@ UPNP_DISCOVER_DELAY_MS = 200
 UPNP_PROTOCOL = "TCP"
 UPNP_DESCRIPTION = "mentipy"
 SSH_KEEPALIVE_SECONDS = 30
+SSH_STARTUP_TIMEOUT = 1
 SSH_SHUTDOWN_TIMEOUT = 5
 @
 
@@ -133,6 +134,13 @@ The SSH endpoint needs two views of the same configuration string: the full
 [[user@host]] target that the [[ssh]] command needs, and the bare host that the
 audience-facing URL should contain.
 
+Starting the child process is not enough to trust that URL.  [[ssh]] still has
+to authenticate and install the reverse forward, and
+[[ExitOnForwardFailure=yes]] reports setup problems by exiting the child.  We
+therefore wait through a short startup grace period: a healthy tunnel keeps
+running, while a failed setup dies early and becomes a user-facing
+[[PublicExposureError]] instead of a dead printed link.
+
 <<functions>>=
 def _parse_ssh_endpoint(ssh_endpoint: str) -> tuple[str, str, int]:
     target, separator, raw_port = ssh_endpoint.rpartition(":")
@@ -188,8 +196,14 @@ def expose_ssh(
     except OSError as err:
         raise PublicExposureError("could not start the SSH reverse tunnel") from err
 
-    return process, f"http://{host}:{remote_port}"
+    try:
+        returncode = process.wait(timeout=SSH_STARTUP_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return process, f"http://{host}:{remote_port}"
 
+    raise PublicExposureError(
+        f"the SSH reverse tunnel exited early (status {returncode})"
+    )
 
 def _stop_ssh_process(process: subprocess.Popen[str]):
     if process.poll() is not None:
@@ -336,6 +350,10 @@ def test_expose_ssh_starts_a_reverse_tunnel(monkeypatch):
         def poll(self):
             return None
 
+        def wait(self, timeout):
+            called["startup_timeout"] = timeout
+            raise public_module.subprocess.TimeoutExpired(["ssh"], timeout)
+
     def fake_popen(command, **kwargs):
         called["command"] = command
         called["kwargs"] = kwargs
@@ -358,6 +376,23 @@ def test_expose_ssh_starts_a_reverse_tunnel(monkeypatch):
         f"ServerAliveInterval={SSH_KEEPALIVE_SECONDS}",
         "alice@example.test",
     ]
+    assert called["startup_timeout"] == SSH_STARTUP_TIMEOUT
+
+
+def test_expose_ssh_rejects_tunnels_that_exit_during_startup(monkeypatch):
+    class FakeProcess:
+        def wait(self, timeout):
+            assert timeout == SSH_STARTUP_TIMEOUT
+            return 255
+
+    monkeypatch.setattr(
+        public_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: FakeProcess(),
+    )
+
+    with pytest.raises(PublicExposureError, match=r"status 255"):
+        expose_ssh(8080, "alice@example.test:9000")
 
 
 def test_expose_ssh_rejects_malformed_endpoints():

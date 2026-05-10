@@ -193,16 +193,51 @@ def _ambiguous_matches(store: Store, prefix: str) -> list[dict[str, Any]]:
         )
 
     return matches
+@
+
+\subsection{Parsing submitted answers}
+
+The HTTP handler receives raw form fields from the network, not trusted
+Python values.  We validate them in [[_parse_answer()]] so
+[[store.record()]] and the results view can assume that every recorded
+answer could have come from the form the presenter served.
+
+That boundary matters most for multiple-choice polls.  A crafted request
+could otherwise submit an out-of-range option index, omit every value for
+a multi-select poll, or repeat the same checkbox value to make one
+respondent count twice for the same option.  Rejecting those shapes here
+keeps the stored answers aligned with the per-respondent percentages the
+results view reports.
+
+<<functions>>=
 
 
 def _parse_answer(question, fields: dict[str, list[str]]) -> Any:
     if isinstance(question, MCQuestion):
         values = fields.get("value", [])
         if question.multi:
-            return [int(value) for value in values]
+            if not values:
+                raise ValueError("choose at least one option")
+
+            indices = [int(value) for value in values]
+            if any(index < 0 or index >= len(question.options)
+                   for index in indices):
+                raise ValueError(
+                    "multiple-choice answer outside the allowed range"
+                )
+            if len(set(indices)) != len(indices):
+                raise ValueError(
+                    "multiple-choice answer repeats the same option"
+                )
+            return indices
         if len(values) != 1:
             raise ValueError("choose exactly one option")
-        return int(values[0])
+        index = int(values[0])
+        if index < 0 or index >= len(question.options):
+            raise ValueError(
+                "multiple-choice answer outside the allowed range"
+            )
+        return index
 
     if isinstance(question, OpenQuestion):
         value = fields.get("value", [""])[0]
@@ -214,6 +249,42 @@ def _parse_answer(question, fields: dict[str, list[str]]) -> Any:
     if value < question.low or value > question.high:
         raise ValueError("scale answer outside the allowed range")
     return value
+@
+
+Let\'s pin those invariants directly on the parser before we exercise the
+full request/response path.
+
+<<test functions>>=
+def test_parse_answer_rejects_invalid_multiple_choice_indices():
+    with pytest.raises(ValueError):
+        server_module._parse_answer(
+            MCQuestion("Pick one", ("A", "B")),
+            {"value": ["2"]},
+        )
+
+    with pytest.raises(ValueError):
+        server_module._parse_answer(
+            MCQuestion("Pick one", ("A", "B"), multi=True),
+            {"value": ["0", "2"]},
+        )
+
+
+def test_parse_answer_requires_a_choice_for_multi_select():
+    with pytest.raises(ValueError):
+        server_module._parse_answer(
+            MCQuestion("Pick one", ("A", "B"), multi=True),
+            {},
+        )
+
+
+def test_parse_answer_rejects_duplicate_multi_select_indices():
+    with pytest.raises(ValueError):
+        server_module._parse_answer(
+            MCQuestion("Pick one", ("A", "B"), multi=True),
+            {"value": ["1", "1"]},
+        )
+
+<<functions>>=
 
 
 def _render_index(store: Store) -> str:
@@ -1171,6 +1242,23 @@ def test_post_records_answers(live_server):
     assert response.getheader("Location") == f"/{prefix}/thanks"
     full_hash = store.resolve(prefix)
     assert store.results(full_hash)["counts"] == [0, 1]
+
+
+def test_post_rejects_invalid_multiple_choice_answers(live_server):
+    store, prefix, port = live_server
+
+    response, body = _request(
+        port,
+        "POST",
+        f"/{prefix}",
+        body="value=9",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+
+    assert response.status == 400
+    assert "outside the allowed range" in body
+    full_hash = store.resolve(prefix)
+    assert store.results(full_hash)["total"] == 0
 @
 
 The results page replaces the old admin route, but it still stays local-only by

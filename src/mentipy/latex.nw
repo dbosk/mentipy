@@ -20,7 +20,13 @@ from pathlib import Path
 
 from mentipy.network import resolve_base_url
 from mentipy.qr import make_qr
-from mentipy.questions import MCQuestion, OpenQuestion, Question, ScaleQuestion
+from mentipy.questions import (
+    MCQuestion,
+    OpenQuestion,
+    Question,
+    ScaleQuestion,
+    question_hash,
+)
 from mentipy.store import (
     BASE_URL_CONFIG,
     DEFAULT_PORT,
@@ -143,6 +149,15 @@ The question-specific body stays the same across layouts.  Only the outer
 wrapper changes: slides want columns, article handouts want a flat text flow,
 some printed manuals still want a QR block, and Beamer can emit both shapes
 from one source via its mode switch.
+
+There is one visibility constraint hidden inside that wrapper choice.  The flat
+article layout prints the respondent URL directly in the returned LaTeX, so
+[[show_url]] can hide or show that line.  The QR-bearing layouts instead
+[[\input]] the [[.pdf_tex]] sidecar written by [[make_qr]], and that sidecar
+always carries the canonical URL caption that [[mentipy serve]] later
+regenerates together with the QR image.  This keeps the printed caption and the
+matrix in sync after public URL rewrites, but it also means [[show_url]] only
+affects layouts that do \\emph{not} embed the QR sidecar.
 
 <<functions>>=
 def _render_body(question: Question) -> str:
@@ -277,27 +292,62 @@ the matrix and the printed URL caption tied together: any subsequent slide
 build reads a consistent pair from disk and the audience sees the same address
 they would scan.
 
+The render helpers still accept per-call [[qr_dir]] and [[qr_format]]
+overrides.  Later regeneration therefore cannot reconstruct the right artifact
+paths from today's global defaults alone.  After each render we remember the
+concrete QR targets in the store, and [[regenerate_qrs()]] reuses those exact
+files unless its caller passes an explicit override.  The remembered absolute
+paths are only for the runtime file write.  The sidecar keeps the original
+document-facing include path so slide sources do not suddenly switch to
+absolute [[\includegraphics]] paths after [[mentipy serve]] refreshes the URL.
+
 <<functions>>=
+def _latex_include_path(target: Path) -> Path:
+    cwd = Path.cwd().resolve()
+    try:
+        return target.resolve().relative_to(cwd)
+    except ValueError:
+        return target
+
+
+def _regeneration_targets(
+    remembered: list[Path],
+    prefix: str,
+    qr_dir: str | Path | None,
+    qr_format: str | None,
+) -> list[Path]:
+    if qr_dir is None and qr_format is None and remembered:
+        return remembered
+
+    chosen_dir = Path(qr_dir or get_setting(QR_DIR_CONFIG, DEFAULT_QR_DIR))
+    chosen_format = qr_format or get_setting(QR_FORMAT_CONFIG, DEFAULT_QR_FORMAT)
+    return [chosen_dir / f"Q-{prefix}.{chosen_format}"]
+
+
 def regenerate_qrs(
     store: Store,
     base_url: str,
     qr_dir: str | Path | None = None,
     qr_format: str | None = None,
 ) -> int:
-    """Rewrite every QR image to point at ``base_url`` and return the count."""
+    """Rewrite remembered QR images to point at ``base_url`` and return the count."""
 
-    chosen_dir = Path(qr_dir or get_setting(QR_DIR_CONFIG, DEFAULT_QR_DIR))
-    chosen_format = qr_format or get_setting(QR_FORMAT_CONFIG, DEFAULT_QR_FORMAT)
     count = 0
 
-    for prefix in store.iter_prefixes():
+    for entry in store.all_questions():
+        full_hash = str(entry["hash"])
+        prefix = str(entry["url_prefix"])
         url = _join_url(base_url, prefix)
-        make_qr(
-            url,
-            chosen_dir / f"Q-{prefix}.{chosen_format}",
-            fmt=chosen_format,
-        )
-        count += 1
+        remembered = store.qr_targets(full_hash)
+        for target in _regeneration_targets(remembered, prefix, qr_dir, qr_format):
+            fmt = target.suffix.lstrip(".") or DEFAULT_QR_FORMAT
+            make_qr(
+                url,
+                target,
+                fmt=fmt,
+                include_path=_latex_include_path(target),
+            )
+            count += 1
 
     return count
 
@@ -329,6 +379,7 @@ def question(
     chosen_env = _resolve_environment(environment)
     chosen_show_url = _resolve_show_url(show_url)
 
+    full_hash = question_hash(prompt)
     prefix = active_store.register(prompt)
     url = _join_url(chosen_base, prefix)
     qr_path = make_qr(
@@ -336,6 +387,7 @@ def question(
         chosen_dir / f"Q-{prefix}.{chosen_format}",
         fmt=chosen_format,
     )
+    active_store.remember_qr_target(full_hash, qr_path)
     return _render_question(
         prompt,
         qr_path,
@@ -582,9 +634,11 @@ def test_article_layout_is_flat_and_qrless(tmp_path, monkeypatch):
     assert f"\\texttt{{http://example.test:8080/{prefix}}}" in rendered
 @
 
-The new environment and URL toggles should apply uniformly no matter which
-public helper or layout a caller chooses, so the tests pin precedence and the
-mode-aware structure directly on [[mc()]].
+The environment toggle applies uniformly across layouts, but the URL toggle is
+deliberately narrower: only the QR-less article branches can hide the printed
+URL because QR-bearing layouts read that caption from the regenerated sidecar.
+The tests pin both the shared precedence rules and that visibility boundary
+directly on [[mc()]].
 
 <<test functions>>=
 def test_default_slide_layout_remains_plain_without_environment(
@@ -752,7 +806,9 @@ def test_empty_environment_override_disables_configured_wrap(tmp_path, monkeypat
     assert "\\textbf{" in rendered
 
 
-def test_show_url_false_suppresses_url_in_article_variants(tmp_path, monkeypatch):
+def test_show_url_false_suppresses_url_in_qrless_article_variants(
+    tmp_path, monkeypatch
+):
     monkeypatch.chdir(tmp_path)
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
 
@@ -763,15 +819,6 @@ def test_show_url_false_suppresses_url_in_article_variants(tmp_path, monkeypatch
         base_url="http://example.test:8080",
         qr_dir="build",
         layout="article",
-        show_url=False,
-    )
-    article_qr = mc(
-        "How was the lecture?",
-        ["Great", "OK", "Boring"],
-        store=store,
-        base_url="http://example.test:8080",
-        qr_dir="build",
-        layout="article+qr",
         show_url=False,
     )
     auto = mc(
@@ -785,12 +832,33 @@ def test_show_url_false_suppresses_url_in_article_variants(tmp_path, monkeypatch
     )
 
     assert "\\texttt{http://example.test:8080/" not in article
-    assert "\\texttt{http://example.test:8080/" not in article_qr
-    assert "\\input" in article_qr
     assert "\\texttt{http://example.test:8080/" not in auto.split(
         "\\mode<article>{%\n",
         1,
     )[1]
+
+
+def test_article_qr_layout_keeps_the_sidecar_url_caption(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    rendered = mc(
+        "How was the lecture?",
+        ["Great", "OK", "Boring"],
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir="build",
+        layout="article+qr",
+        show_url=False,
+    )
+
+    [entry] = store.all_questions()
+    prefix = entry["url_prefix"]
+    sidecar = tmp_path / "build" / f"Q-{prefix}.pdf_tex"
+
+    assert f"\\input{{build/Q-{prefix}.pdf_tex}}" in rendered
+    assert sidecar.exists()
+    assert f"http://example.test:8080/{prefix}" in sidecar.read_text()
 
 
 def test_show_url_config_is_used_unless_call_overrides_it(tmp_path, monkeypatch):
@@ -831,8 +899,8 @@ def test_regenerate_qrs_rewrites_every_registered_question(tmp_path, monkeypatch
     second = store.register(OpenQuestion("What should we repeat?"))
     calls = []
 
-    def fake_make_qr(url, out_path, fmt="pdf"):
-        calls.append((url, Path(out_path), fmt))
+    def fake_make_qr(url, out_path, fmt="pdf", include_path=None):
+        calls.append((url, Path(out_path), fmt, Path(include_path)))
         return Path(out_path)
 
     monkeypatch.setattr("mentipy.latex.make_qr", fake_make_qr)
@@ -841,11 +909,72 @@ def test_regenerate_qrs_rewrites_every_registered_question(tmp_path, monkeypatch
 
     assert count == 2
     assert calls == [
-        (f"http://public.example:9000/{first}", tmp_path / f"Q-{first}.pdf", "pdf"),
+        (
+            f"http://public.example:9000/{first}",
+            tmp_path / f"Q-{first}.pdf",
+            "pdf",
+            tmp_path / f"Q-{first}.pdf",
+        ),
         (
             f"http://public.example:9000/{second}",
             tmp_path / f"Q-{second}.pdf",
             "pdf",
+            tmp_path / f"Q-{second}.pdf",
+        ),
+    ]
+
+
+def test_regenerate_qrs_reuses_all_remembered_qr_targets(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    mc(
+        "How was the lecture?",
+        ["Great", "OK", "Boring"],
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir="slides",
+    )
+    mc(
+        "How was the lecture?",
+        ["Great", "OK", "Boring"],
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir="handout",
+        qr_format="png",
+    )
+
+    [entry] = store.all_questions()
+    full_hash = entry["hash"]
+    prefix = entry["url_prefix"]
+    assert store.qr_targets(full_hash) == [
+        tmp_path / "slides" / f"Q-{prefix}.pdf",
+        tmp_path / "handout" / f"Q-{prefix}.png",
+    ]
+
+    calls = []
+
+    def fake_make_qr(url, out_path, fmt="pdf", include_path=None):
+        calls.append((url, Path(out_path), fmt, Path(include_path)))
+        return Path(out_path)
+
+    monkeypatch.setattr("mentipy.latex.make_qr", fake_make_qr)
+
+    count = regenerate_qrs(store, "http://public.example:9000")
+
+    assert count == 2
+    assert calls == [
+        (
+            f"http://public.example:9000/{prefix}",
+            tmp_path / "slides" / f"Q-{prefix}.pdf",
+            "pdf",
+            Path("slides") / f"Q-{prefix}.pdf",
+        ),
+        (
+            f"http://public.example:9000/{prefix}",
+            tmp_path / "handout" / f"Q-{prefix}.png",
+            "png",
+            Path("handout") / f"Q-{prefix}.png",
         ),
     ]
 @

@@ -103,7 +103,8 @@ ENVIRONMENT_HELP = (
     f"{QUESTION_ENVIRONMENT_CONFIG}."
 )
 URL_VISIBILITY_HELP = (
-    "Show the printed URL when the layout supports it. Defaults to config "
+    "Show the standalone printed URL when the layout supports it. QR-bearing "
+    "layouts keep the caption embedded in the QR sidecar. Defaults to config "
     f"setting {SHOW_URL_CONFIG}."
 )
 BASE_URL_HELP = (
