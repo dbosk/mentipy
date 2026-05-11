@@ -804,10 +804,12 @@ def results(self, full_hash: str,
 
 Loading metadata is unchanged from the previous implementation; the new
 behaviour is the window filter.  We compute the cutoff once and keep
-answers whose ISO timestamp is at or after it.  Storing UTC throughout
-means [[datetime.fromisoformat]] (which understands the [[Z]] suffix
-from Python~3.11 onwards) parses the stored timestamps directly, so we
-do not need a separate parser.
+answers whose ISO timestamp is at or after it.  The writer always emits
+the [[Z]] suffix for UTC, but [[datetime.fromisoformat]] only learnt to
+parse [[Z]] in Python~3.11.  Rather than raise the supported Python
+floor or pull in [[dateutil]], we substitute [[Z]] back to [[+00:00]]
+before parsing --- the inverse of the substitution the writer applied
+when emitting the timestamp.
 
 <<load metadata and apply window filter>>=
 data = self._data()
@@ -822,7 +824,8 @@ else:
     cutoff = datetime.now(timezone.utc) - delta
     answers = [
         answer for answer in all_answers
-        if datetime.fromisoformat(answer["ts"]) >= cutoff
+        if datetime.fromisoformat(answer["ts"].replace("Z", "+00:00"))
+        >= cutoff
     ]
 @
 

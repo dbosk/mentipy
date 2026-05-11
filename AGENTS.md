@@ -39,7 +39,7 @@
 
 ## Packaging and runtime facts
 
-- Python requirement is `>=3.13,<4.0` (`pyproject.toml`).
+- Python requirement is `>=3.10,<4.0` (`pyproject.toml`).
 - The console entrypoint is `mentipy = "mentipy.cli:main"`.
 - Defaults and config keys live in `src/mentipy/store.nw`; both CLI and LaTeX helpers read settings from there.
 - Optional public exposure support is packaged as `mentipy[public]`, which installs `miniupnpc` for the UPnP mode; SSH mode stays stdlib-only.
