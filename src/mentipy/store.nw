@@ -102,8 +102,11 @@ def config_path() -> Path:
     if override := os.environ.get("MENTIPY_CONFIG"):
         return Path(override)
 
-    dirs = typerconf.appdirs.AppDirs(CONFIG_NAMESPACE)
-    return Path(dirs.user_config_dir) / "config.json"
+    return typerconf.platformdirs.user_config_path(
+        CONFIG_NAMESPACE,
+        appauthor=False,
+        ensure_exists=True,
+    ) / "config.json"
 @
 
 The CLI accepts short keys such as [[port]], but the stored JSON keeps them

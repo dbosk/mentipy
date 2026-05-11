@@ -1566,7 +1566,7 @@ def test_url_command_uses_the_explicit_port_for_auto_resolution(
 
 
 def test_url_command_public_without_value_defaults_to_upnp(tmp_path, monkeypatch):
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
     config_path = tmp_path / "config.json"
     monkeypatch.setenv("MENTIPY_CONFIG", str(config_path))
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
@@ -1604,7 +1604,7 @@ def test_url_command_public_without_value_defaults_to_upnp(tmp_path, monkeypatch
 
 
 def test_url_command_public_prefers_public_base_url(tmp_path, monkeypatch):
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
     config_path = tmp_path / "config.json"
     monkeypatch.setenv("MENTIPY_CONFIG", str(config_path))
     set_setting("public_base_url", "https://polls.example")
