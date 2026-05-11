@@ -20,11 +20,13 @@ from contextlib import contextmanager
 import csv
 import io
 import json
+from pathlib import Path
 import shutil
 import textwrap
 import time
 from typing import Optional
 
+from pytorial import add_typer_subcommand
 import typer
 
 from mentipy.latex import (
@@ -116,6 +118,15 @@ QR_FORMAT_HELP = (
     f"QR image format. Defaults to config setting {QR_FORMAT_CONFIG}."
 )
 LAYOUT_HELP = "Question layout: slide, article, article+qr, or auto."
+
+TUTORIAL_NAMESPACE = "mentipy"
+TUTORIAL_FILENAMES = (
+    "01-authoring-paths.md",
+    "02-question-kinds.md",
+    "03-layout-and-environment.md",
+    "04-respondent-urls.md",
+    "05-serving-and-publication.md",
+)
 
 HOST_OPTION = typer.Option(None, help=HOST_HELP)
 PORT_OPTION = typer.Option(None, help=PORT_HELP)
@@ -391,6 +402,15 @@ def _public_url_context(
         raise typer.Exit(code=1)
 
 
+def _tutorial_dir() -> Path:
+    return Path(__file__).resolve().parent / "tutorials"
+
+
+def _tutorial_paths() -> tuple[Path, ...]:
+    tutorial_dir = _tutorial_dir()
+    return tuple(tutorial_dir / name for name in TUTORIAL_FILENAMES)
+
+
 def _serve_publicly(
     active_store: Store,
     chosen_host: str,
@@ -428,6 +448,12 @@ config_cli = typer.Typer(help=CONFIG_HELP)
 render_cli = typer.Typer(help="Render question LaTeX.")
 cli.add_typer(config_cli, name="config")
 cli.add_typer(render_cli, name="render")
+add_typer_subcommand(
+    cli,
+    name="tutorial",
+    namespace=TUTORIAL_NAMESPACE,
+    tutorial_paths=_tutorial_paths(),
+)
 
 
 @cli.command(context_settings={"allow_extra_args": True})
@@ -704,6 +730,57 @@ The command tests mostly verify wiring.  The heavy lifting has already been
 tested in the lower-level modules.
 
 <<test functions>>=
+def test_tutorial_paths_use_the_learning_sequence():
+    names = [path.name for path in mentipy.cli._tutorial_paths()]
+
+    assert names == list(TUTORIAL_FILENAMES)
+    assert all(
+        path.parent == mentipy.cli._tutorial_dir()
+        for path in mentipy.cli._tutorial_paths()
+    )
+
+
+def test_tutorial_paths_exist_in_the_package_tree():
+    assert all(path.exists() for path in mentipy.cli._tutorial_paths())
+
+
+def test_tutorial_help_lists_the_embedded_commands():
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["tutorial", "--help"])
+
+    assert result.exit_code == 0
+    for command in ("list", "run", "review"):
+        assert command in result.output
+
+
+def test_tutorial_list_starts_with_using_tutorials(tmp_path, monkeypatch):
+    runner = CliRunner()
+    state_home = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+
+    result = runner.invoke(
+        cli,
+        ["tutorial", "list"],
+        env={"XDG_STATE_HOME": str(state_home)},
+    )
+
+    assert result.exit_code == 0
+    tutorial_ids = [
+        line.split("\t", 1)[0]
+        for line in result.stdout.splitlines()
+        if line.strip()
+    ]
+    assert tutorial_ids[:6] == [
+        "using-tutorials",
+        "authoring-paths",
+        "question-kinds",
+        "layout-and-environment",
+        "respondent-urls",
+        "serving-and-publication",
+    ]
+
+
 def test_config_set_get_round_trip(tmp_path, monkeypatch):
     runner = CliRunner()
     monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
@@ -1588,6 +1665,7 @@ def test_url_help_mentions_the_relevant_config_keys():
 
 <<test [[cli.py]]>>=
 import json
+import mentipy.cli
 
 from typer.testing import CliRunner
 
