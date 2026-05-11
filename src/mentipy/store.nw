@@ -105,7 +105,7 @@ def config_path() -> Path:
     return typerconf.platformdirs.user_config_path(
         CONFIG_NAMESPACE,
         appauthor=False,
-        ensure_exists=True,
+        ensure_exists=False,
     ) / "config.json"
 @
 
@@ -244,6 +244,26 @@ def test_setting_helpers_use_the_mentipy_namespace(tmp_path, monkeypatch):
 
     assert get_setting("mentipy.port") == 9000
     assert list_settings()["port"] == 9000
+
+
+def test_config_path_keeps_platformdir_lookup_pure(monkeypatch):
+    calls = []
+
+    def fake_user_config_path(namespace, *, appauthor, ensure_exists):
+        calls.append((namespace, appauthor, ensure_exists))
+        return Path("/tmp/mentipy-config")
+
+    monkeypatch.delenv("MENTIPY_CONFIG", raising=False)
+    monkeypatch.setattr(
+        typerconf.platformdirs,
+        "user_config_path",
+        fake_user_config_path,
+    )
+
+    path = config_path()
+
+    assert path == Path("/tmp/mentipy-config/config.json")
+    assert calls == [(CONFIG_NAMESPACE, False, False)]
 
 
 def test_missing_temp_configs_do_not_share_state(tmp_path, monkeypatch):
