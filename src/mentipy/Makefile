@@ -20,6 +20,7 @@ MODULES+= \
 	server.tex \
 	store.py \
 	store.tex \
+	tutorials.tex \
 	tutorials/01-authoring-paths.md \
 	tutorials/02-question-kinds.md \
 	tutorials/03-layout-and-environment.md \

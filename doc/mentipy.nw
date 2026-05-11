@@ -603,6 +603,7 @@ the regenerated QR codes point at the externally visible address.
 \input{../src/mentipy/server.tex}
 \input{../src/mentipy/public.tex}
 \input{../src/mentipy/cli.tex}
+\input{../src/mentipy/tutorials.tex}
 
 
 \backmatter

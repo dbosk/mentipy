@@ -116,8 +116,8 @@ python3 pythontex_poll.py > python.tex
 grep -n "How confident" python.tex
 ```
 
-The store path, base URL, QR directory, and layout stay fixed.  Only the
-authoring path will change in the next step.
+The next step keeps the script, store, base URL, QR directory, and layout the
+same and only changes how the poll is authored.
 @
 
 Now we vary only the authoring path.  The CLI command uses the same question,
@@ -149,8 +149,8 @@ mentipy render mc "How confident do you feel about the course goals?" \
 cmp -s python.tex cli.tex && printf 'same\n'
 ```
 
-If the files match, the rendering backend stayed invariant while the authoring
-surface changed.
+If the files match, the same rendering produced both outputs even though one
+came from a Python script and the other from the CLI.
 @
 
 After the direct contrast comes the lookup step.  Here the invariant is the set
@@ -220,10 +220,10 @@ focus on what kind of answer each question kind collects.
   \textbf{Critical aspects}: Whether the response is one listed option,
   several listed options, unconstrained text, or a bounded numeric interval.
 
-  \textbf{Variation pattern}: Contrast, first within `mc` by changing only
+  \textbf{Variation pattern}: Contrast, first within [[mc]] by changing only
   multiplicity, then across the other question kinds.
 
-  \textbf{What varies}: The question kind and, for `mc`, whether multiple
+  \textbf{What varies}: The question kind and, for [[mc]], whether multiple
   answers are allowed.
 
   \textbf{What stays invariant}: The command-line authoring path, the store,
@@ -244,7 +244,7 @@ summary: Choose between single-choice, many-answer, open-text, and scale
 ---
 @
 
-We start with the smallest contrast inside one family: `mc` without and then
+We start with the smallest contrast inside one family: [[mc]] without and then
 with multi-answer mode.
 
 <<question kinds steps>>=
@@ -303,8 +303,8 @@ mentipy render mc "Which part should we revisit next?" \
 diff -u single.tex multi.tex
 ```
 
-The authoring path, store, base URL, and layout stay fixed while only response
-multiplicity changes.
+The poll, the store, and the layout are the same as before; the only
+command-line change is the new `--multi` flag.
 @
 
 Once the learner has separated one-answer from many-answer polls, we can widen
@@ -336,8 +336,8 @@ mentipy render open "What is still unclear?" \
 diff -u multi.tex open.tex
 ```
 
-Here the critical aspect changes from choosing among listed alternatives to
-writing new text.
+Instead of choosing one of the listed options, the respondent now writes free
+text up to `--max-chars 160`.
 @
 
 The last rendering contrast narrows the free response again, but this time into
@@ -402,18 +402,18 @@ change about the emitted LaTeX without confusing those aspects with the poll
 itself.
 
 \ltnote{%
-  \textbf{Object of learning}: How `layout`, `environment`, and `show_url`
-  affect the emitted LaTeX.
+  \textbf{Object of learning}: How [[layout]], [[environment]], and
+  [[show_url]] affect the emitted LaTeX.
 
-  \textbf{Learning outcomes}: Choose between `article`, `article+qr`, and
-  `auto`, wrap the question in an environment, and hide the printed URL when
+  \textbf{Learning outcomes}: Choose between [[article]], [[article+qr]], and
+  [[auto]], wrap the question in an environment, and hide the printed URL when
   the layout supports it.
 
   \textbf{Critical aspects}: Where the respondent URL appears, whether a QR
   sidecar is used, and whether the question is wrapped in a LaTeX environment.
 
-  \textbf{Variation pattern}: Contrast, with a short fusion step when `--env`
-  and `--no-url` are combined.
+  \textbf{Variation pattern}: Contrast, with a short fusion step when
+  [[--env]] and [[--no-url]] are combined.
 
   \textbf{What varies}: The layout, the explicit environment, and the printed
   URL visibility.
@@ -512,10 +512,12 @@ required_patterns:
   - mentipy render mc
   - --env exercise
   - --no-url
+  - diff -u article.tex wrapped.tex
   - grep -n "exercise" wrapped.tex
   - hidden
-hint: "Add an explicit environment and ask grep to prove that the printed URL is
-  gone by printing a short fallback word instead."
+hint: "Add an explicit environment, diff against the plain article output so
+  both changes show up side by side, and ask grep to prove that the printed URL
+  is gone by printing a short fallback word instead."
 ```
 
 Render the same poll again, now wrapped in an `exercise` environment with the
@@ -529,12 +531,13 @@ mentipy render mc "How confident do you feel about the course goals?" \
   --layout article \
   --env exercise \
   --no-url > wrapped.tex
+diff -u article.tex wrapped.tex
 grep -n "exercise" wrapped.tex
 grep -n "http://localhost:8080/" wrapped.tex || printf 'hidden\n'
 ```
 
-The question content stays invariant, but the wrapper changes and the printed
-URL disappears.
+The poll text is unchanged, but the question is now wrapped in an `exercise`
+environment and the printed URL is gone.
 @
 
 The final rendering step generalises the same question into the mode-aware auto
@@ -594,14 +597,14 @@ The next tutorial isolates where the respondent URL comes from.  We keep the
 same stored question so the critical aspect is URL resolution, not registration.
 
 \ltnote{%
-  \textbf{Object of learning}: How `mentipy` resolves the respondent URL.
+  \textbf{Object of learning}: How [[mentipy]] resolves the respondent URL.
 
   \textbf{Learning outcomes}: Register a question, discover its prefix, use
-  `mentipy url`, override the base explicitly, reuse a configured base, and
-  recognise the `auto` fallback.
+  [[mentipy url]], override the base explicitly, reuse a configured base, and
+  recognise the [[auto]] fallback.
 
   \textbf{Critical aspects}: The difference between the stored prefix, an
-  explicit `--base`, a configured `base_url`, and a resolved local address.
+  explicit [[--base]], a configured [[base_url]], and a resolved local address.
 
   \textbf{Variation pattern}: Contrast, with the question prefix held fixed
   while the source of the base URL varies.
@@ -767,8 +770,8 @@ URLs, result visibility, and QR regeneration.
   that public exposure uses, distinguish local serving from public exposure, and
   recognise when QR regeneration implies a recompilation.
 
-  \textbf{Critical aspects}: The roles of `--results`, `--public`,
-  `ssh_tunnel`, `public_base_url`, and the QR-regeneration message.
+  \textbf{Critical aspects}: The roles of [[--results]], [[--public]],
+  [[ssh_tunnel]], [[public_base_url]], and the QR-regeneration message.
 
   \textbf{Variation pattern}: Contrast, with one short fusion step where the
   local serve command and QR regeneration are experienced together.
