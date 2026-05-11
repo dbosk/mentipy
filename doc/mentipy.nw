@@ -55,10 +55,6 @@ rendering options fixed while varying one practical aspect at a time.
 These examples keep their state in a local [[./mentipy.json]] store and write
 QR artifacts in [[build/]].  That keeps the generated files next to the manual.
 
-The same progression is also available as interactive command-line lessons:
-start with [[mentipy tutorial list]], take the built-in [[using-tutorials]]
-lesson first, and then continue with the mentipy-specific tutorials.
-
 \begin{description}
 \item[Build the manual] Run [[make]] in [[doc/]].
 \item[Start the server] Run [[mentipy serve --store ./mentipy.json]] in
@@ -66,6 +62,12 @@ lesson first, and then continue with the mentipy-specific tutorials.
 \item[Answer the polls] Open the generated PDF and scan the QR codes in this
   chapter.
 \end{description}
+
+The same progression is also available as interactive command-line lessons.
+Run [[mentipy tutorial list]] to see them, take the built-in
+[[using-tutorials]] lesson first with
+[[mentipy tutorial run using-tutorials]], and then continue with the
+mentipy-specific lessons in the listed order.
 
 \ltnote{%
   \textbf{Object of learning}: How to use [[mentipy]] in a real lecture

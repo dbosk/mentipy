@@ -119,15 +119,6 @@ QR_FORMAT_HELP = (
 )
 LAYOUT_HELP = "Question layout: slide, article, article+qr, or auto."
 
-TUTORIAL_NAMESPACE = "mentipy"
-TUTORIAL_FILENAMES = (
-    "01-authoring-paths.md",
-    "02-question-kinds.md",
-    "03-layout-and-environment.md",
-    "04-respondent-urls.md",
-    "05-serving-and-publication.md",
-)
-
 HOST_OPTION = typer.Option(None, help=HOST_HELP)
 PORT_OPTION = typer.Option(None, help=PORT_HELP)
 STORE_OPTION = typer.Option(None, help=STORE_HELP)
@@ -400,8 +391,27 @@ def _public_url_context(
     except PublicExposureError as err:
         typer.echo(f"Could not expose the server: {err}", err=True)
         raise typer.Exit(code=1)
+@
 
+The interactive tutorials ship as Markdown files inside the package so they are
+available wherever [[mentipy]] is installed.  The order in
+[[TUTORIAL_FILENAMES]] is the intended learning sequence, and [[pytorial]]
+preserves the explicit path order we pass it.  We therefore resolve the bundled
+files once and hand them over as an ordered tuple rather than asking [[pytorial]]
+to scan the directory.
 
+<<constants>>=
+TUTORIAL_NAMESPACE = "mentipy"
+TUTORIAL_FILENAMES = (
+    "01-authoring-paths.md",
+    "02-question-kinds.md",
+    "03-layout-and-environment.md",
+    "04-respondent-urls.md",
+    "05-serving-and-publication.md",
+)
+@
+
+<<functions>>=
 def _tutorial_dir() -> Path:
     return Path(__file__).resolve().parent / "tutorials"
 
@@ -409,6 +419,14 @@ def _tutorial_dir() -> Path:
 def _tutorial_paths() -> tuple[Path, ...]:
     tutorial_dir = _tutorial_dir()
     return tuple(tutorial_dir / name for name in TUTORIAL_FILENAMES)
+
+@
+
+The public-serving branch still needs one helper of its own.  It reuses the
+shared URL context above, rewrites remembered QR targets when the public URL
+changes, and then hands control to the HTTP server.
+
+<<functions>>=
 
 
 def _serve_publicly(
@@ -448,6 +466,15 @@ config_cli = typer.Typer(help=CONFIG_HELP)
 render_cli = typer.Typer(help="Render question LaTeX.")
 cli.add_typer(config_cli, name="config")
 cli.add_typer(render_cli, name="render")
+
+@
+
+The interactive tutorials live behind [[mentipy tutorial]].  [[pytorial]]
+supplies the [[list]], [[run]], and [[review]] subcommands; we only have to
+hand it the ordered tutorial paths and a namespace so its per-user state stays
+scoped to [[mentipy]].
+
+<<cli setup>>=
 add_typer_subcommand(
     cli,
     name="tutorial",

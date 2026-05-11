@@ -263,7 +263,7 @@ Render a single-choice poll into `single.tex`:
 
 ```sh
 mentipy render mc "Which part should we revisit next?" \
-  "Proofs" "Examples" "Both" \
+  "Proofs" "Examples" "Definitions" \
   --store ./mentipy.json \
   --base-url http://localhost:8080 \
   --layout article > single.tex
@@ -284,7 +284,9 @@ required_patterns:
   - mentipy render mc
   - --multi
   - multi.tex
-  - Which parts should we revisit next?
+  - diff -u single.tex multi.tex
+  - "Choose exactly one:"
+  - "Choose one or more:"
 hint: "Keep the listed options and rendering context, but add the flag that lets
   respondents choose more than one option."
 ```
@@ -292,13 +294,13 @@ hint: "Keep the listed options and rendering context, but add the flag that lets
 Render the same kind of poll again, but now allow more than one listed answer:
 
 ```sh
-mentipy render mc "Which parts should we revisit next?" \
-  "Proofs" "Examples" "Both" \
+mentipy render mc "Which part should we revisit next?" \
+  "Proofs" "Examples" "Definitions" \
   --multi \
   --store ./mentipy.json \
   --base-url http://localhost:8080 \
   --layout article > multi.tex
-grep -n "Which parts should we revisit next?" multi.tex
+diff -u single.tex multi.tex
 ```
 
 The authoring path, store, base URL, and layout stay fixed while only response
@@ -316,6 +318,9 @@ required_patterns:
   - mentipy render open
   - --max-chars 160
   - What is still unclear?
+  - diff -u multi.tex open.tex
+  - "Choose one or more:"
+  - Free-text answer
 hint: "Move away from listed options entirely and bound the answer by length
   instead."
 ```
@@ -328,7 +333,7 @@ mentipy render open "What is still unclear?" \
   --store ./mentipy.json \
   --base-url http://localhost:8080 \
   --layout article > open.tex
-grep -n "What is still unclear?" open.tex
+diff -u multi.tex open.tex
 ```
 
 Here the critical aspect changes from choosing among listed alternatives to
@@ -347,6 +352,9 @@ required_patterns:
   - --low 1
   - --high 5
   - How fast is today's pace?
+  - diff -u open.tex scale.tex
+  - Free-text answer
+  - Range
 hint: "Use a numeric interval when you want comparable intensity judgments
   instead of text."
 ```
@@ -362,7 +370,7 @@ mentipy render scale "How fast is today's pace?" \
   --store ./mentipy.json \
   --base-url http://localhost:8080 \
   --layout article > scale.tex
-grep -n "How fast is today's pace?" scale.tex
+diff -u open.tex scale.tex
 ```
 
 The answer is no longer free text, but it is still not a listed category.
@@ -468,7 +476,7 @@ required_patterns:
   - mentipy render mc
   - --layout article+qr
   - article-qr.tex
-  - grep -n "Q-" article-qr.tex
+  - diff -u article.tex article-qr.tex
   - ls build
   - Q-
 hint: "Keep the same poll, but switch to the layout that inserts a QR sidecar
@@ -484,7 +492,7 @@ mentipy render mc "How confident do you feel about the course goals?" \
   --base-url http://localhost:8080 \
   --qr-dir build \
   --layout article+qr > article-qr.tex
-grep -n "Q-" article-qr.tex
+diff -u article.tex article-qr.tex
 ls build
 ```
 
@@ -539,10 +547,10 @@ layout.
 required_patterns:
   - mentipy render mc
   - --layout auto
-  - grep -n "mode<presentation>" auto.tex
-  - grep -n "mode<article>" auto.tex
-  - mode<presentation>
-  - mode<article>
+  - 'grep -n "mode<presentation>" auto.tex'
+  - 'grep -n "mode<article>" auto.tex'
+  - "mode<presentation>"
+  - "mode<article>"
 hint: "Ask the generated file to show both branches explicitly."
 ```
 
@@ -653,8 +661,8 @@ configured default.
 
 ```tutorial-step
 required_patterns:
-  - PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)
-  - mentipy url "$PREFIX" --store ./mentipy.json --base http://slides.example
+  - "PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)"
+  - 'mentipy url "$PREFIX" --store ./mentipy.json --base http://slides.example'
   - http://slides.example/
 hint: "Capture the prefix from the first column, then ask for the URL with an
   explicit base override."
@@ -679,8 +687,8 @@ of information.
 ```tutorial-step
 required_patterns:
   - mentipy config set base_url http://config.example
-  - PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)
-  - mentipy url "$PREFIX" --store ./mentipy.json
+  - "PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)"
+  - 'mentipy url "$PREFIX" --store ./mentipy.json'
   - http://config.example/
 hint: "Set base_url once in config, then omit --base when you ask for
   the URL."
@@ -706,10 +714,10 @@ at a chosen port.
 ```tutorial-step
 required_patterns:
   - mentipy config set base_url auto
-  - PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)
-  - mentipy url "$PREFIX" --store ./mentipy.json --port 9123
+  - "PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)"
+  - 'mentipy url "$PREFIX" --store ./mentipy.json --port 9123'
   - mode: regex
-    pattern: https?://\S+:9123/
+    pattern: "https?://\\S+:9123/"
 hint: "Use the literal value auto and a non-default port so the resolution
   path becomes visible in the printed URL."
 ```
