@@ -63,6 +63,12 @@ QR artifacts in [[build/]].  That keeps the generated files next to the manual.
   chapter.
 \end{description}
 
+The same progression is also available as interactive command-line lessons.
+Run [[mentipy tutorial list]] to see them, take the built-in
+[[using-tutorials]] lesson first with
+[[mentipy tutorial run using-tutorials]], and then continue with the
+mentipy-specific lessons in the listed order.
+
 \ltnote{%
   \textbf{Object of learning}: How to use [[mentipy]] in a real lecture
   workflow.
@@ -597,6 +603,7 @@ the regenerated QR codes point at the externally visible address.
 \input{../src/mentipy/server.tex}
 \input{../src/mentipy/public.tex}
 \input{../src/mentipy/cli.tex}
+\input{../src/mentipy/tutorials.tex}
 
 
 \backmatter

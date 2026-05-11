@@ -1,4 +1,5 @@
 NOTANGLEFLAGS.py=
+NOTANGLE.md=notangle -R"[[$(notdir $@)]]" $(filter %.nw,$^) | ${CPIF} $@ && noroots $(filter %.nw,$^)
 
 MODULES+= \
 	__init__.py \
@@ -18,13 +19,27 @@ MODULES+= \
 	server.py \
 	server.tex \
 	store.py \
-	store.tex
+	store.tex \
+	tutorials.tex \
+	tutorials/01-authoring-paths.md \
+	tutorials/02-question-kinds.md \
+	tutorials/03-layout-and-environment.md \
+	tutorials/04-respondent-urls.md \
+	tutorials/05-serving-and-publication.md
 
 .PHONY: all
 all: ${MODULES}
 
 __init__.py: mentipy.nw
 	${NOTANGLE.py}
+
+
+tutorials:
+	mkdir -p $@
+
+
+tutorials/%.md: tutorials.nw | tutorials
+	${NOTANGLE.md}
 
 
 .PHONY: clean

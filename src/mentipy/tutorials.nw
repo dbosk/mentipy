@@ -1,0 +1,930 @@
+\chapter{Interactive Tutorials}
+
+The manual chapter shows the same workflow in prose, but [[pytorial]] wants a
+set of Markdown files that it can load at runtime.  We therefore keep the
+pedagogical analysis here in literate form and tangle the learner-facing files
+into a packaged [[tutorials/]] directory.
+
+The order matters pedagogically.  [[pytorial]] preserves the explicit path order
+we pass from [[mentipy.cli]], and it sorts directory contents lexicographically
+when it scans a directory.  Numbered filenames therefore keep the mentipy
+lessons in the intended progression even if someone later points [[pytorial]] at
+the directory directly.
+
+\section{Choosing an Authoring Path}
+
+This tutorial reuses the same poll while contrasting the two authoring paths.
+That makes the path itself discernible rather than the wording of the question
+or the rendering options.
+
+\ltnote{%
+  \textbf{Object of learning}: How the PythonTeX-facing helpers and the CLI
+  render the same poll.
+
+  \textbf{Learning outcomes}: Render the same question through a Python helper
+  and the CLI, map [[mc]] to [[mentipy render mc]], map [[open_text]] to
+  [[mentipy render open]], and rediscover those names from the built-in help.
+
+  \textbf{Critical aspects}: The authoring path and the Python-to-CLI name
+  mapping.
+
+  \textbf{Variation pattern}: Contrast followed by generalization.
+
+  \textbf{What varies}: Whether the learner renders through a Python script or
+  through [[mentipy render]], and which lookup surface they inspect.
+
+  \textbf{What stays invariant}: The question text, the options, the store, the
+  base URL, the QR directory, and the article layout.
+}
+
+<<[[01-authoring-paths.md]]>>=
+<<authoring paths front matter>>
+<<authoring paths steps>>
+@
+
+<<authoring paths front matter>>=
+---
+id: authoring-paths
+title: Choosing an Authoring Path
+summary: Render one poll through Python-style code and the CLI, then map the
+  public names.
+---
+@
+
+We begin with an editor step because the Python helper path is easiest to see
+as a concrete file.  The script is tiny but complete enough to stand in for the
+same call inside a PythonTeX block.
+
+<<authoring paths steps>>=
+# Write the Python-style script
+
+```tutorial-step
+edit_file: pythontex_poll.py
+required_patterns:
+  - from mentipy.latex import mc
+  - from mentipy.store import Store
+  - Store("mentipy.json")
+  - How confident do you feel about the course goals?
+  - base_url="http://localhost:8080"
+  - qr_dir="build"
+  - layout="article"
+hint: "Keep one small script with the same question and rendering options that
+  the CLI step will reuse later."
+```
+
+Open `pythontex_poll.py` and write this script:
+
+```python
+from mentipy.latex import mc
+from mentipy.store import Store
+
+print(
+    mc(
+        "How confident do you feel about the course goals?",
+        ["Very confident", "Somewhat confident", "Not yet"],
+        store=Store("mentipy.json"),
+        base_url="http://localhost:8080",
+        qr_dir="build",
+        layout="article",
+    )
+)
+```
+
+This is the same helper that a PythonTeX block would call during document
+build.
+@
+
+The next step keeps the script fixed and lets the learner see the concrete LaTeX
+fragment it emits.
+
+<<authoring paths steps>>=
+# Render the poll through Python
+
+```tutorial-step
+required_patterns:
+  - python3 pythontex_poll.py > python.tex
+  - grep -n "How confident" python.tex
+  - How confident do you feel about the course goals?
+hint: "Run the script into a file, then inspect that file for the question
+  text."
+```
+
+Run the Python-style script and inspect the rendered fragment:
+
+```sh
+python3 pythontex_poll.py > python.tex
+grep -n "How confident" python.tex
+```
+
+The next step keeps the script, store, base URL, QR directory, and layout the
+same and only changes how the poll is authored.
+@
+
+Now we vary only the authoring path.  The CLI command uses the same question,
+options, and rendering options, so the comparison can focus on how the poll is
+described rather than on what poll is being rendered.
+
+<<authoring paths steps>>=
+# Render the same poll through the CLI
+
+```tutorial-step
+required_patterns:
+  - mentipy render mc
+  - cli.tex
+  - cmp -s python.tex cli.tex
+  - same
+hint: "Render the same poll into cli.tex, then compare the two files and
+  print a short success word when they match."
+```
+
+Render the same poll through the CLI and compare the two files:
+
+```sh
+mentipy render mc "How confident do you feel about the course goals?" \
+  "Very confident" "Somewhat confident" "Not yet" \
+  --store ./mentipy.json \
+  --base-url http://localhost:8080 \
+  --qr-dir build \
+  --layout article > cli.tex
+cmp -s python.tex cli.tex && printf 'same\n'
+```
+
+If the files match, the same rendering produced both outputs even though one
+came from a Python script and the other from the CLI.
+@
+
+After the direct contrast comes the lookup step.  Here the invariant is the set
+of question kinds, while the lookup surface varies between CLI help and Python
+API documentation.
+
+<<authoring paths steps>>=
+# Look up the public names
+
+```tutorial-step
+required_patterns:
+  - mentipy render --help
+  - python3 -m pydoc mentipy.latex
+  - mc
+  - open
+  - open_text
+  - scale
+hint: "Inspect both help surfaces so you can rediscover the same names later
+  without rereading the manual."
+```
+
+Inspect the two built-in lookup surfaces:
+
+```sh
+mentipy render --help
+python3 -m pydoc mentipy.latex
+```
+
+This is where the name mapping becomes visible: the CLI uses `open` where the
+Python helper is named `open_text`.
+@
+
+The outcome check makes the critical aspects explicit again after the concrete
+examples.
+
+<<authoring paths steps>>=
+# Check the learning outcomes
+
+```tutorial-step
+kind: multi_select
+options:
+  - Only the authoring path changed between the Python script and the CLI.
+  - The CLI subcommand that matches Python's open_text helper is open.
+  - mentipy serve is another way to render the same LaTeX fragment.
+  - The built-in help can rediscover the public names later.
+answers:
+  - Only the authoring path changed between the Python script and the CLI.
+  - The CLI subcommand that matches Python's open_text helper is open.
+  - The built-in help can rediscover the public names later.
+```
+
+Select every statement that should now feel true.
+@
+
+\section{Choosing a Question Kind}
+
+The second tutorial varies the response structure while keeping the surrounding
+workflow stable.  Once the authoring path is no longer the novelty, learners can
+focus on what kind of answer each question kind collects.
+
+\ltnote{%
+  \textbf{Object of learning}: Which question kind fits which response shape.
+
+  \textbf{Learning outcomes}: Choose between single-choice, many-answer,
+  open-text, and scale questions based on the shape of the desired answer.
+
+  \textbf{Critical aspects}: Whether the response is one listed option,
+  several listed options, unconstrained text, or a bounded numeric interval.
+
+  \textbf{Variation pattern}: Contrast, first within [[mc]] by changing only
+  multiplicity, then across the other question kinds.
+
+  \textbf{What varies}: The question kind and, for [[mc]], whether multiple
+  answers are allowed.
+
+  \textbf{What stays invariant}: The command-line authoring path, the store,
+  the base URL, and the article layout used for inspection.
+}
+
+<<[[02-question-kinds.md]]>>=
+<<question kinds front matter>>
+<<question kinds steps>>
+@
+
+<<question kinds front matter>>=
+---
+id: question-kinds
+title: Choosing a Question Kind
+summary: Choose between single-choice, many-answer, open-text, and scale
+  questions by the answer shape you want.
+---
+@
+
+We start with the smallest contrast inside one family: [[mc]] without and then
+with multi-answer mode.
+
+<<question kinds steps>>=
+# Render a single-choice poll
+
+```tutorial-step
+required_patterns:
+  - mentipy render mc
+  - single.tex
+  - Which part should we revisit next?
+hint: "Start with one listed answer from one listed set. Render it into a file
+  so you can compare the later variants."
+```
+
+Render a single-choice poll into `single.tex`:
+
+```sh
+mentipy render mc "Which part should we revisit next?" \
+  "Proofs" "Examples" "Definitions" \
+  --store ./mentipy.json \
+  --base-url http://localhost:8080 \
+  --layout article > single.tex
+grep -n "Which part should we revisit next?" single.tex
+```
+
+This is the default `mc` shape: one answer chosen from the listed options.
+@
+
+Only one critical aspect changes in the next step: the same family now permits
+more than one listed answer.
+
+<<question kinds steps>>=
+# Vary only the allowed number of answers
+
+```tutorial-step
+required_patterns:
+  - mentipy render mc
+  - --multi
+  - multi.tex
+  - diff -u single.tex multi.tex
+  - "Choose exactly one:"
+  - "Choose one or more:"
+hint: "Keep the listed options and rendering context, but add the flag that lets
+  respondents choose more than one option."
+```
+
+Render the same kind of poll again, but now allow more than one listed answer:
+
+```sh
+mentipy render mc "Which part should we revisit next?" \
+  "Proofs" "Examples" "Definitions" \
+  --multi \
+  --store ./mentipy.json \
+  --base-url http://localhost:8080 \
+  --layout article > multi.tex
+diff -u single.tex multi.tex
+```
+
+The poll, the store, and the layout are the same as before; the only
+command-line change is the new `--multi` flag.
+@
+
+Once the learner has separated one-answer from many-answer polls, we can widen
+the contrast to free text.
+
+<<question kinds steps>>=
+# Switch to free text
+
+```tutorial-step
+required_patterns:
+  - mentipy render open
+  - --max-chars 160
+  - What is still unclear?
+  - diff -u multi.tex open.tex
+  - "Choose one or more:"
+  - Free-text answer
+hint: "Move away from listed options entirely and bound the answer by length
+  instead."
+```
+
+Render an open-text question:
+
+```sh
+mentipy render open "What is still unclear?" \
+  --max-chars 160 \
+  --store ./mentipy.json \
+  --base-url http://localhost:8080 \
+  --layout article > open.tex
+diff -u multi.tex open.tex
+```
+
+Instead of choosing one of the listed options, the respondent now writes free
+text up to `--max-chars 160`.
+@
+
+The last rendering contrast narrows the free response again, but this time into
+an ordered numeric interval.
+
+<<question kinds steps>>=
+# Switch to a bounded scale
+
+```tutorial-step
+required_patterns:
+  - mentipy render scale
+  - --low 1
+  - --high 5
+  - How fast is today's pace?
+  - diff -u open.tex scale.tex
+  - Free-text answer
+  - Range
+hint: "Use a numeric interval when you want comparable intensity judgments
+  instead of text."
+```
+
+Render a scale question:
+
+```sh
+mentipy render scale "How fast is today's pace?" \
+  --low 1 \
+  --high 5 \
+  --low-label "Too slow" \
+  --high-label "Too fast" \
+  --store ./mentipy.json \
+  --base-url http://localhost:8080 \
+  --layout article > scale.tex
+diff -u open.tex scale.tex
+```
+
+The answer is no longer free text, but it is still not a listed category.
+@
+
+<<question kinds steps>>=
+# Check the learning outcomes
+
+```tutorial-step
+kind: multi_select
+options:
+  - Use mc for listed options, and add --multi when several listed answers fit.
+  - Use open or open_text when respondents should write their own words.
+  - Use scale when the answer should stay inside a numeric interval.
+  - Use mentipy serve to change a multiple-choice poll into a scale question.
+answers:
+  - Use mc for listed options, and add --multi when several listed answers fit.
+  - Use open or open_text when respondents should write their own words.
+  - Use scale when the answer should stay inside a numeric interval.
+```
+
+Select every statement that should now feel true.
+@
+
+\section{Choosing a Layout and Environment}
+
+Once question kind is stable, the learner can discern what layout and wrapping
+change about the emitted LaTeX without confusing those aspects with the poll
+itself.
+
+\ltnote{%
+  \textbf{Object of learning}: How [[layout]], [[environment]], and
+  [[show_url]] affect the emitted LaTeX.
+
+  \textbf{Learning outcomes}: Choose between [[article]], [[article+qr]], and
+  [[auto]], wrap the question in an environment, and hide the printed URL when
+  the layout supports it.
+
+  \textbf{Critical aspects}: Where the respondent URL appears, whether a QR
+  sidecar is used, and whether the question is wrapped in a LaTeX environment.
+
+  \textbf{Variation pattern}: Contrast, with a short fusion step when
+  [[--env]] and [[--no-url]] are combined.
+
+  \textbf{What varies}: The layout, the explicit environment, and the printed
+  URL visibility.
+
+  \textbf{What stays invariant}: The question text, the options, the store, the
+  base URL, and the CLI authoring path.
+}
+
+<<[[03-layout-and-environment.md]]>>=
+<<layout and environment front matter>>
+<<layout and environment steps>>
+@
+
+<<layout and environment front matter>>=
+---
+id: layout-and-environment
+title: Choosing a Layout and Environment
+summary: Keep one poll fixed while varying article layouts, wrappers, and URL
+  visibility.
+---
+@
+
+We begin with the simplest article layout so the printed URL is easy to spot.
+
+<<layout and environment steps>>=
+# Render a plain article layout
+
+```tutorial-step
+required_patterns:
+  - mentipy render mc
+  - --layout article
+  - article.tex
+  - http://localhost:8080/
+hint: "Start with the QR-less article layout so the printed URL stays visible in
+  the main fragment."
+```
+
+Render one poll in the plain article layout and inspect the printed URL:
+
+```sh
+mentipy render mc "How confident do you feel about the course goals?" \
+  "Very confident" "Somewhat confident" "Not yet" \
+  --store ./mentipy.json \
+  --base-url http://localhost:8080 \
+  --layout article > article.tex
+grep -n "http://localhost:8080/" article.tex
+```
+
+The main fragment now shows the respondent URL directly.
+@
+
+Next we keep the same poll and base URL, but move to the QR-bearing article
+layout so the learner can see where the URL goes instead.
+
+<<layout and environment steps>>=
+# Add the QR-bearing article layout
+
+```tutorial-step
+required_patterns:
+  - mentipy render mc
+  - --layout article+qr
+  - article-qr.tex
+  - diff -u article.tex article-qr.tex
+  - ls build
+  - Q-
+hint: "Keep the same poll, but switch to the layout that inserts a QR sidecar
+  and then inspect both the main fragment and the build directory."
+```
+
+Render the same poll with the QR-bearing article layout:
+
+```sh
+mentipy render mc "How confident do you feel about the course goals?" \
+  "Very confident" "Somewhat confident" "Not yet" \
+  --store ./mentipy.json \
+  --base-url http://localhost:8080 \
+  --qr-dir build \
+  --layout article+qr > article-qr.tex
+diff -u article.tex article-qr.tex
+ls build
+```
+
+The poll stays the same, but the URL now lives with the QR sidecar instead of
+as plain text in the main fragment.
+@
+
+Here we fuse two related controls: an explicit environment and hidden printed
+URL.  The step still keeps the same poll and article layout so the combined
+effect is discernible.
+
+<<layout and environment steps>>=
+# Wrap the same question in an environment
+
+```tutorial-step
+required_patterns:
+  - mentipy render mc
+  - --env exercise
+  - --no-url
+  - diff -u article.tex wrapped.tex
+  - grep -n "exercise" wrapped.tex
+  - hidden
+hint: "Add an explicit environment, diff against the plain article output so
+  both changes show up side by side, and ask grep to prove that the printed URL
+  is gone by printing a short fallback word instead."
+```
+
+Render the same poll again, now wrapped in an `exercise` environment with the
+printed URL hidden:
+
+```sh
+mentipy render mc "How confident do you feel about the course goals?" \
+  "Very confident" "Somewhat confident" "Not yet" \
+  --store ./mentipy.json \
+  --base-url http://localhost:8080 \
+  --layout article \
+  --env exercise \
+  --no-url > wrapped.tex
+diff -u article.tex wrapped.tex
+grep -n "exercise" wrapped.tex
+grep -n "http://localhost:8080/" wrapped.tex || printf 'hidden\n'
+```
+
+The poll text is unchanged, but the question is now wrapped in an `exercise`
+environment and the printed URL is gone.
+@
+
+The final rendering step generalises the same question into the mode-aware auto
+layout.
+
+<<layout and environment steps>>=
+# Render the auto layout
+
+```tutorial-step
+required_patterns:
+  - mentipy render mc
+  - --layout auto
+  - 'grep -n "mode<presentation>" auto.tex'
+  - 'grep -n "mode<article>" auto.tex'
+  - "mode<presentation>"
+  - "mode<article>"
+hint: "Ask the generated file to show both branches explicitly."
+```
+
+Render the same poll with the auto layout:
+
+```sh
+mentipy render mc "How confident do you feel about the course goals?" \
+  "Very confident" "Somewhat confident" "Not yet" \
+  --store ./mentipy.json \
+  --base-url http://localhost:8080 \
+  --layout auto > auto.tex
+grep -n "mode<presentation>" auto.tex
+grep -n "mode<article>" auto.tex
+```
+
+The auto layout keeps both output contexts in one fragment.
+@
+
+<<layout and environment steps>>=
+# Check the learning outcomes
+
+```tutorial-step
+kind: multi_select
+options:
+  - article prints the respondent URL directly in the LaTeX fragment.
+  - article+qr moves the URL into the QR sidecar while keeping the poll.
+  - --env exercise wraps the poll in an exercise environment.
+  - --layout auto discards the article branch and keeps only the slide branch.
+answers:
+  - article prints the respondent URL directly in the LaTeX fragment.
+  - article+qr moves the URL into the QR sidecar while keeping the poll.
+  - --env exercise wraps the poll in an exercise environment.
+```
+
+Select every statement that should now feel true.
+@
+
+\section{Resolving Respondent URLs}
+
+The next tutorial isolates where the respondent URL comes from.  We keep the
+same stored question so the critical aspect is URL resolution, not registration.
+
+\ltnote{%
+  \textbf{Object of learning}: How [[mentipy]] resolves the respondent URL.
+
+  \textbf{Learning outcomes}: Register a question, discover its prefix, use
+  [[mentipy url]], override the base explicitly, reuse a configured base, and
+  recognise the [[auto]] fallback.
+
+  \textbf{Critical aspects}: The difference between the stored prefix, an
+  explicit [[--base]], a configured [[base_url]], and a resolved local address.
+
+  \textbf{Variation pattern}: Contrast, with the question prefix held fixed
+  while the source of the base URL varies.
+
+  \textbf{What varies}: The source of the base URL.
+
+  \textbf{What stays invariant}: The registered question and the command used to
+  ask for its canonical URL.
+}
+
+<<[[04-respondent-urls.md]]>>=
+<<respondent urls front matter>>
+<<respondent urls steps>>
+@
+
+<<respondent urls front matter>>=
+---
+id: respondent-urls
+title: Resolving Respondent URLs
+summary: Trace one question URL from its stored prefix through explicit,
+  configured, and auto-resolved bases.
+---
+@
+
+We first need one stored question and its visible prefix.
+
+<<respondent urls steps>>=
+# Register a question and discover its prefix
+
+```tutorial-step
+required_patterns:
+  - mentipy render mc
+  - mentipy list
+  - How confident do you feel about the course goals?
+hint: "Register one question, then ask mentipy to list the stored prefixes."
+```
+
+Register one question and list the store:
+
+```sh
+mentipy render mc "How confident do you feel about the course goals?" \
+  "Very confident" "Somewhat confident" "Not yet" \
+  --store ./mentipy.json \
+  --base-url http://localhost:8080 \
+  --layout article > question.tex
+mentipy list --store ./mentipy.json
+```
+
+The list output gives you the canonical prefix that later commands reuse.
+@
+
+The first URL contrast is the strongest one: an explicit base overrides every
+configured default.
+
+<<respondent urls steps>>=
+# Override the base URL explicitly
+
+```tutorial-step
+required_patterns:
+  - "PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)"
+  - 'mentipy url "$PREFIX" --store ./mentipy.json --base http://slides.example'
+  - http://slides.example/
+hint: "Capture the prefix from the first column, then ask for the URL with an
+  explicit base override."
+```
+
+Reuse the stored prefix, but override the base explicitly:
+
+```sh
+PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)
+mentipy url "$PREFIX" --store ./mentipy.json --base http://slides.example
+```
+
+Only the base changed; the stored prefix stayed the same.
+@
+
+Next we remove the explicit override and let configuration supply the same kind
+of information.
+
+<<respondent urls steps>>=
+# Read the base URL from config
+
+```tutorial-step
+required_patterns:
+  - mentipy config set base_url http://config.example
+  - "PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)"
+  - 'mentipy url "$PREFIX" --store ./mentipy.json'
+  - http://config.example/
+hint: "Set base_url once in config, then omit --base when you ask for
+  the URL."
+```
+
+Store a configured base URL and reuse it:
+
+```sh
+mentipy config set base_url http://config.example
+PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)
+mentipy url "$PREFIX" --store ./mentipy.json
+```
+
+Now the explicit flag is gone, but the resulting URL still uses a chosen base.
+@
+
+The last contrast replaces the configured host name with the current LAN address
+at a chosen port.
+
+<<respondent urls steps>>=
+# Resolve the current LAN address automatically
+
+```tutorial-step
+required_patterns:
+  - mentipy config set base_url auto
+  - "PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)"
+  - 'mentipy url "$PREFIX" --store ./mentipy.json --port 9123'
+  - mode: regex
+    pattern: "https?://\\S+:9123/"
+hint: "Use the literal value auto and a non-default port so the resolution
+  path becomes visible in the printed URL."
+```
+
+Ask mentipy to resolve the current LAN address automatically:
+
+```sh
+mentipy config set base_url auto
+PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)
+mentipy url "$PREFIX" --store ./mentipy.json --port 9123
+```
+
+The prefix still comes from the store, but the base is now derived from the
+current machine and the chosen port.
+@
+
+<<respondent urls steps>>=
+# Check the learning outcomes
+
+```tutorial-step
+kind: multi_select
+options:
+  - --base overrides the configured base URL for one url command.
+  - If base_url is configured, mentipy url uses it when --base is omitted.
+  - The literal value auto resolves the current LAN address at the chosen port.
+  - mentipy list changes the respondent URL for an existing question.
+answers:
+  - --base overrides the configured base URL for one url command.
+  - If base_url is configured, mentipy url uses it when --base is omitted.
+  - The literal value auto resolves the current LAN address at the chosen port.
+```
+
+Select every statement that should now feel true.
+@
+
+\section{Serving and Publishing Polls}
+
+The last tutorial focuses on the runtime phase.  The critical aspect is no
+longer how a question is authored, but what the serving command changes about
+URLs, result visibility, and QR regeneration.
+
+\ltnote{%
+  \textbf{Object of learning}: How to prepare and start the runtime serving
+  workflow.
+
+  \textbf{Learning outcomes}: Inspect the serving command, prepare the settings
+  that public exposure uses, distinguish local serving from public exposure, and
+  recognise when QR regeneration implies a recompilation.
+
+  \textbf{Critical aspects}: The roles of [[--results]], [[--public]],
+  [[ssh_tunnel]], [[public_base_url]], and the QR-regeneration message.
+
+  \textbf{Variation pattern}: Contrast, with one short fusion step where the
+  local serve command and QR regeneration are experienced together.
+
+  \textbf{What varies}: The serving flags and the configuration values used for
+  public exposure.
+
+  \textbf{What stays invariant}: The stored question and the fact that the same
+  local server is being prepared for respondents.
+}
+
+<<[[05-serving-and-publication.md]]>>=
+<<serving and publication front matter>>
+<<serving and publication steps>>
+@
+
+<<serving and publication front matter>>=
+---
+id: serving-and-publication
+title: Serving and Publishing Polls
+summary: Prepare local serving, inspect public settings, and recognise when QR
+  regeneration means you must recompile the slides.
+---
+@
+
+We begin with the built-in help because it is the safest way to expose the whole
+surface before any runtime side effects happen.
+
+<<serving and publication steps>>=
+# Inspect the serving command
+
+```tutorial-step
+required_patterns:
+  - mentipy serve --help
+  - --results
+  - --public
+  - ssh_tunnel
+  - public_base_url
+hint: "Start from the help text so you can see the runtime flags and the config
+  keys they mention."
+```
+
+Inspect the serving command:
+
+```sh
+mentipy serve --help
+```
+
+The help text surfaces the runtime flags and points at the configuration keys
+that matter when the server is exposed publicly.
+@
+
+Before serving, we need one stored question and a base URL configuration that
+will trigger URL resolution at runtime.
+
+<<serving and publication steps>>=
+# Prepare one question and an auto base URL
+
+```tutorial-step
+required_patterns:
+  - mentipy config set base_url auto
+  - mentipy render mc
+  - --store ./mentipy.json
+  - How confident do you feel about the course goals?
+hint: "Set base_url to auto, then register one poll in the local store so
+  the serving step has something to refresh."
+```
+
+Prepare one stored question and an auto-resolved base URL:
+
+```sh
+mentipy config set base_url auto
+mentipy render mc "How confident do you feel about the course goals?" \
+  "Very confident" "Somewhat confident" "Not yet" \
+  --store ./mentipy.json > poll.tex
+```
+
+The runtime step will now have both a stored poll and a base URL that still has
+to be resolved.
+@
+
+Public exposure is configured before it is used.  This keeps the contrast clear
+between local serving and the extra settings public exposure needs.
+
+<<serving and publication steps>>=
+# Record the public exposure settings
+
+```tutorial-step
+required_patterns:
+  - mentipy config set ssh_tunnel alice@example.test:2222
+  - mentipy config set public_base_url https://polls.example
+  - mentipy config get ssh_tunnel
+  - mentipy config get public_base_url
+  - alice@example.test:2222
+  - https://polls.example
+hint: "Store the SSH endpoint and the public base URL, then read them back so the
+  settings become concrete."
+```
+
+Record the two public-exposure settings that the help text mentioned:
+
+```sh
+mentipy config set ssh_tunnel alice@example.test:2222
+mentipy config set public_base_url https://polls.example
+mentipy config get ssh_tunnel
+mentipy config get public_base_url
+```
+
+These settings are inert by themselves, but they matter once you choose a public
+exposure mode.
+@
+
+The final shell step keeps to local serving, but it is long enough to reveal the
+regeneration message that matters for slide authors.
+
+<<serving and publication steps>>=
+# Start the local server long enough to see the regeneration message
+
+```tutorial-step
+required_patterns:
+  - timeout 1 mentipy serve --store ./mentipy.json --results
+  - Serving at
+  - Regenerated
+  - recompile your slides
+hint: "Run the server under timeout so you can see the startup message and
+  then return to the tutorial immediately."
+```
+
+Start the local server briefly so you can see its startup message:
+
+```sh
+timeout 1 mentipy serve --store ./mentipy.json --results
+```
+
+Because `base_url` is still `auto`, the server resolves the current URL and
+regenerates the QR targets.  That is why it tells you to recompile the slides.
+@
+
+<<serving and publication steps>>=
+# Check the learning outcomes
+
+```tutorial-step
+kind: multi_select
+options:
+  - --results changes where respondents land after they answer.
+  - ssh mode reads its tunnel endpoint from the ssh_tunnel setting.
+  - public_base_url can override the derived public URL.
+  - Once QR regeneration is reported, the old PDF already embeds the new images.
+answers:
+  - --results changes where respondents land after they answer.
+  - ssh mode reads its tunnel endpoint from the ssh_tunnel setting.
+  - public_base_url can override the derived public URL.
+```
+
+Select every statement that should now feel true.
+@

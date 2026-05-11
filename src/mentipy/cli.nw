@@ -20,11 +20,13 @@ from contextlib import contextmanager
 import csv
 import io
 import json
+from pathlib import Path
 import shutil
 import textwrap
 import time
 from typing import Optional
 
+from pytorial import add_typer_subcommand
 import typer
 
 from mentipy.latex import (
@@ -389,6 +391,42 @@ def _public_url_context(
     except PublicExposureError as err:
         typer.echo(f"Could not expose the server: {err}", err=True)
         raise typer.Exit(code=1)
+@
+
+The interactive tutorials ship as Markdown files inside the package so they are
+available wherever [[mentipy]] is installed.  The order in
+[[TUTORIAL_FILENAMES]] is the intended learning sequence, and [[pytorial]]
+preserves the explicit path order we pass it.  We therefore resolve the bundled
+files once and hand them over as an ordered tuple rather than asking [[pytorial]]
+to scan the directory.
+
+<<constants>>=
+TUTORIAL_NAMESPACE = "mentipy"
+TUTORIAL_FILENAMES = (
+    "01-authoring-paths.md",
+    "02-question-kinds.md",
+    "03-layout-and-environment.md",
+    "04-respondent-urls.md",
+    "05-serving-and-publication.md",
+)
+@
+
+<<functions>>=
+def _tutorial_dir() -> Path:
+    return Path(__file__).resolve().parent / "tutorials"
+
+
+def _tutorial_paths() -> tuple[Path, ...]:
+    tutorial_dir = _tutorial_dir()
+    return tuple(tutorial_dir / name for name in TUTORIAL_FILENAMES)
+
+@
+
+The public-serving branch still needs one helper of its own.  It reuses the
+shared URL context above, rewrites remembered QR targets when the public URL
+changes, and then hands control to the HTTP server.
+
+<<functions>>=
 
 
 def _serve_publicly(
@@ -428,6 +466,21 @@ config_cli = typer.Typer(help=CONFIG_HELP)
 render_cli = typer.Typer(help="Render question LaTeX.")
 cli.add_typer(config_cli, name="config")
 cli.add_typer(render_cli, name="render")
+
+@
+
+The interactive tutorials live behind [[mentipy tutorial]].  [[pytorial]]
+supplies the [[list]], [[run]], and [[review]] subcommands; we only have to
+hand it the ordered tutorial paths and a namespace so its per-user state stays
+scoped to [[mentipy]].
+
+<<cli setup>>=
+add_typer_subcommand(
+    cli,
+    name="tutorial",
+    namespace=TUTORIAL_NAMESPACE,
+    tutorial_paths=_tutorial_paths(),
+)
 
 
 @cli.command(context_settings={"allow_extra_args": True})
@@ -704,6 +757,57 @@ The command tests mostly verify wiring.  The heavy lifting has already been
 tested in the lower-level modules.
 
 <<test functions>>=
+def test_tutorial_paths_use_the_learning_sequence():
+    names = [path.name for path in mentipy.cli._tutorial_paths()]
+
+    assert names == list(TUTORIAL_FILENAMES)
+    assert all(
+        path.parent == mentipy.cli._tutorial_dir()
+        for path in mentipy.cli._tutorial_paths()
+    )
+
+
+def test_tutorial_paths_exist_in_the_package_tree():
+    assert all(path.exists() for path in mentipy.cli._tutorial_paths())
+
+
+def test_tutorial_help_lists_the_embedded_commands():
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["tutorial", "--help"])
+
+    assert result.exit_code == 0
+    for command in ("list", "run", "review"):
+        assert command in result.output
+
+
+def test_tutorial_list_starts_with_using_tutorials(tmp_path, monkeypatch):
+    runner = CliRunner()
+    state_home = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+
+    result = runner.invoke(
+        cli,
+        ["tutorial", "list"],
+        env={"XDG_STATE_HOME": str(state_home)},
+    )
+
+    assert result.exit_code == 0
+    tutorial_ids = [
+        line.split("\t", 1)[0]
+        for line in result.stdout.splitlines()
+        if line.strip()
+    ]
+    assert tutorial_ids[:6] == [
+        "using-tutorials",
+        "authoring-paths",
+        "question-kinds",
+        "layout-and-environment",
+        "respondent-urls",
+        "serving-and-publication",
+    ]
+
+
 def test_config_set_get_round_trip(tmp_path, monkeypatch):
     runner = CliRunner()
     monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
@@ -1489,7 +1593,7 @@ def test_url_command_uses_the_explicit_port_for_auto_resolution(
 
 
 def test_url_command_public_without_value_defaults_to_upnp(tmp_path, monkeypatch):
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
     config_path = tmp_path / "config.json"
     monkeypatch.setenv("MENTIPY_CONFIG", str(config_path))
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
@@ -1527,7 +1631,7 @@ def test_url_command_public_without_value_defaults_to_upnp(tmp_path, monkeypatch
 
 
 def test_url_command_public_prefers_public_base_url(tmp_path, monkeypatch):
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
     config_path = tmp_path / "config.json"
     monkeypatch.setenv("MENTIPY_CONFIG", str(config_path))
     set_setting("public_base_url", "https://polls.example")
@@ -1588,6 +1692,7 @@ def test_url_help_mentions_the_relevant_config_keys():
 
 <<test [[cli.py]]>>=
 import json
+import mentipy.cli
 
 from typer.testing import CliRunner
 
