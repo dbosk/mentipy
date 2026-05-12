@@ -16,6 +16,7 @@ dependencies = [
     "typer (>=0.25.1,<0.26.0)",
     "typerconf (>=2.12,<3.0)",
     "pytorial (>=0.6,<0.7)",
+    "rich (>=13.8.0,<16.0.0)",
 ]
 
 [project.scripts]

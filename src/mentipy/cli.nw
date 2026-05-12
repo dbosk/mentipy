@@ -33,6 +33,8 @@ import time
 from typing import Optional
 
 from pytorial import add_typer_subcommand
+from rich.console import Console
+from rich.markdown import Markdown
 import typer
 
 from mentipy.latex import (
@@ -60,6 +62,7 @@ from mentipy.store import (
     SSH_TUNNEL_CONFIG,
     STORE_CONFIG,
     Store,
+    format_timestamp,
     get_setting,
     list_settings,
     load_config,
@@ -293,6 +296,23 @@ def _terminal_width() -> int:
     return shutil.get_terminal_size((LIST_FALLBACK_WIDTH, 24)).columns
 @
 
+Open answers often use Markdown for emphasis or lists.  Rendering through a
+string-backed Rich console gives [[watch]] and [[view]] the same terminal
+presentation without forcing the command functions to know anything about Rich.
+
+<<functions>>=
+def _markdown_text(markdown: str) -> str:
+    buffer = io.StringIO()
+    console = Console(
+        file=buffer,
+        force_terminal=False,
+        color_system=None,
+        width=_terminal_width(),
+    )
+    console.print(Markdown(markdown))
+    return "\n".join(line.rstrip() for line in buffer.getvalue().splitlines())
+@
+
 The default listing optimises for scanning: prefix first, short preview second.
 The [[--full]] variant spends the available terminal width on wrapped question
 text while preserving a fixed prefix column, so long questions remain readable
@@ -334,12 +354,12 @@ def _question_listing(entries: list[dict[str, object]], *, full: bool) -> str:
     return "\n".join(lines)
 @
 
-The watcher produces one complete snapshot per refresh.  Multiple-choice and
-scale questions can summarize counts directly, while open-text questions keep
-the answer timestamps so a lecturer can see both content and recency.
+The terminal snapshot is shared by the one-shot and live commands.  The count
+summaries stay plain text, while open answers render their Markdown after a
+local timestamp line so recency and formatting remain readable together.
 
 <<functions>>=
-def _watch_snapshot(store: Store, prefix: str) -> str:
+def _results_snapshot(store: Store, prefix: str) -> str:
     full_hash = _resolve_full_hash(store, prefix)
     results = store.results(full_hash)
     question = results["question"]
@@ -362,7 +382,10 @@ def _watch_snapshot(store: Store, prefix: str) -> str:
 
     if results["answers"]:
         for answer in results["answers"]:
-            lines.append(f"{answer['ts']}: {answer['value']}")
+            lines.append(format_timestamp(answer["ts"]))
+            lines.append(_markdown_text(str(answer["value"])))
+            lines.append("")
+        lines.pop()
     else:
         lines.append("No answers yet.")
 
@@ -800,6 +823,21 @@ def list_questions(
     typer.echo(_question_listing(_configured_store(store).all_questions(), full=full))
 @
 
+The view command is the one-shot form of the live display.  The watcher then
+adds only the refresh loop and screen clearing, so the two commands cannot drift
+apart in how they render counts, Markdown, or timestamps.
+
+<<cli setup>>=
+@cli.command()
+def view(
+    prefix: str,
+    store: Optional[str] = STORE_OPTION,
+):
+    """Show current results for ``prefix`` in the terminal."""
+
+    typer.echo(_results_snapshot(_configured_store(store), prefix))
+@
+
 The watcher intentionally owns the refresh loop rather than pushing that loop
 into the store.  The store supplies snapshots; the CLI decides how often to
 redraw and treats [[Ctrl-C]] as a normal way to leave the live display.
@@ -818,7 +856,7 @@ def watch(
     try:
         while True:
             typer.echo(CLEAR_SCREEN, nl=False)
-            typer.echo(_watch_snapshot(active_store, prefix))
+            typer.echo(_results_snapshot(active_store, prefix))
             time.sleep(interval)
     except KeyboardInterrupt:
         return
@@ -1702,10 +1740,45 @@ def test_list_command_full_wraps_question_text(tmp_path, monkeypatch):
     )
 @
 
-The interactive watcher test interrupts the sleep call after the first redraw so
-the command remains a normal unit test.
+Both result-display commands use the same snapshot renderer.  The tests share
+one prepared open answer so the contract stays focused on the difference between
+one-shot output and the live refresh loop, not on duplicated setup.
 
 <<test functions>>=
+def _store_with_markdown_answer(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, "**important** observation")
+
+    data = store._data()
+    data["answers"][full_hash][0]["ts"] = "2026-05-12T11:30:45Z"
+    store._write(data)
+
+    return store, prefix
+
+
+def test_view_command_prints_a_snapshot_once(tmp_path, monkeypatch):
+    runner = CliRunner()
+    store, prefix = _store_with_markdown_answer(tmp_path)
+    monkeypatch.setattr(
+        "mentipy.cli.format_timestamp",
+        lambda timestamp: "2026-05-12 13:30",
+    )
+    monkeypatch.setattr(
+        "mentipy.cli.time.sleep",
+        lambda interval: pytest.fail("view must not sleep"),
+    )
+
+    result = runner.invoke(cli, ["view", prefix, "--store", str(store.path)])
+
+    assert result.exit_code == 0
+    assert "Responses: 1" in result.stdout
+    assert "2026-05-12 13:30" in result.stdout
+    assert "important observation" in result.stdout
+    assert "**important**" not in result.stdout
+
+
 def test_watch_command_prints_a_snapshot(tmp_path, monkeypatch):
     runner = CliRunner()
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
@@ -1726,6 +1799,30 @@ def test_watch_command_prints_a_snapshot(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert "Responses: 1" in result.stdout
     assert "B: 1" in result.stdout
+
+
+def test_watch_command_renders_open_answers_with_markdown(tmp_path, monkeypatch):
+    runner = CliRunner()
+    store, prefix = _store_with_markdown_answer(tmp_path)
+    monkeypatch.setattr(
+        "mentipy.cli.format_timestamp",
+        lambda timestamp: "2026-05-12 13:30",
+    )
+
+    def stop_after_first_sleep(_interval):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("mentipy.cli.time.sleep", stop_after_first_sleep)
+
+    result = runner.invoke(
+        cli,
+        ["watch", prefix, "--store", str(store.path), "--interval", "0.01"],
+    )
+
+    assert result.exit_code == 0
+    assert "2026-05-12 13:30" in result.stdout
+    assert "important observation" in result.stdout
+    assert "**important**" not in result.stdout
 @
 
 Export commands should be deterministic wrappers around the stored data.  JSON
@@ -1939,6 +2036,7 @@ def test_url_help_mentions_the_relevant_config_keys():
 <<test [[cli.py]]>>=
 import json
 import mentipy.cli
+import pytest
 
 from typer.testing import CliRunner
 
