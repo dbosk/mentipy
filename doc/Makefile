@@ -13,17 +13,17 @@ weave: mentipy.tex
 ../%::
 	${MAKE} -C $(dir $@) $(notdir $@)
 
-${TEX_OUTDIR}/build:
+${TEX_OUTDIR}/mentipy-obj:
 	${MKDIR} ${TEX_OUTDIR}
 	-${RM} $@
-	${LN} -s ../build $@
+	${LN} -s ../mentipy-obj $@
 
-mentipy.pdf: ${TEX_OUTDIR}/build
+mentipy.pdf: ${TEX_OUTDIR}/mentipy-obj
 mentipy.pdf: mentipy.tex ../src/mentipy/mentipy.tex
 mentipy.pdf: bibliography.bib preamble.tex
 
-mentipy.pdf: $(wildcard build/*.pdf_tex)
-mentipy.pdf: $(wildcard build/*.pdf)
+mentipy.pdf: $(wildcard mentipy-obj/*.pdf_tex)
+mentipy.pdf: $(wildcard mentipy-obj/*.pdf)
 
 .PHONY: serve
 serve: mentipy.pdf
@@ -33,7 +33,7 @@ serve: mentipy.pdf
 .PHONY: clean
 clean:
 	${RM} mentipy.tex mentipy.pdf
-	${RM} -R build
+	${RM} -R mentipy-obj
 
 .PHONY: distclean
 distclean:

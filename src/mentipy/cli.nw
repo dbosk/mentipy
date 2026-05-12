@@ -1271,7 +1271,7 @@ def test_render_mc_prints_slide_latex_and_writes_the_question(tmp_path):
             "--base-url",
             "http://example.test:8080",
             "--qr-dir",
-            str(tmp_path / "build"),
+            str(tmp_path / DEFAULT_QR_DIR),
         ],
     )
 
@@ -1299,7 +1299,7 @@ def test_render_mc_env_option_wraps_the_question(tmp_path):
             "--base-url",
             "http://example.test:8080",
             "--qr-dir",
-            str(tmp_path / "build"),
+            str(tmp_path / DEFAULT_QR_DIR),
         ],
     )
 
@@ -1325,7 +1325,7 @@ def test_render_mc_auto_layout_prints_both_mode_branches(tmp_path):
             "--base-url",
             "http://example.test:8080",
             "--qr-dir",
-            str(tmp_path / "build"),
+            str(tmp_path / DEFAULT_QR_DIR),
         ],
     )
 
@@ -1353,7 +1353,7 @@ def test_render_mc_article_no_url_suppresses_printed_url(tmp_path):
             "--base-url",
             "http://example.test:8080",
             "--qr-dir",
-            str(tmp_path / "build"),
+            str(tmp_path / DEFAULT_QR_DIR),
         ],
     )
 
@@ -1380,7 +1380,7 @@ def test_render_mc_environment_follows_env_var_unless_env_option_wins(
             "--base-url",
             "http://example.test:8080",
             "--qr-dir",
-            str(tmp_path / "build"),
+            str(tmp_path / DEFAULT_QR_DIR),
         ],
     )
 
@@ -1402,7 +1402,7 @@ def test_render_mc_environment_follows_env_var_unless_env_option_wins(
             "--base-url",
             "http://example.test:8080",
             "--qr-dir",
-            str(tmp_path / "build"),
+            str(tmp_path / DEFAULT_QR_DIR),
         ],
     )
 

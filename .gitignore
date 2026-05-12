@@ -110,6 +110,7 @@ ipython_config.py
 
 # mentipy runtime state
 mentipy.json
+mentipy-obj/
 
 # pdm
 #   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.

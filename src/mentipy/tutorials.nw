@@ -66,7 +66,7 @@ required_patterns:
   - Store("mentipy.json")
   - How confident do you feel about the course goals?
   - base_url="http://localhost:8080"
-  - qr_dir="build"
+  - qr_dir="mentipy-obj"
   - layout="article"
 hint: "Keep one small script with the same question and rendering options that
   the CLI step will reuse later."
@@ -84,7 +84,7 @@ print(
         ["Very confident", "Somewhat confident", "Not yet"],
         store=Store("mentipy.json"),
         base_url="http://localhost:8080",
-        qr_dir="build",
+        qr_dir="mentipy-obj",
         layout="article",
     )
 )
@@ -144,7 +144,7 @@ mentipy render mc "How confident do you feel about the course goals?" \
   "Very confident" "Somewhat confident" "Not yet" \
   --store ./mentipy.json \
   --base-url http://localhost:8080 \
-  --qr-dir build \
+  --qr-dir mentipy-obj \
   --layout article > cli.tex
 cmp -s python.tex cli.tex && printf 'same\n'
 ```
@@ -477,10 +477,10 @@ required_patterns:
   - --layout article+qr
   - article-qr.tex
   - diff -u article.tex article-qr.tex
-  - ls build
+  - ls mentipy-obj
   - Q-
 hint: "Keep the same poll, but switch to the layout that inserts a QR sidecar
-  and then inspect both the main fragment and the build directory."
+  and then inspect both the main fragment and the mentipy-obj directory."
 ```
 
 Render the same poll with the QR-bearing article layout:
@@ -490,10 +490,10 @@ mentipy render mc "How confident do you feel about the course goals?" \
   "Very confident" "Somewhat confident" "Not yet" \
   --store ./mentipy.json \
   --base-url http://localhost:8080 \
-  --qr-dir build \
+  --qr-dir mentipy-obj \
   --layout article+qr > article-qr.tex
 diff -u article.tex article-qr.tex
-ls build
+ls mentipy-obj
 ```
 
 The poll stays the same, but the URL now lives with the QR sidecar instead of
