@@ -33,8 +33,11 @@ import time
 from typing import Optional
 
 from pytorial import add_typer_subcommand
+from rich.bar import Bar
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.table import Table
+from rich.text import Text
 import typer
 
 from mentipy.latex import (
@@ -186,6 +189,7 @@ LIST_PREVIEW_WIDTH = 30
 LIST_COLUMN_GAP = 2
 LIST_FALLBACK_WIDTH = 80
 LIST_MIN_TEXT_WIDTH = 20
+TERMINAL_BAR_SIZE = 100
 
 WARNING_TEXT = (
     "Warning: exposing mentipy makes its unauthenticated polling pages\n"
@@ -347,11 +351,219 @@ def _question_listing(entries: list[dict[str, object]], *, full: bool) -> str:
     return "\n".join(lines)
 @
 
-The terminal snapshot is shared by the one-shot and live commands.  Aggregate
-questions stay plain text because their counts are the result.  Open questions
-are different: each answer is an event that can be appended later, so answer
-rendering lives in its own helper.  Passing an explicit console keeps tests
-deterministic without changing the command code.
+The terminal bar chart is the same visualisation as the HTML results page: one
+row per category, a bar proportional to the relative count, and a numeric count
+with its rounded percentage.  A grid table gives labels their own column, so a
+short label and a long label still start their bars at the same position.
+
+<<functions>>=
+def _render_terminal_bar_chart(
+    labels: list[str],
+    counts: list[int],
+    percentages: list[float],
+    *,
+    console: Console,
+):
+    table = Table.grid(padding=(0, 2))
+    table.add_column(no_wrap=True)
+    table.add_column(ratio=1)
+    table.add_column(justify="right", no_wrap=True)
+
+    for label, count, percentage in zip(labels, counts, percentages):
+        table.add_row(
+            str(label),
+            Bar(
+                TERMINAL_BAR_SIZE,
+                0,
+                percentage,
+                color="cyan",
+                bgcolor="grey23",
+            ),
+            f"{count} ({percentage:.0f}%)",
+        )
+
+    console.print(table)
+@
+
+The alignment test uses one long and one short label because that is where a
+plain string layout most easily drifts.  The first non-ASCII character in each
+row is the block bar, so equal positions mean the plot area is aligned.
+
+<<test functions>>=
+def test_terminal_bar_chart_aligns_short_and_long_labels():
+    buffer = io.StringIO()
+    console = Console(
+        file=buffer,
+        force_terminal=False,
+        color_system=None,
+        width=80,
+    )
+
+    mentipy.cli._render_terminal_bar_chart(
+        ["Short", "A much longer label"],
+        [1, 3],
+        [25.0, 75.0],
+        console=console,
+    )
+
+    lines = buffer.getvalue().splitlines()
+    bar_starts = [
+        re.search(r"[^\x00-\x7f]", line).start()
+        for line in lines
+    ]
+    assert len(set(bar_starts)) == 1
+    assert lines[0].index("1 (25%)") == lines[1].index("3 (75%)")
+@
+
+The statistic callouts share one low-level formatter.  It builds Rich
+[[Text]] directly rather than parsing markup strings, so option labels that
+look like terminal style markup are still shown literally.
+
+<<functions>>=
+def _stats_line(pairs: list[tuple[str, str]]) -> Text:
+    line = Text()
+    for index, (label, value) in enumerate(pairs):
+        if index:
+            line.append(" | ")
+        line.append(f"{label}: ", style="dim")
+        line.append(value, style="bold")
+    return line
+@
+
+The multiple-choice callout mirrors the HTML mode chip.  It deliberately reads
+the modal option and percentage from the same summary fields as the web page,
+so terminal and browser views cannot disagree about the highlighted answer.
+
+<<functions>>=
+def _render_terminal_mc_stats(
+    question: dict,
+    summary: dict,
+    *,
+    console: Console,
+):
+    mode_index = summary.get("mode_index")
+    if mode_index is None:
+        return
+    label = str(question["options"][mode_index])
+    percentage = summary["percentages"][mode_index]
+    line = _stats_line([("Mode", label)])
+    line.append(f" ({percentage:.0f}%)")
+    console.print(line)
+@
+
+The mode renderer should preserve the displayed label and rounded percentage.
+This protects both the data source and the terminal formatting in one small
+case.
+
+<<test functions>>=
+def test_terminal_mc_stats_show_mode_percentage():
+    buffer = io.StringIO()
+    console = Console(
+        file=buffer,
+        force_terminal=False,
+        color_system=None,
+        width=80,
+    )
+
+    mentipy.cli._render_terminal_mc_stats(
+        {"options": ["A", "B"]},
+        {"mode_index": 1, "percentages": [33.3, 66.7]},
+        console=console,
+    )
+
+    assert "Mode: B (67%)" in buffer.getvalue()
+@
+
+Scale questions use descriptive statistics rather than a single mode.  The
+terminal callout keeps the same precision as the HTML page: two decimals for
+mean and standard deviation, exact values for median and endpoints.
+
+<<functions>>=
+def _render_terminal_scale_stats(summary: dict, *, console: Console):
+    if summary.get("mean") is None:
+        return
+    console.print(
+        _stats_line(
+            [
+                ("Mean", f'{summary["mean"]:.2f}'),
+                ("Median", f'{summary["median"]}'),
+                ("Std", f'{summary["stddev"]:.2f}'),
+                ("Min", f'{summary["min"]}'),
+                ("Max", f'{summary["max"]}'),
+            ]
+        )
+    )
+@
+
+The scale callout test pins the mixed precision because a lecturer comparing
+terminal and HTML output should see the same summary values.
+
+<<test functions>>=
+def test_terminal_scale_stats_match_html_precision():
+    buffer = io.StringIO()
+    console = Console(
+        file=buffer,
+        force_terminal=False,
+        color_system=None,
+        width=80,
+    )
+
+    mentipy.cli._render_terminal_scale_stats(
+        {
+            "mean": 2.5,
+            "median": 2.5,
+            "stddev": 0.5,
+            "min": 2,
+            "max": 3,
+        },
+        console=console,
+    )
+
+    output = buffer.getvalue()
+    assert "Mean: 2.50" in output
+    assert "Median: 2.5" in output
+    assert "Std: 0.50" in output
+    assert "Min: 2" in output
+    assert "Max: 3" in output
+@
+
+Open-text questions have no histogram, but the HTML page still shows average
+answer length.  The terminal renderer keeps that small aggregate above the
+answer transcript.
+
+<<functions>>=
+def _render_terminal_open_stats(summary: dict, *, console: Console):
+    avg = summary.get("avg_length")
+    if avg is None:
+        return
+    line = _stats_line([("Avg length", f"{avg:.0f}")])
+    line.append(" chars")
+    console.print(line)
+@
+
+The open-text stat is rounded to whole characters, matching the HTML display.
+
+<<test functions>>=
+def test_terminal_open_stats_show_average_length():
+    buffer = io.StringIO()
+    console = Console(
+        file=buffer,
+        force_terminal=False,
+        color_system=None,
+        width=80,
+    )
+
+    mentipy.cli._render_terminal_open_stats(
+        {"avg_length": 12.4},
+        console=console,
+    )
+
+    assert "Avg length: 12 chars" in buffer.getvalue()
+@
+
+Open answers are events in chronological order.  Keeping their rendering in a
+small helper lets [[view]] print the full transcript while [[watch]] can append
+only the new suffix without rebuilding the whole screen.
 
 <<functions>>=
 def _render_open_answers(
@@ -364,8 +576,14 @@ def _render_open_answers(
         timestamp = format_timestamp(str(answer["ts"]))
         console.rule(f"Answer {index} - {timestamp}", style="dim")
         console.print(Markdown(str(answer["value"])))
+@
 
+The full result renderer is shared by [[view]] and the first frame of
+[[watch]].  It uses the same summary fields as the HTML page: multiple-choice
+mode and option percentages, scale descriptive statistics and bucket
+percentages, and open-text average answer length before the transcript.
 
+<<functions>>=
 def _render_results(results: dict, *, console: Console):
     question = results["question"]
     lines = [
@@ -376,25 +594,125 @@ def _render_results(results: dict, *, console: Console):
     ]
 
     if question["kind"] == "mc":
-        for option, count in zip(question["options"], results["counts"]):
-            lines.append(f"{option}: {count}")
         console.print("\n".join(lines))
+        _render_terminal_mc_stats(question, results, console=console)
+        _render_terminal_bar_chart(
+            [str(option) for option in question["options"]],
+            list(results["counts"]),
+            list(results["percentages"]),
+            console=console,
+        )
         return
 
     if question["kind"] == "scale":
-        for value, count in results["counts"].items():
-            lines.append(f"{value}: {count}")
         console.print("\n".join(lines))
+        _render_terminal_scale_stats(results, console=console)
+        values = list(range(int(question["low"]), int(question["high"]) + 1))
+        counts = [int(results["counts"].get(value, 0)) for value in values]
+        denominator = int(results["total"]) or 1
+        _render_terminal_bar_chart(
+            [str(value) for value in values],
+            counts,
+            [count / denominator * 100 for count in counts],
+            console=console,
+        )
         return
 
     console.print("\n".join(lines))
+    _render_terminal_open_stats(results, console=console)
 
     if results["answers"]:
         _render_open_answers(results["answers"], console=console)
     else:
         console.print("No answers yet.")
+@
 
+The multiple-choice renderer test checks the composed view rather than the
+individual chart helper: the header, mode callout, and option percentages must
+all appear together when [[view]] or the aggregate [[watch]] path renders a
+poll.
 
+<<test functions>>=
+def test_results_renderer_shows_mc_chart_and_mode():
+    buffer = io.StringIO()
+    console = Console(
+        file=buffer,
+        force_terminal=False,
+        color_system=None,
+        width=80,
+    )
+
+    mentipy.cli._render_results(
+        {
+            "question": {
+                "kind": "mc",
+                "text": "Pick one",
+                "options": ["Short", "A much longer label"],
+            },
+            "url_prefix": "abcd",
+            "total": 4,
+            "counts": [1, 3],
+            "percentages": [25.0, 75.0],
+            "mode_index": 1,
+            "answers": [],
+        },
+        console=console,
+    )
+
+    output = buffer.getvalue()
+    assert "Responses: 4" in output
+    assert "Mode: A much longer label (75%)" in output
+    assert "Short" in output
+    assert "1 (25%)" in output
+    assert "3 (75%)" in output
+@
+
+Scale results are reconstructed from the inclusive numeric bounds, just as in
+the HTML renderer.  The test includes an empty bucket so the terminal chart does
+not accidentally hide values that no respondent selected.
+
+<<test functions>>=
+def test_results_renderer_shows_scale_chart_and_stats():
+    buffer = io.StringIO()
+    console = Console(
+        file=buffer,
+        force_terminal=False,
+        color_system=None,
+        width=80,
+    )
+
+    mentipy.cli._render_results(
+        {
+            "question": {
+                "kind": "scale",
+                "text": "Rate it",
+                "low": 1,
+                "high": 3,
+            },
+            "url_prefix": "abcd",
+            "total": 2,
+            "counts": {1: 0, 2: 1, 3: 1},
+            "mean": 2.5,
+            "median": 2.5,
+            "stddev": 0.5,
+            "min": 2,
+            "max": 3,
+            "answers": [],
+        },
+        console=console,
+    )
+
+    output = buffer.getvalue()
+    assert "Mean: 2.50" in output
+    assert "0 (0%)" in output
+    assert output.count("1 (50%)") == 2
+@
+
+The prefix resolver remains outside the renderer so [[view]], [[watch]], and
+tests can pass already-fetched summaries when that avoids duplicate store
+lookups.
+
+<<functions>>=
 def _render_results_snapshot(
     store: Store,
     prefix: str,
@@ -1022,8 +1340,11 @@ def test_watch_command_redraws_aggregate_questions(tmp_path, monkeypatch):
     assert result.stdout.count("[clear]") == 2
     assert "Responses: 1" in result.stdout
     assert "Responses: 2" in result.stdout
-    assert "A: 1" in result.stdout
-    assert "B: 1" in result.stdout
+    assert "Mode: B (100%)" in result.stdout
+    assert "Mode: A (50%)" in result.stdout
+    assert "A" in result.stdout
+    assert "B" in result.stdout
+    assert result.stdout.count("1 (50%)") >= 2
 @
 
 Open answers exercise the append-only path.  The first snapshot gives context;
