@@ -565,6 +565,11 @@ def test_open_text_passes_the_optional_fence_into_the_question(
 @
 
 
+The scale wrapper should meet the same registration contract as the other
+helpers, and the default rendering path should still resolve a base URL when
+the caller leaves [[base_url]] unset.
+
+<<test functions>>=
 def test_scale_registers_the_question_and_references_the_qr(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     store = Store(tmp_path / "mentipy.json", min_prefix=4)

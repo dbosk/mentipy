@@ -360,12 +360,12 @@ Included in the document, that output compiles to:
 
 A coding-oriented prompt benefits from the upload form: a respondent can
 attach the file they wrote instead of pasting it into a textarea on a phone.
-Here the local server will later sit behind an SSH reverse tunnel on
-[[dbosk@faculty-shell.sys.kth.se]] with remote port [[8080]], so the rendered
-QR code should already point at the faculty-shell host instead of at
-[[localhost]].  Passing [[fence="python"]] tells [[mentipy]] to wrap uploaded
-file bodies in a Python-tagged Markdown fence, so the results page renders the
-upload as a language-tagged code block.
+Here the local server will later sit behind an SSH reverse tunnel, so the
+rendered QR code should already point at
+\url{http://faculty-shell.sys.kth.se:8080} instead of at [[localhost]].
+Passing [[fence="python"]] tells [[mentipy]] to wrap uploaded file bodies in a
+Python-tagged Markdown fence, so the results page renders the upload as a
+language-tagged code block.
 
 \begin{pyblock}
 from mentipy.latex import open_text
@@ -426,10 +426,14 @@ The command prints the following LaTeX:
 Included in the document, that output compiles to:
 \begin{center}\useprintpythontex{cli-open-fence}\end{center}
 
-At serve time, the matching tunnel comes from
-[[mentipy config set ssh_tunnel dbosk@faculty-shell.sys.kth.se:8080]] together
-with [[mentipy serve --public ssh]].  The render step only needs the public URL
-that the QR code should embed.
+At serve time, the matching tunnel setup is:
+
+\begin{minted}{text}
+mentipy config set ssh_tunnel dbosk@faculty-shell.sys.kth.se:8080
+mentipy serve --public ssh
+\end{minted}
+
+The render step only needs the public URL that the QR code should embed.
 
 \ltnote{%
   \textbf{Variation pattern}: Generalization
