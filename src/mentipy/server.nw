@@ -36,12 +36,17 @@ from mentipy.store import Store
 Using [[string.Template]] keeps the HTML easy to read without introducing a
 separate templating engine.
 
+The base page template also carries the viewport declaration.  Phone browsers
+otherwise assume a desktop-sized layout viewport and shrink the whole page to
+fit, which makes a polling form needlessly hard to read and tap.
+
 <<constants>>=
 PAGE_TEMPLATE = Template(
     """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>$title</title>
   $refresh
   <link rel="stylesheet" href="/static/style.css">
@@ -55,25 +60,47 @@ PAGE_TEMPLATE = Template(
 </html>
 """
 )
+@
 
+The stylesheet starts from the phone layout and adds one desktop-scale-up
+media query.  That keeps the common classroom path readable on narrow screens
+while still restoring the denser multi-column layout when enough width exists.
+
+<<constants>>=
 STYLE_CSS = """
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
 body {
   background: #f4f4f4;
   color: #111;
   font-family: sans-serif;
+  font-size: 1rem;
+  line-height: 1.4;
   margin: 0;
 }
 
 main {
   background: white;
-  margin: 2rem auto;
+  margin: 0 auto;
   max-width: 52rem;
-  padding: 2rem;
+  padding: 1rem;
 }
 
 form label {
-  display: block;
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
   margin: 0.5rem 0;
+  padding: 0.6rem 0;
+}
+
+input,
+select,
+textarea,
+button {
+  font-size: 1rem;
 }
 
 textarea {
@@ -83,6 +110,9 @@ textarea {
 
 button {
   margin-top: 1rem;
+  max-width: 20rem;
+  padding: 0.6rem 1rem;
+  width: 100%;
 }
 
 code {
@@ -101,8 +131,14 @@ code {
   margin: 0 0 1.25rem;
   padding: 0.5rem 0.75rem;
 }
-.window-filter label { display: inline; margin: 0; }
-.window-filter button { margin: 0; }
+.window-filter label {
+  display: inline;
+  margin: 0;
+  padding: 0;
+}
+.window-filter button {
+  margin: 0;
+}
 
 .bar-chart {
   display: grid;
@@ -113,15 +149,19 @@ code {
   align-items: center;
   display: grid;
   gap: 0.5rem;
-  grid-template-columns: minmax(5rem, 12rem) 1fr minmax(5rem, auto);
+  grid-template-columns: 1fr minmax(4rem, auto);
 }
-.bar-label { font-weight: bold; text-align: right; }
+.bar-label {
+  font-weight: bold;
+  grid-column: 1 / -1;
+}
 .bar-bar {
   background: #eee;
   border-radius: 3px;
   display: block;
   height: 1.5rem;
   overflow: hidden;
+  width: 100%;
 }
 .bar-fill {
   background: #4a90d9;
@@ -149,6 +189,26 @@ code {
 .md-answer > :first-child { margin-top: 0; }
 .md-answer > :last-child { margin-bottom: 0; }
 .md-answer ul, .md-answer ol { margin: 0.25rem 0 0.25rem 1.5rem; }
+
+@media (min-width: 40rem) {
+  main {
+    margin: 2rem auto;
+    padding: 2rem;
+  }
+
+  button {
+    width: auto;
+  }
+
+  .bar-row {
+    grid-template-columns: minmax(5rem, 12rem) 1fr minmax(5rem, auto);
+  }
+
+  .bar-label {
+    grid-column: auto;
+    text-align: right;
+  }
+}
 """.strip()
 
 REFRESH_SECONDS = 2
@@ -1222,6 +1282,26 @@ def test_server_routes_return_expected_status_codes(live_server):
     response, body = _request(port, "GET", f"/{prefix}/results.json")
     assert response.status == 200
     assert json.loads(body)["url_prefix"] == prefix
+
+
+def test_page_includes_viewport_meta(live_server):
+    _store, prefix, port = live_server
+
+    response, body = _request(port, "GET", f"/{prefix}/results")
+
+    assert response.status == 200
+    assert 'name="viewport"' in body
+    assert 'width=device-width' in body
+
+
+def test_style_css_serves_mobile_breakpoint(live_server):
+    _store, _prefix, port = live_server
+
+    response, body = _request(port, "GET", "/static/style.css")
+
+    assert response.status == 200
+    assert "@media" in body
+    assert "min-width" in body
 @
 
 Posting an answer should redirect and persist exactly one response.
