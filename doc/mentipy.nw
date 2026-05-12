@@ -696,6 +696,13 @@ recompile the slides so the PDF embeds the new codes.  If the public endpoint
 is fronted by HTTPS, [[mentipy.public_base_url]] can override the derived URL so
 the regenerated QR codes point at the externally visible address.
 
+That recompile step relies on PythonTeX's cache.  PythonTeX caches the output
+of unchanged PythonTeX code blocks, so a second LaTeX compilation reads the
+already refreshed QR sidecars from disk instead of rerunning the render helper.
+As long as the lecture source does not change the PythonTeX code block, the
+regenerated QR images and captions survive into the next PDF rather than being
+replaced by new compile-time placeholders.
+
 \ltnote{%
   \textbf{Variation pattern}: Fusion
 
