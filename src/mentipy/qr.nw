@@ -249,18 +249,24 @@ def test_make_qr_sidecar_escapes_special_chars_in_url(tmp_path):
 
 
 def test_make_qr_sidecar_can_keep_a_relative_include_path(tmp_path):
+    qr_subpath = Path(DEFAULT_QR_DIR).as_posix()
     output = make_qr(
         "http://localhost:8080/abcd",
         tmp_path / "slides" / "Q-abcd.pdf",
-        include_path=Path("build") / "Q-abcd.pdf",
+        include_path=Path(DEFAULT_QR_DIR) / "Q-abcd.pdf",
     )
 
     contents = output.with_suffix(".pdf_tex").read_text()
-    assert "\\includegraphics[width=\\linewidth]{build/Q-abcd.pdf}" in contents
+    assert (
+        f"\\includegraphics[width=\\linewidth]{{{qr_subpath}/Q-abcd.pdf}}"
+        in contents
+    )
 @
 
 <<test [[qr.py]]>>=
 from mentipy.qr import *
+from mentipy.store import DEFAULT_QR_DIR
+from pathlib import Path
 
 <<test functions>>
 @

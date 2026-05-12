@@ -487,8 +487,10 @@ def scale(
 @
 
 The default tests pin the existing slide contract: each helper must register the
-question, write the QR code to the configured build directory, and mention that
-file in the returned LaTeX.
+question, write the QR code to the configured output directory, and mention
+that file in the returned LaTeX.  The tests reference [[DEFAULT_QR_DIR]] from
+the store rather than the literal directory name, so renaming the default in
+one place reaches every assertion automatically.
 
 <<test functions>>=
 def test_mc_registers_the_question_and_references_the_qr(tmp_path, monkeypatch):
@@ -500,16 +502,16 @@ def test_mc_registers_the_question_and_references_the_qr(tmp_path, monkeypatch):
         ["Great", "OK", "Boring"],
         store=store,
         base_url="http://example.test:8080",
-        qr_dir="build",
+        qr_dir=DEFAULT_QR_DIR,
     )
 
     [entry] = store.all_questions()
     prefix = entry["url_prefix"]
 
     assert "How was the lecture?" in rendered
-    assert f"\\input{{build/Q-{prefix}.pdf_tex}}" in rendered
-    assert (tmp_path / "build" / f"Q-{prefix}.pdf").exists()
-    assert (tmp_path / "build" / f"Q-{prefix}.pdf_tex").exists()
+    assert f"\\input{{{QR_SUBPATH}/Q-{prefix}.pdf_tex}}" in rendered
+    assert (tmp_path / DEFAULT_QR_DIR / f"Q-{prefix}.pdf").exists()
+    assert (tmp_path / DEFAULT_QR_DIR / f"Q-{prefix}.pdf_tex").exists()
 
 
 def test_open_text_registers_the_question_and_references_the_qr(
@@ -523,14 +525,14 @@ def test_open_text_registers_the_question_and_references_the_qr(
         max_chars=140,
         store=store,
         base_url="http://example.test:8080",
-        qr_dir="build",
+        qr_dir=DEFAULT_QR_DIR,
     )
 
     [entry] = store.all_questions()
     prefix = entry["url_prefix"]
 
     assert "One thing to change?" in rendered
-    assert f"\\input{{build/Q-{prefix}.pdf_tex}}" in rendered
+    assert f"\\input{{{QR_SUBPATH}/Q-{prefix}.pdf_tex}}" in rendered
     assert store.resolve(prefix) == entry["hash"]
 
 
@@ -544,14 +546,14 @@ def test_scale_registers_the_question_and_references_the_qr(tmp_path, monkeypatc
         high_label="Too fast",
         store=store,
         base_url="http://example.test:8080",
-        qr_dir="build",
+        qr_dir=DEFAULT_QR_DIR,
     )
 
     [entry] = store.all_questions()
     prefix = entry["url_prefix"]
 
     assert "Pace?" in rendered
-    assert f"\\input{{build/Q-{prefix}.pdf_tex}}" in rendered
+    assert f"\\input{{{QR_SUBPATH}/Q-{prefix}.pdf_tex}}" in rendered
     assert store.question(entry["hash"]).kind == "scale"
 
 
@@ -573,7 +575,7 @@ def test_question_resolves_local_ip_when_base_url_unset(tmp_path, monkeypatch):
         "How was the lecture?",
         ["Great", "OK", "Boring"],
         store=store,
-        qr_dir="build",
+        qr_dir=DEFAULT_QR_DIR,
         layout="article",
     )
 
@@ -597,18 +599,18 @@ def test_article_qr_layout_prints_the_canonical_url(tmp_path, monkeypatch):
         ["Great", "OK", "Boring"],
         store=store,
         base_url="http://example.test:8080",
-        qr_dir="build",
+        qr_dir=DEFAULT_QR_DIR,
         layout="article+qr",
     )
 
     [entry] = store.all_questions()
     prefix = entry["url_prefix"]
-    sidecar = tmp_path / "build" / f"Q-{prefix}.pdf_tex"
+    sidecar = tmp_path / DEFAULT_QR_DIR / f"Q-{prefix}.pdf_tex"
 
     assert "\\begin{minipage}[t]" in rendered
     assert rendered.count("\\vspace{0pt}") == 2
     assert "\\begin{columns}[T,onlytextwidth]" not in rendered
-    assert f"\\input{{build/Q-{prefix}.pdf_tex}}" in rendered
+    assert f"\\input{{{QR_SUBPATH}/Q-{prefix}.pdf_tex}}" in rendered
     assert sidecar.exists()
     assert f"http://example.test:8080/{prefix}" in sidecar.read_text()
 
@@ -622,7 +624,7 @@ def test_article_layout_is_flat_and_qrless(tmp_path, monkeypatch):
         ["Great", "OK", "Boring"],
         store=store,
         base_url="http://example.test:8080",
-        qr_dir="build",
+        qr_dir=DEFAULT_QR_DIR,
         layout="article",
     )
 
@@ -652,7 +654,7 @@ def test_default_slide_layout_remains_plain_without_environment(
         ["Great", "OK", "Boring"],
         store=store,
         base_url="http://example.test:8080",
-        qr_dir="build",
+        qr_dir=DEFAULT_QR_DIR,
     )
 
     assert "\\textbf{" in rendered
@@ -671,7 +673,7 @@ def test_environment_from_config_wraps_every_layout(tmp_path, monkeypatch):
         ["Great", "OK", "Boring"],
         store=store,
         base_url="http://example.test:8080",
-        qr_dir="build",
+        qr_dir=DEFAULT_QR_DIR,
         layout="slide",
     )
     article = mc(
@@ -679,7 +681,7 @@ def test_environment_from_config_wraps_every_layout(tmp_path, monkeypatch):
         ["Great", "OK", "Boring"],
         store=store,
         base_url="http://example.test:8080",
-        qr_dir="build",
+        qr_dir=DEFAULT_QR_DIR,
         layout="article",
     )
     article_qr = mc(
@@ -687,7 +689,7 @@ def test_environment_from_config_wraps_every_layout(tmp_path, monkeypatch):
         ["Great", "OK", "Boring"],
         store=store,
         base_url="http://example.test:8080",
-        qr_dir="build",
+        qr_dir=DEFAULT_QR_DIR,
         layout="article+qr",
     )
     auto = mc(
@@ -695,7 +697,7 @@ def test_environment_from_config_wraps_every_layout(tmp_path, monkeypatch):
         ["Great", "OK", "Boring"],
         store=store,
         base_url="http://example.test:8080",
-        qr_dir="build",
+        qr_dir=DEFAULT_QR_DIR,
         layout="auto",
     )
 
@@ -729,7 +731,7 @@ def test_explicit_environment_wraps_question_content(tmp_path, monkeypatch):
         ["Great", "OK", "Boring"],
         store=store,
         base_url="http://example.test:8080",
-        qr_dir="build",
+        qr_dir=DEFAULT_QR_DIR,
         environment="myexercise",
     )
 
@@ -750,7 +752,7 @@ def test_environment_variable_applies_when_call_leaves_it_unset(
         ["Great", "OK", "Boring"],
         store=store,
         base_url="http://example.test:8080",
-        qr_dir="build",
+        qr_dir=DEFAULT_QR_DIR,
     )
 
     assert "\\begin{exo}" in rendered
@@ -767,7 +769,7 @@ def test_auto_layout_separates_presentation_and_article_output(
         ["Great", "OK", "Boring"],
         store=store,
         base_url="http://example.test:8080",
-        qr_dir="build",
+        qr_dir=DEFAULT_QR_DIR,
         layout="auto",
     )
 
@@ -780,7 +782,7 @@ def test_auto_layout_separates_presentation_and_article_output(
     article = rendered.split("\\mode<article>{%\n", 1)[1].rsplit("\n}", 1)[0]
 
     assert "\\begin{columns}[T,onlytextwidth]" in presentation
-    assert f"\\input{{build/Q-{prefix}.pdf_tex}}" in presentation
+    assert f"\\input{{{QR_SUBPATH}/Q-{prefix}.pdf_tex}}" in presentation
     assert "How was the lecture?" in article
     assert f"\\texttt{{http://example.test:8080/{prefix}}}" in article
     assert "\\input" not in article
@@ -798,7 +800,7 @@ def test_empty_environment_override_disables_configured_wrap(tmp_path, monkeypat
         ["Great", "OK", "Boring"],
         store=store,
         base_url="http://example.test:8080",
-        qr_dir="build",
+        qr_dir=DEFAULT_QR_DIR,
         environment="",
     )
 
@@ -817,7 +819,7 @@ def test_show_url_false_suppresses_url_in_qrless_article_variants(
         ["Great", "OK", "Boring"],
         store=store,
         base_url="http://example.test:8080",
-        qr_dir="build",
+        qr_dir=DEFAULT_QR_DIR,
         layout="article",
         show_url=False,
     )
@@ -826,7 +828,7 @@ def test_show_url_false_suppresses_url_in_qrless_article_variants(
         ["Great", "OK", "Boring"],
         store=store,
         base_url="http://example.test:8080",
-        qr_dir="build",
+        qr_dir=DEFAULT_QR_DIR,
         layout="auto",
         show_url=False,
     )
@@ -847,16 +849,16 @@ def test_article_qr_layout_keeps_the_sidecar_url_caption(tmp_path, monkeypatch):
         ["Great", "OK", "Boring"],
         store=store,
         base_url="http://example.test:8080",
-        qr_dir="build",
+        qr_dir=DEFAULT_QR_DIR,
         layout="article+qr",
         show_url=False,
     )
 
     [entry] = store.all_questions()
     prefix = entry["url_prefix"]
-    sidecar = tmp_path / "build" / f"Q-{prefix}.pdf_tex"
+    sidecar = tmp_path / DEFAULT_QR_DIR / f"Q-{prefix}.pdf_tex"
 
-    assert f"\\input{{build/Q-{prefix}.pdf_tex}}" in rendered
+    assert f"\\input{{{QR_SUBPATH}/Q-{prefix}.pdf_tex}}" in rendered
     assert sidecar.exists()
     assert f"http://example.test:8080/{prefix}" in sidecar.read_text()
 
@@ -872,7 +874,7 @@ def test_show_url_config_is_used_unless_call_overrides_it(tmp_path, monkeypatch)
         ["Great", "OK", "Boring"],
         store=store,
         base_url="http://example.test:8080",
-        qr_dir="build",
+        qr_dir=DEFAULT_QR_DIR,
         layout="article",
     )
     visible = mc(
@@ -880,7 +882,7 @@ def test_show_url_config_is_used_unless_call_overrides_it(tmp_path, monkeypatch)
         ["Great", "OK", "Boring"],
         store=store,
         base_url="http://example.test:8080",
-        qr_dir="build",
+        qr_dir=DEFAULT_QR_DIR,
         layout="article",
         show_url=True,
     )
@@ -982,6 +984,9 @@ def test_regenerate_qrs_reuses_all_remembered_qr_targets(tmp_path, monkeypatch):
 <<test [[latex.py]]>>=
 from mentipy.latex import *
 from mentipy.store import *
+from pathlib import Path
+
+QR_SUBPATH = Path(DEFAULT_QR_DIR).as_posix()
 
 <<test functions>>
 @

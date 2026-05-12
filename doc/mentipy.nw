@@ -53,7 +53,8 @@ be inspected or redirected.  The examples below keep the question text and
 rendering options fixed while varying one practical aspect at a time.
 
 These examples keep their state in a local [[./mentipy.json]] store and write
-QR artifacts in [[build/]].  That keeps the generated files next to the manual.
+QR artifacts in [[mentipy-obj/]].  That keeps the generated files next to the
+manual.
 
 \begin{description}
 \item[Build the manual] Run [[make]] in [[doc/]].
@@ -145,7 +146,7 @@ print(
         "How confident do you feel about the course goals?",
         ["Very confident", "Somewhat confident", "Not yet"],
         base_url="http://localhost:8080",
-        qr_dir="build",
+        qr_dir="mentipy-obj",
         layout="article+qr",
     )
 )
@@ -160,7 +161,7 @@ LaTeX on standard output:
 \begin{minted}{text}
 mentipy render mc "How confident do you feel about the course goals?" \
   "Very confident" "Somewhat confident" "Not yet" \
-  --base-url http://localhost:8080 --qr-dir build --layout article+qr
+  --base-url http://localhost:8080 --qr-dir mentipy-obj --layout article+qr
 \end{minted}
 
 \begin{pycode}
@@ -176,7 +177,7 @@ print(
             "--base-url",
             "http://localhost:8080",
             "--qr-dir",
-            "build",
+            "mentipy-obj",
             "--layout",
             "article+qr",
         ]
@@ -221,7 +222,7 @@ print(
         low_label="Too slow",
         high_label="Too fast",
         base_url="http://localhost:8080",
-        qr_dir="build",
+        qr_dir="mentipy-obj",
         layout="article+qr",
     )
 )
@@ -235,7 +236,7 @@ The matching CLI command keeps the same public name:
 \begin{minted}{text}
 mentipy render scale "How fast is today's pace?" --low 1 --high 5 \
   --low-label "Too slow" --high-label "Too fast" \
-  --base-url http://localhost:8080 --qr-dir build --layout article+qr
+  --base-url http://localhost:8080 --qr-dir mentipy-obj --layout article+qr
 \end{minted}
 
 \begin{pycode}
@@ -256,7 +257,7 @@ print(
             "--base-url",
             "http://localhost:8080",
             "--qr-dir",
-            "build",
+            "mentipy-obj",
             "--layout",
             "article+qr",
         ]
@@ -298,7 +299,7 @@ print(
         "What is still unclear?",
         max_chars=160,
         base_url="http://localhost:8080",
-        qr_dir="build",
+        qr_dir="mentipy-obj",
         layout="article+qr",
     )
 )
@@ -311,7 +312,7 @@ The CLI keeps the same question kind, but its public name is shorter:
 
 \begin{minted}{text}
 mentipy render open "What is still unclear?" --max-chars 160 \
-  --base-url http://localhost:8080 --qr-dir build --layout article+qr
+  --base-url http://localhost:8080 --qr-dir mentipy-obj --layout article+qr
 \end{minted}
 
 \begin{pycode}
@@ -326,7 +327,7 @@ print(
             "--base-url",
             "http://localhost:8080",
             "--qr-dir",
-            "build",
+            "mentipy-obj",
             "--layout",
             "article+qr",
         ]
@@ -407,7 +408,7 @@ print(
         ],
         multi=True,
         base_url="http://localhost:8080",
-        qr_dir="build",
+        qr_dir="mentipy-obj",
         layout="article+qr",
     )
 )
@@ -445,7 +446,7 @@ print(
         "Which proof step should we revisit?",
         ["Setup", "Reduction", "Advantage bound"],
         base_url="http://localhost:8080",
-        qr_dir="build",
+        qr_dir="mentipy-obj",
         environment="exercise",
         layout="article",
     )
@@ -472,7 +473,7 @@ print(
         "Which proof step should we revisit?",
         ["Setup", "Reduction", "Advantage bound"],
         base_url="http://localhost:8080",
-        qr_dir="build",
+        qr_dir="mentipy-obj",
         environment="exercise",
         layout="article",
         show_url=False,
@@ -515,7 +516,7 @@ print(
     mc(
         "How confident do you feel about the course goals?",
         ["Very confident", "Somewhat confident", "Not yet"],
-        qr_dir="build",
+        qr_dir="mentipy-obj",
         layout="article+qr",
     )
 )
