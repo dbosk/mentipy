@@ -33,6 +33,11 @@ import time
 from typing import Optional
 
 from pytorial import add_typer_subcommand
+from rich.bar import Bar
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.table import Table
+from rich.text import Text
 import typer
 
 from mentipy.latex import (
@@ -60,6 +65,7 @@ from mentipy.store import (
     SSH_TUNNEL_CONFIG,
     STORE_CONFIG,
     Store,
+    format_timestamp,
     get_setting,
     list_settings,
     load_config,
@@ -183,6 +189,8 @@ LIST_PREVIEW_WIDTH = 30
 LIST_COLUMN_GAP = 2
 LIST_FALLBACK_WIDTH = 80
 LIST_MIN_TEXT_WIDTH = 20
+TERMINAL_BAR_SIZE = 100
+TERMINAL_BAR_MIN_WIDTH = 12
 
 WARNING_TEXT = (
     "Warning: exposing mentipy makes its unauthenticated polling pages\n"
@@ -293,6 +301,16 @@ def _terminal_width() -> int:
     return shutil.get_terminal_size((LIST_FALLBACK_WIDTH, 24)).columns
 @
 
+Open answers often use Markdown for emphasis, lists, and fenced code blocks.
+They must reach Rich as renderables rather than as pre-rendered strings;
+otherwise terminal colour and syntax highlighting are lost before [[view]] or
+[[watch]] can print them.
+
+<<functions>>=
+def _result_console() -> Console:
+    return Console(width=_terminal_width())
+@
+
 The default listing optimises for scanning: prefix first, short preview second.
 The [[--full]] variant spends the available terminal width on wrapped question
 text while preserving a fixed prefix column, so long questions remain readable
@@ -334,14 +352,347 @@ def _question_listing(entries: list[dict[str, object]], *, full: bool) -> str:
     return "\n".join(lines)
 @
 
-The watcher produces one complete snapshot per refresh.  Multiple-choice and
-scale questions can summarize counts directly, while open-text questions keep
-the answer timestamps so a lecturer can see both content and recency.
+The terminal bar chart is the same visualisation as the HTML results page: one
+row per category, a bar proportional to the relative count, and a numeric count
+with its rounded percentage.  The layout reserves space for the bar and count
+first, then shortens overlong labels if needed and pads the count text to a
+shared width.  That keeps long options from squeezing out the visualisation and
+keeps numeric buckets easy to scan.
 
 <<functions>>=
-def _watch_snapshot(store: Store, prefix: str) -> str:
-    full_hash = _resolve_full_hash(store, prefix)
-    results = store.results(full_hash)
+def _render_terminal_bar_chart(
+    labels: list[str],
+    counts: list[int],
+    percentages: list[float],
+    *,
+    console: Console,
+):
+    collapsed_labels = [_single_line_text(str(label)) for label in labels]
+    numeric_labels = all(
+        label.lstrip("-").isdigit() for label in collapsed_labels
+    )
+    count_digits = max((len(str(count)) for count in counts), default=1)
+    percentage_digits = max(
+        (len(f"{percentage:.0f}") for percentage in percentages),
+        default=1,
+    )
+    count_texts = [
+        f"{count:>{count_digits}} ({percentage:>{percentage_digits}.0f}%)"
+        for count, percentage in zip(counts, percentages)
+    ]
+    count_width = max((len(text) for text in count_texts), default=0)
+    available = max(console.width - count_width - 4, 2)
+    max_label_width = max(
+        (len(label) for label in collapsed_labels),
+        default=1,
+    )
+    label_width = min(max_label_width, max(1, available - TERMINAL_BAR_MIN_WIDTH))
+    bar_width = max(1, available - label_width)
+
+    table = Table.grid(padding=(0, 2))
+    table.add_column(
+        width=label_width,
+        justify="right" if numeric_labels else "left",
+        no_wrap=True,
+    )
+    table.add_column(width=bar_width, no_wrap=True)
+    table.add_column(width=count_width, justify="right", no_wrap=True)
+
+    for shown_label, percentage, count_text in zip(
+        collapsed_labels,
+        percentages,
+        count_texts,
+    ):
+        if len(shown_label) > label_width:
+            if label_width > 3:
+                shown_label = shown_label[: label_width - 3] + "..."
+            else:
+                shown_label = shown_label[:label_width]
+
+        table.add_row(
+            shown_label,
+            Bar(
+                TERMINAL_BAR_SIZE,
+                0,
+                percentage,
+                width=bar_width,
+                color="cyan",
+                bgcolor="grey23",
+            ),
+            count_text,
+        )
+
+    console.print(table)
+@
+
+The alignment test uses one long and one short label because that is where a
+plain string layout most easily drifts.  The first non-ASCII character in each
+row is the block bar, so equal positions mean the plot area is aligned.
+
+<<test functions>>=
+def test_terminal_bar_chart_aligns_short_and_long_labels():
+    buffer = io.StringIO()
+    console = Console(
+        file=buffer,
+        force_terminal=False,
+        color_system=None,
+        width=80,
+    )
+
+    mentipy.cli._render_terminal_bar_chart(
+        ["Short", "A much longer label"],
+        [1, 3],
+        [25.0, 75.0],
+        console=console,
+    )
+
+    lines = buffer.getvalue().splitlines()
+    bar_starts = [
+        re.search(r"[^\x00-\x7f]", line).start()
+        for line in lines
+    ]
+    assert len(set(bar_starts)) == 1
+    assert lines[0].index("1 (25%)") == lines[1].index("3 (75%)")
+@
+
+An even longer label should still leave room for both the bar and the count.
+Otherwise the chart degenerates into a truncated number, which defeats the
+point of the terminal plot.
+
+<<test functions>>=
+def test_terminal_bar_chart_preserves_bar_and_count_for_long_labels():
+    buffer = io.StringIO()
+    console = Console(
+        file=buffer,
+        force_terminal=False,
+        color_system=None,
+        width=80,
+    )
+
+    mentipy.cli._render_terminal_bar_chart(
+        ["X" * 90, "Short"],
+        [3, 1],
+        [75.0, 25.0],
+        console=console,
+    )
+
+    lines = buffer.getvalue().splitlines()
+    assert "3 (75%)" in lines[0]
+    assert "1 (25%)" in lines[1]
+    assert re.search(r"[^\x00-\x7f].*3 \(75%\)", lines[0])
+    assert re.search(r"[^\x00-\x7f].*1 \(25%\)", lines[1])
+@
+
+The count text should align both counts and percentages, not just the right
+edge of the whole column.  Otherwise a one-digit percentage shifts left when it
+appears beside a two-digit one, which makes scale rows harder to compare.
+
+<<test functions>>=
+def test_terminal_bar_chart_aligns_count_and_percentage_text():
+    buffer = io.StringIO()
+    console = Console(
+        file=buffer,
+        force_terminal=False,
+        color_system=None,
+        width=80,
+    )
+
+    mentipy.cli._render_terminal_bar_chart(
+        ["1", "5"],
+        [1, 10],
+        [9.0, 91.0],
+        console=console,
+    )
+
+    lines = buffer.getvalue().splitlines()
+    assert lines[0].rindex("(") == lines[1].rindex("(")
+    assert lines[0].rindex("%") == lines[1].rindex("%")
+@
+
+The statistic callouts share one low-level formatter.  It builds Rich
+[[Text]] directly rather than parsing markup strings, so option labels that
+look like terminal style markup are still shown literally.
+
+<<functions>>=
+def _stats_line(pairs: list[tuple[str, str]]) -> Text:
+    line = Text()
+    for index, (label, value) in enumerate(pairs):
+        if index:
+            line.append(" | ")
+        line.append(f"{label}: ", style="dim")
+        line.append(value, style="bold")
+    return line
+@
+
+The multiple-choice callout mirrors the HTML mode chip.  It deliberately reads
+the modal option and percentage from the same summary fields as the web page,
+so terminal and browser views cannot disagree about the highlighted answer.
+
+<<functions>>=
+def _render_terminal_mc_stats(
+    question: dict,
+    summary: dict,
+    *,
+    console: Console,
+):
+    mode_index = summary.get("mode_index")
+    if mode_index is None:
+        return
+    label = str(question["options"][mode_index])
+    percentage = summary["percentages"][mode_index]
+    line = _stats_line([("Mode", label)])
+    line.append(f" ({percentage:.0f}%)")
+    console.print(line)
+@
+
+The mode renderer should preserve the displayed label and rounded percentage.
+This protects both the data source and the terminal formatting in one small
+case.
+
+<<test functions>>=
+def test_terminal_mc_stats_show_mode_percentage():
+    buffer = io.StringIO()
+    console = Console(
+        file=buffer,
+        force_terminal=False,
+        color_system=None,
+        width=80,
+    )
+
+    mentipy.cli._render_terminal_mc_stats(
+        {"options": ["A", "B"]},
+        {"mode_index": 1, "percentages": [33.3, 66.7]},
+        console=console,
+    )
+
+    assert "Mode: B (67%)" in buffer.getvalue()
+@
+
+Scale questions use descriptive statistics rather than a single mode.  The
+terminal callout keeps the same precision as the HTML page: two decimals for
+mean and standard deviation, exact values for median and endpoints.
+
+<<functions>>=
+def _render_terminal_scale_stats(summary: dict, *, console: Console):
+    if summary.get("mean") is None:
+        return
+    console.print(
+        _stats_line(
+            [
+                ("Mean", f'{summary["mean"]:.2f}'),
+                ("Median", f'{summary["median"]}'),
+                ("Std", f'{summary["stddev"]:.2f}'),
+                ("Min", f'{summary["min"]}'),
+                ("Max", f'{summary["max"]}'),
+            ]
+        )
+    )
+@
+
+The scale callout test pins the mixed precision because a lecturer comparing
+terminal and HTML output should see the same summary values.
+
+<<test functions>>=
+def test_terminal_scale_stats_match_html_precision():
+    buffer = io.StringIO()
+    console = Console(
+        file=buffer,
+        force_terminal=False,
+        color_system=None,
+        width=80,
+    )
+
+    mentipy.cli._render_terminal_scale_stats(
+        {
+            "mean": 2.5,
+            "median": 2.5,
+            "stddev": 0.5,
+            "min": 2,
+            "max": 3,
+        },
+        console=console,
+    )
+
+    output = buffer.getvalue()
+    assert "Mean: 2.50" in output
+    assert "Median: 2.5" in output
+    assert "Std: 0.50" in output
+    assert "Min: 2" in output
+    assert "Max: 3" in output
+@
+
+Open-text questions have no histogram, but the HTML page still shows average
+answer length.  The terminal renderer keeps that small aggregate above the
+answer transcript.
+
+<<functions>>=
+def _render_terminal_open_stats(summary: dict, *, console: Console):
+    avg = summary.get("avg_length")
+    if avg is None:
+        return
+    line = _stats_line([("Avg length", f"{avg:.0f}")])
+    line.append(" chars")
+    console.print(line)
+@
+
+The open-text stat is rounded to whole characters, matching the HTML display.
+
+<<test functions>>=
+def test_terminal_open_stats_show_average_length():
+    buffer = io.StringIO()
+    console = Console(
+        file=buffer,
+        force_terminal=False,
+        color_system=None,
+        width=80,
+    )
+
+    mentipy.cli._render_terminal_open_stats(
+        {"avg_length": 12.4},
+        console=console,
+    )
+
+    assert "Avg length: 12 chars" in buffer.getvalue()
+@
+
+Open-question watching has one extra summary concern: appended answers also
+change the total response count and average answer length.  The live view keeps
+the initial transcript intact, then appends a compact summary update before each
+new answer batch.
+
+<<functions>>=
+def _render_open_watch_update(results: dict, *, console: Console):
+    pairs = [("Responses", str(results["total"]))]
+    avg = results.get("avg_length")
+    if avg is not None:
+        pairs.append(("Avg length", f"{avg:.0f} chars"))
+    console.print(_stats_line(pairs))
+@
+
+Open answers are events in chronological order.  Keeping their rendering in a
+small helper lets [[view]] print the full transcript while [[watch]] can append
+only the new suffix without rebuilding the whole screen.
+
+<<functions>>=
+def _render_open_answers(
+    answers: list[dict[str, object]],
+    *,
+    console: Console,
+    start: int = 1,
+):
+    for index, answer in enumerate(answers, start=start):
+        timestamp = format_timestamp(str(answer["ts"]))
+        console.rule(f"Answer {index} - {timestamp}", style="dim")
+        console.print(Markdown(str(answer["value"])))
+@
+
+The full result renderer is shared by [[view]] and the first frame of
+[[watch]].  It uses the same summary fields as the HTML page: multiple-choice
+mode and option percentages, scale descriptive statistics and bucket
+percentages, and open-text average answer length before the transcript.
+
+<<functions>>=
+def _render_results(results: dict, *, console: Console):
     question = results["question"]
     lines = [
         question["text"],
@@ -351,22 +702,198 @@ def _watch_snapshot(store: Store, prefix: str) -> str:
     ]
 
     if question["kind"] == "mc":
-        for option, count in zip(question["options"], results["counts"]):
-            lines.append(f"{option}: {count}")
-        return "\n".join(lines)
+        console.print("\n".join(lines))
+        _render_terminal_mc_stats(question, results, console=console)
+        _render_terminal_bar_chart(
+            [str(option) for option in question["options"]],
+            list(results["counts"]),
+            list(results["percentages"]),
+            console=console,
+        )
+        return
 
     if question["kind"] == "scale":
-        for value, count in results["counts"].items():
-            lines.append(f"{value}: {count}")
-        return "\n".join(lines)
+        console.print("\n".join(lines))
+        _render_terminal_scale_stats(results, console=console)
+        values = list(range(int(question["low"]), int(question["high"]) + 1))
+        counts = [int(results["counts"].get(value, 0)) for value in values]
+        denominator = int(results["total"]) or 1
+        _render_terminal_bar_chart(
+            [str(value) for value in values],
+            counts,
+            [count / denominator * 100 for count in counts],
+            console=console,
+        )
+        return
+
+    console.print("\n".join(lines))
+    _render_terminal_open_stats(results, console=console)
 
     if results["answers"]:
-        for answer in results["answers"]:
-            lines.append(f"{answer['ts']}: {answer['value']}")
+        _render_open_answers(results["answers"], console=console)
     else:
-        lines.append("No answers yet.")
+        console.print("No answers yet.")
+@
 
-    return "\n".join(lines)
+The multiple-choice renderer test checks the composed view rather than the
+individual chart helper: the header, mode callout, and option percentages must
+all appear together when [[view]] or the aggregate [[watch]] path renders a
+poll.
+
+<<test functions>>=
+def test_results_renderer_shows_mc_chart_and_mode():
+    buffer = io.StringIO()
+    console = Console(
+        file=buffer,
+        force_terminal=False,
+        color_system=None,
+        width=80,
+    )
+
+    mentipy.cli._render_results(
+        {
+            "question": {
+                "kind": "mc",
+                "text": "Pick one",
+                "options": ["Short", "A much longer label"],
+            },
+            "url_prefix": "abcd",
+            "total": 4,
+            "counts": [1, 3],
+            "percentages": [25.0, 75.0],
+            "mode_index": 1,
+            "answers": [],
+        },
+        console=console,
+    )
+
+    output = buffer.getvalue()
+    assert "Responses: 4" in output
+    assert "Mode: A much longer label (75%)" in output
+    assert "Short" in output
+    assert "1 (25%)" in output
+    assert "3 (75%)" in output
+@
+
+Scale results are reconstructed from the inclusive numeric bounds, just as in
+the HTML renderer.  The test includes an empty bucket so the terminal chart does
+not accidentally hide values that no respondent selected.
+
+<<test functions>>=
+def test_results_renderer_shows_scale_chart_and_stats():
+    buffer = io.StringIO()
+    console = Console(
+        file=buffer,
+        force_terminal=False,
+        color_system=None,
+        width=80,
+    )
+
+    mentipy.cli._render_results(
+        {
+            "question": {
+                "kind": "scale",
+                "text": "Rate it",
+                "low": 1,
+                "high": 3,
+            },
+            "url_prefix": "abcd",
+            "total": 2,
+            "counts": {1: 0, 2: 1, 3: 1},
+            "mean": 2.5,
+            "median": 2.5,
+            "stddev": 0.5,
+            "min": 2,
+            "max": 3,
+            "answers": [],
+        },
+        console=console,
+    )
+
+    output = buffer.getvalue()
+    assert "Mean: 2.50" in output
+    assert re.search(r"\b0\s+\(\s*0%\)", output)
+    assert output.count("1 (50%)") == 2
+@
+
+The prefix resolver remains outside the renderer so [[view]], [[watch]], and
+tests can pass already-fetched summaries when that avoids duplicate store
+lookups.
+
+<<functions>>=
+def _render_results_snapshot(
+    store: Store,
+    prefix: str,
+    *,
+    console: Console | None = None,
+):
+    console = console or _result_console()
+    full_hash = _resolve_full_hash(store, prefix)
+    _render_results(store.results(full_hash), console=console)
+@
+
+The renderer tests need stored answers with stable timestamps.  These helpers
+prepare the two cases that matter for terminal output: ordinary Markdown and a
+fenced Python block.  The ANSI stripper is intentionally test-only; production
+keeps the escape sequences so the terminal can display colours.
+
+<<test functions>>=
+def _store_with_markdown_answer(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, "**important** observation")
+
+    data = store._data()
+    data["answers"][full_hash][0]["ts"] = "2026-05-12T11:30:45Z"
+    store._write(data)
+
+    return store, prefix
+
+
+def _store_with_code_answer(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, "```python\nprint('hello')\n```")
+
+    data = store._data()
+    data["answers"][full_hash][0]["ts"] = "2026-05-12T11:30:45Z"
+    store._write(data)
+
+    return store, prefix
+
+
+def _without_ansi(text):
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+@
+
+Syntax highlighting is only possible if Markdown reaches Rich as a renderable.
+This test forces terminal output into a buffer and checks both sides of the
+contract: escape sequences are present, while the visible text still contains
+the timestamped answer separator.
+
+<<test functions>>=
+def test_results_snapshot_keeps_rich_syntax_highlighting(tmp_path, monkeypatch):
+    store, prefix = _store_with_code_answer(tmp_path)
+    monkeypatch.setattr(
+        "mentipy.cli.format_timestamp",
+        lambda timestamp: "2026-05-12 13:30",
+    )
+    buffer = io.StringIO()
+    console = Console(
+        file=buffer,
+        force_terminal=True,
+        color_system="standard",
+        width=80,
+    )
+
+    mentipy.cli._render_results_snapshot(store, prefix, console=console)
+
+    output = buffer.getvalue()
+    assert "\x1b[" in output
+    assert "print" in output
+    assert "Answer 1 - 2026-05-12 13:30" in _without_ansi(output)
 @
 
 CSV export deliberately flattens multi-select answers with a separator instead
@@ -800,9 +1327,54 @@ def list_questions(
     typer.echo(_question_listing(_configured_store(store).all_questions(), full=full))
 @
 
+The view command is the one-shot form of the live display.  The watcher then
+adds only the refresh loop and screen clearing, so the two commands cannot drift
+apart in how they render counts, Markdown, or timestamps.
+
+<<cli setup>>=
+@cli.command()
+def view(
+    prefix: str,
+    store: Optional[str] = STORE_OPTION,
+):
+    """Show current results for ``prefix`` in the terminal."""
+
+    _render_results_snapshot(_configured_store(store), prefix)
+@
+
+The one-shot command should render the shared snapshot exactly once.  The sleep
+stub turns an accidental refresh loop into a test failure, while the output
+assertions check the human-facing pieces that [[view]] delegates to the shared
+renderer.
+
+<<test functions>>=
+def test_view_command_prints_a_snapshot_once(tmp_path, monkeypatch):
+    runner = CliRunner()
+    store, prefix = _store_with_markdown_answer(tmp_path)
+    monkeypatch.setattr(
+        "mentipy.cli.format_timestamp",
+        lambda timestamp: "2026-05-12 13:30",
+    )
+    monkeypatch.setattr(
+        "mentipy.cli.time.sleep",
+        lambda interval: pytest.fail("view must not sleep"),
+    )
+
+    result = runner.invoke(cli, ["view", prefix, "--store", str(store.path)])
+
+    assert result.exit_code == 0
+    assert "Responses: 1" in result.stdout
+    assert "2026-05-12 13:30" in result.stdout
+    assert "Answer 1" in result.stdout
+    assert "important observation" in result.stdout
+    assert "**important**" not in result.stdout
+@
+
 The watcher intentionally owns the refresh loop rather than pushing that loop
-into the store.  The store supplies snapshots; the CLI decides how often to
-redraw and treats [[Ctrl-C]] as a normal way to leave the live display.
+into the store.  The display policy depends on the question kind.  Aggregate
+questions redraw because their meaning is in changing counts; open questions
+print the initial view once and then append only newly arrived answers, avoiding
+screen flutter while keeping a chronological transcript visible.
 
 <<cli setup>>=
 @cli.command()
@@ -814,14 +1386,170 @@ def watch(
     """Show live results for ``prefix`` in the terminal."""
 
     active_store = _configured_store(store)
+    full_hash = _resolve_full_hash(active_store, prefix)
+    console = _result_console()
+    initial_results = active_store.results(full_hash)
 
     try:
-        while True:
-            typer.echo(CLEAR_SCREEN, nl=False)
-            typer.echo(_watch_snapshot(active_store, prefix))
-            time.sleep(interval)
+        if initial_results["question"]["kind"] == "open":
+            console.print(
+                "\n".join(
+                    [
+                        initial_results["question"]["text"],
+                        f"Prefix: {initial_results['url_prefix']}",
+                        f"Responses: {initial_results['total']}",
+                        "",
+                    ]
+                )
+            )
+            if initial_results["answers"]:
+                _render_terminal_open_stats(initial_results, console=console)
+                _render_open_answers(initial_results["answers"], console=console)
+            seen = len(initial_results["answers"])
+            while True:
+                time.sleep(interval)
+                results = active_store.results(full_hash)
+                answers = results["answers"]
+                if len(answers) > seen:
+                    _render_open_watch_update(results, console=console)
+                    _render_open_answers(
+                        answers[seen:],
+                        console=console,
+                        start=seen + 1,
+                    )
+                    seen = len(answers)
+        else:
+            while True:
+                typer.echo(CLEAR_SCREEN, nl=False)
+                _render_results(active_store.results(full_hash), console=console)
+                time.sleep(interval)
     except KeyboardInterrupt:
         return
+@
+
+The live command keeps refreshing until interrupted.  For multiple-choice
+questions the shared renderer still produces the count table, so the redraw
+loop remains the right behaviour: a later answer changes the aggregate rather
+than adding a useful transcript line.
+
+<<test functions>>=
+def test_watch_command_redraws_aggregate_questions(tmp_path, monkeypatch):
+    runner = CliRunner()
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, 1)
+    sleeps = 0
+    monkeypatch.setattr("mentipy.cli.CLEAR_SCREEN", "[clear]")
+
+    def stop_after_first_sleep(_interval):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 1:
+            store.record(full_hash, 0)
+            return
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("mentipy.cli.time.sleep", stop_after_first_sleep)
+
+    result = runner.invoke(
+        cli,
+        ["watch", prefix, "--store", str(store.path), "--interval", "0.01"],
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout.count("[clear]") == 2
+    assert "Responses: 1" in result.stdout
+    assert "Responses: 2" in result.stdout
+    assert "Mode: B (100%)" in result.stdout
+    assert "Mode: A (50%)" in result.stdout
+    assert "A" in result.stdout
+    assert "B" in result.stdout
+    assert result.stdout.count("1 (50%)") >= 2
+@
+
+Open answers exercise the append-only path.  The first snapshot gives context;
+after that, new answers are the only useful new information, so the command
+should not clear the terminal or reprint the whole header on each poll.
+
+<<test functions>>=
+def test_watch_command_appends_new_open_answers(tmp_path, monkeypatch):
+    runner = CliRunner()
+    store, prefix = _store_with_markdown_answer(tmp_path)
+    full_hash = store.resolve(prefix)
+    monkeypatch.setattr(
+        "mentipy.cli.format_timestamp",
+        lambda timestamp: "2026-05-12 13:30",
+    )
+    sleeps = 0
+
+    def stop_after_first_sleep(_interval):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 1:
+            store.record(full_hash, "```python\nprint('new')\n```")
+            return
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("mentipy.cli.time.sleep", stop_after_first_sleep)
+
+    result = runner.invoke(
+        cli,
+        ["watch", prefix, "--store", str(store.path), "--interval", "0.01"],
+    )
+
+    assert result.exit_code == 0
+    assert CLEAR_SCREEN not in result.stdout
+    assert result.stdout.count("Responses:") == 2
+    assert "Responses: 1" in result.stdout
+    assert "Responses: 2" in result.stdout
+    assert "2026-05-12 13:30" in result.stdout
+    assert "Avg length:" in result.stdout
+    assert "Answer 1" in result.stdout
+    assert "Answer 2" in result.stdout
+    assert "important observation" in result.stdout
+    assert "print" in result.stdout
+    assert "**important**" not in result.stdout
+@
+
+The append-only path should not leave a stale [[No answers yet.]] marker behind.
+When the first answer arrives, the watcher should append the updated summary and
+the new answer, not an out-of-date empty-state message.
+
+<<test functions>>=
+def test_watch_command_replaces_empty_open_state_with_updates(
+    tmp_path, monkeypatch
+):
+    runner = CliRunner()
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    full_hash = store.resolve(prefix)
+    monkeypatch.setattr(
+        "mentipy.cli.format_timestamp",
+        lambda timestamp: "2026-05-12 13:30",
+    )
+    sleeps = 0
+
+    def stop_after_first_sleep(_interval):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 1:
+            store.record(full_hash, "first answer")
+            return
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("mentipy.cli.time.sleep", stop_after_first_sleep)
+
+    result = runner.invoke(
+        cli,
+        ["watch", prefix, "--store", str(store.path), "--interval", "0.01"],
+    )
+
+    assert result.exit_code == 0
+    assert "No answers yet." not in result.stdout
+    assert "Responses: 0" in result.stdout
+    assert "Responses: 1 | Avg length: 12 chars" in result.stdout
+    assert "Answer 1" in result.stdout
 @
 
 Exports resolve the supplied prefix once and then serialise the store's result
@@ -1702,32 +2430,6 @@ def test_list_command_full_wraps_question_text(tmp_path, monkeypatch):
     )
 @
 
-The interactive watcher test interrupts the sleep call after the first redraw so
-the command remains a normal unit test.
-
-<<test functions>>=
-def test_watch_command_prints_a_snapshot(tmp_path, monkeypatch):
-    runner = CliRunner()
-    store = Store(tmp_path / "mentipy.json", min_prefix=4)
-    prefix = store.register(MCQuestion("Pick one", ("A", "B")))
-    full_hash = store.resolve(prefix)
-    store.record(full_hash, 1)
-
-    def stop_after_first_sleep(_interval):
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr("mentipy.cli.time.sleep", stop_after_first_sleep)
-
-    result = runner.invoke(
-        cli,
-        ["watch", prefix, "--store", str(store.path), "--interval", "0.01"],
-    )
-
-    assert result.exit_code == 0
-    assert "Responses: 1" in result.stdout
-    assert "B: 1" in result.stdout
-@
-
 Export commands should be deterministic wrappers around the stored data.  JSON
 keeps the complete result shape, while CSV provides the row-oriented answer
 view expected by spreadsheet tools.
@@ -1937,8 +2639,11 @@ def test_url_help_mentions_the_relevant_config_keys():
 @
 
 <<test [[cli.py]]>>=
+import io
 import json
 import mentipy.cli
+import pytest
+import re
 
 from typer.testing import CliRunner
 

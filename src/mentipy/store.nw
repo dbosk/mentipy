@@ -221,6 +221,44 @@ def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 @
 
+Humans read answer logs in the room's local time, not in the storage time zone.
+Formatting is therefore a separate public helper: stored data remains stable,
+while every human-facing renderer can use the same local-time presentation.
+
+<<functions>>=
+def format_timestamp(timestamp: str) -> str:
+    """Return ``timestamp`` formatted in the local timezone."""
+
+    moment = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+
+    return moment.astimezone().strftime("%Y-%m-%d %H:%M")
+@
+
+The formatter should use the process-local time zone.  The test fixes the
+process time zone to a UTC+2 rule so the expected clock time is independent of
+where the test machine happens to run.
+
+<<test functions>>=
+def test_format_timestamp_uses_local_time(monkeypatch):
+    if not hasattr(time, "tzset"):
+        pytest.skip("tzset is unavailable on this platform")
+
+    original_tz = os.environ.get("TZ")
+    monkeypatch.setenv("TZ", "UTC-2")
+    time.tzset()
+
+    try:
+        assert format_timestamp("2026-05-12T11:30:45Z") == "2026-05-12 13:30"
+    finally:
+        if original_tz is None:
+            monkeypatch.delenv("TZ", raising=False)
+        else:
+            monkeypatch.setenv("TZ", original_tz)
+        time.tzset()
+@
+
 \section{Persistent store}
 
 The store itself is small, but the class boundary matters: the HTTP server, the
@@ -1248,7 +1286,9 @@ def test_results_empty_window_collapses_stats_to_none(tmp_path):
 @
 
 <<test [[store.py]]>>=
+import os
 import pytest
+import time
 
 from mentipy.questions import *
 from mentipy.store import *
