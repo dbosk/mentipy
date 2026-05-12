@@ -360,9 +360,12 @@ Included in the document, that output compiles to:
 
 A coding-oriented prompt benefits from the upload form: a respondent can
 attach the file they wrote instead of pasting it into a textarea on a phone.
-Passing [[fence="python"]] tells [[mentipy]] to wrap uploaded file bodies in a
-Python-tagged Markdown fence, so the results page renders the upload as a
-language-tagged code block.
+Here the local server will later sit behind an SSH reverse tunnel on
+[[dbosk@faculty-shell.sys.kth.se]] with remote port [[8080]], so the rendered
+QR code should already point at the faculty-shell host instead of at
+[[localhost]].  Passing [[fence="python"]] tells [[mentipy]] to wrap uploaded
+file bodies in a Python-tagged Markdown fence, so the results page renders the
+upload as a language-tagged code block.
 
 \begin{pyblock}
 from mentipy.latex import open_text
@@ -373,7 +376,7 @@ print(
         "runs it.",
         max_chars=2000,
         fence="python",
-        base_url="http://localhost:8080",
+        base_url="http://faculty-shell.sys.kth.se:8080",
         qr_dir="mentipy-obj",
         layout="article+qr",
     )
@@ -389,7 +392,8 @@ The CLI keeps the same shape and adds [[--fence]] to match the helper:
 mentipy render open \
   "Write a hello-world program in Python and show the command that runs it." \
   --max-chars 2000 --fence python \
-  --base-url http://localhost:8080 --qr-dir mentipy-obj --layout article+qr
+  --base-url http://faculty-shell.sys.kth.se:8080 \
+  --qr-dir mentipy-obj --layout article+qr
 \end{minted}
 
 \begin{pycode}
@@ -405,7 +409,7 @@ print(
             "--fence",
             "python",
             "--base-url",
-            "http://localhost:8080",
+            "http://faculty-shell.sys.kth.se:8080",
             "--qr-dir",
             "mentipy-obj",
             "--layout",
@@ -421,6 +425,11 @@ The command prints the following LaTeX:
 
 Included in the document, that output compiles to:
 \begin{center}\useprintpythontex{cli-open-fence}\end{center}
+
+At serve time, the matching tunnel comes from
+[[mentipy config set ssh_tunnel dbosk@faculty-shell.sys.kth.se:8080]] together
+with [[mentipy serve --public ssh]].  The render step only needs the public URL
+that the QR code should embed.
 
 \ltnote{%
   \textbf{Variation pattern}: Generalization
