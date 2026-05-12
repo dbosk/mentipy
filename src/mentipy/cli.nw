@@ -190,6 +190,7 @@ LIST_COLUMN_GAP = 2
 LIST_FALLBACK_WIDTH = 80
 LIST_MIN_TEXT_WIDTH = 20
 TERMINAL_BAR_SIZE = 100
+TERMINAL_BAR_MIN_WIDTH = 12
 
 WARNING_TEXT = (
     "Warning: exposing mentipy makes its unauthenticated polling pages\n"
@@ -353,8 +354,9 @@ def _question_listing(entries: list[dict[str, object]], *, full: bool) -> str:
 
 The terminal bar chart is the same visualisation as the HTML results page: one
 row per category, a bar proportional to the relative count, and a numeric count
-with its rounded percentage.  A grid table gives labels their own column, so a
-short label and a long label still start their bars at the same position.
+with its rounded percentage.  The layout reserves space for the bar and count
+first, then shortens overlong labels if needed, so a long option cannot squeeze
+the visualisation itself out of the terminal.
 
 <<functions>>=
 def _render_terminal_bar_chart(
@@ -364,22 +366,43 @@ def _render_terminal_bar_chart(
     *,
     console: Console,
 ):
-    table = Table.grid(padding=(0, 2))
-    table.add_column(no_wrap=True)
-    table.add_column(ratio=1)
-    table.add_column(justify="right", no_wrap=True)
+    count_texts = [
+        f"{count} ({percentage:.0f}%)"
+        for count, percentage in zip(counts, percentages)
+    ]
+    count_width = max((len(text) for text in count_texts), default=0)
+    available = max(console.width - count_width - 4, 2)
+    max_label_width = max(
+        (len(_single_line_text(str(label))) for label in labels),
+        default=1,
+    )
+    label_width = min(max_label_width, max(1, available - TERMINAL_BAR_MIN_WIDTH))
+    bar_width = max(1, available - label_width)
 
-    for label, count, percentage in zip(labels, counts, percentages):
+    table = Table.grid(padding=(0, 2))
+    table.add_column(width=label_width, no_wrap=True)
+    table.add_column(width=bar_width, no_wrap=True)
+    table.add_column(width=count_width, justify="right", no_wrap=True)
+
+    for label, percentage, count_text in zip(labels, percentages, count_texts):
+        shown_label = _single_line_text(str(label))
+        if len(shown_label) > label_width:
+            if label_width > 3:
+                shown_label = shown_label[: label_width - 3] + "..."
+            else:
+                shown_label = shown_label[:label_width]
+
         table.add_row(
-            str(label),
+            shown_label,
             Bar(
                 TERMINAL_BAR_SIZE,
                 0,
                 percentage,
+                width=bar_width,
                 color="cyan",
                 bgcolor="grey23",
             ),
-            f"{count} ({percentage:.0f}%)",
+            count_text,
         )
 
     console.print(table)
@@ -413,6 +436,34 @@ def test_terminal_bar_chart_aligns_short_and_long_labels():
     ]
     assert len(set(bar_starts)) == 1
     assert lines[0].index("1 (25%)") == lines[1].index("3 (75%)")
+@
+
+An even longer label should still leave room for both the bar and the count.
+Otherwise the chart degenerates into a truncated number, which defeats the
+point of the terminal plot.
+
+<<test functions>>=
+def test_terminal_bar_chart_preserves_bar_and_count_for_long_labels():
+    buffer = io.StringIO()
+    console = Console(
+        file=buffer,
+        force_terminal=False,
+        color_system=None,
+        width=80,
+    )
+
+    mentipy.cli._render_terminal_bar_chart(
+        ["X" * 90, "Short"],
+        [3, 1],
+        [75.0, 25.0],
+        console=console,
+    )
+
+    lines = buffer.getvalue().splitlines()
+    assert "3 (75%)" in lines[0]
+    assert "1 (25%)" in lines[1]
+    assert re.search(r"[^\x00-\x7f].*3 \(75%\)", lines[0])
+    assert re.search(r"[^\x00-\x7f].*1 \(25%\)", lines[1])
 @
 
 The statistic callouts share one low-level formatter.  It builds Rich
@@ -559,6 +610,20 @@ def test_terminal_open_stats_show_average_length():
     )
 
     assert "Avg length: 12 chars" in buffer.getvalue()
+@
+
+Open-question watching has one extra summary concern: appended answers also
+change the total response count and average answer length.  The live view keeps
+the initial transcript intact, then appends a compact summary update before each
+new answer batch.
+
+<<functions>>=
+def _render_open_watch_update(results: dict, *, console: Console):
+    pairs = [("Responses", str(results["total"]))]
+    avg = results.get("avg_length")
+    if avg is not None:
+        pairs.append(("Avg length", f"{avg:.0f} chars"))
+    console.print(_stats_line(pairs))
 @
 
 Open answers are events in chronological order.  Keeping their rendering in a
@@ -1284,13 +1349,26 @@ def watch(
 
     try:
         if initial_results["question"]["kind"] == "open":
-            _render_results(initial_results, console=console)
+            console.print(
+                "\n".join(
+                    [
+                        initial_results["question"]["text"],
+                        f"Prefix: {initial_results['url_prefix']}",
+                        f"Responses: {initial_results['total']}",
+                        "",
+                    ]
+                )
+            )
+            if initial_results["answers"]:
+                _render_terminal_open_stats(initial_results, console=console)
+                _render_open_answers(initial_results["answers"], console=console)
             seen = len(initial_results["answers"])
             while True:
                 time.sleep(interval)
                 results = active_store.results(full_hash)
                 answers = results["answers"]
                 if len(answers) > seen:
+                    _render_open_watch_update(results, console=console)
                     _render_open_answers(
                         answers[seen:],
                         console=console,
@@ -1349,7 +1427,7 @@ def test_watch_command_redraws_aggregate_questions(tmp_path, monkeypatch):
 
 Open answers exercise the append-only path.  The first snapshot gives context;
 after that, new answers are the only useful new information, so the command
-should not clear the terminal or reprint the header on each poll.
+should not clear the terminal or reprint the whole header on each poll.
 
 <<test functions>>=
 def test_watch_command_appends_new_open_answers(tmp_path, monkeypatch):
@@ -1379,14 +1457,56 @@ def test_watch_command_appends_new_open_answers(tmp_path, monkeypatch):
 
     assert result.exit_code == 0
     assert CLEAR_SCREEN not in result.stdout
-    assert result.stdout.count("Responses:") == 1
+    assert result.stdout.count("Responses:") == 2
     assert "Responses: 1" in result.stdout
+    assert "Responses: 2" in result.stdout
     assert "2026-05-12 13:30" in result.stdout
+    assert "Avg length:" in result.stdout
     assert "Answer 1" in result.stdout
     assert "Answer 2" in result.stdout
     assert "important observation" in result.stdout
     assert "print" in result.stdout
     assert "**important**" not in result.stdout
+@
+
+The append-only path should not leave a stale [[No answers yet.]] marker behind.
+When the first answer arrives, the watcher should append the updated summary and
+the new answer, not an out-of-date empty-state message.
+
+<<test functions>>=
+def test_watch_command_replaces_empty_open_state_with_updates(
+    tmp_path, monkeypatch
+):
+    runner = CliRunner()
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    full_hash = store.resolve(prefix)
+    monkeypatch.setattr(
+        "mentipy.cli.format_timestamp",
+        lambda timestamp: "2026-05-12 13:30",
+    )
+    sleeps = 0
+
+    def stop_after_first_sleep(_interval):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 1:
+            store.record(full_hash, "first answer")
+            return
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("mentipy.cli.time.sleep", stop_after_first_sleep)
+
+    result = runner.invoke(
+        cli,
+        ["watch", prefix, "--store", str(store.path), "--interval", "0.01"],
+    )
+
+    assert result.exit_code == 0
+    assert "No answers yet." not in result.stdout
+    assert "Responses: 0" in result.stdout
+    assert "Responses: 1 | Avg length: 12 chars" in result.stdout
+    assert "Answer 1" in result.stdout
 @
 
 Exports resolve the supplied prefix once and then serialise the store's result
