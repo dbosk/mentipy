@@ -90,29 +90,62 @@ class OpenQuestion:
     fence: str | None = None
     kind: str = "open"
 
-    def __post_init__(self):
-        if self.max_chars <= 0:
-            raise ValueError("open questions need a positive character limit")
-        if self.fence is not None and (
-            not self.fence
-            or any(char.isspace() or char == "`" for char in self.fence)
-        ):
-            raise ValueError(
-                "markdown fence language must be a non-empty word "
-                "without whitespace or backticks"
-            )
+    <<open question methods>>
+@
 
-    def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-friendly representation of the question."""
+\subsection{Validation}
 
-        result = {
-            "kind": self.kind,
-            "text": self.text,
-            "max_chars": self.max_chars,
-        }
-        if self.fence is not None:
-            result["fence"] = self.fence
-        return result
+The open-question validation has two independent invariants.  The character
+limit protects the form and storage layers from an impossible input contract,
+while the fence check protects Markdown rendering from turning a language hint
+into fence structure.
+
+<<open question methods>>=
+def __post_init__(self):
+    <<validate open question limit>>
+    <<validate open question fence>>
+@
+
+The length cap must be positive because both the HTML form and answer recorder
+treat it as an actual upper bound.
+
+<<validate open question limit>>=
+if self.max_chars <= 0:
+    raise ValueError("open questions need a positive character limit")
+@
+
+The fence language is optional, but when present it must be one CommonMark info
+word.  Whitespace or backticks would change the syntax of the generated fenced
+block, not merely its label.
+
+<<validate open question fence>>=
+if self.fence is not None and (
+    not self.fence or any(char.isspace() or char == "`" for char in self.fence)
+):
+    raise ValueError(
+        "markdown fence language must be a non-empty word "
+        "without whitespace or backticks"
+    )
+@
+
+\subsection{Serialisation}
+
+Serialisation omits the fence when it is unset.  That keeps the canonical JSON
+for existing open questions byte-for-byte unchanged while still recording the
+new rendering hint when authors choose one.
+
+<<open question methods>>=
+def to_dict(self) -> dict[str, Any]:
+    """Return a JSON-friendly representation of the question."""
+
+    result = {
+        "kind": self.kind,
+        "text": self.text,
+        "max_chars": self.max_chars,
+    }
+    if self.fence is not None:
+        result["fence"] = self.fence
+    return result
 @
 
 The limit validation is small, but it is what protects the rest of the system
@@ -122,13 +155,24 @@ from impossible forms:
 def test_open_question_requires_positive_limit():
     with pytest.raises(ValueError):
         OpenQuestion("Feedback?", max_chars=0)
+@
 
+Malformed fence hints are rejected for the same reason: later rendering code can
+quote response bodies safely only if the language tag cannot terminate or split
+the fence.
+
+<<test functions>>=
 
 @pytest.mark.parametrize("fence", ["", "python code", "python\n", "py`thon"])
 def test_open_question_rejects_malformed_fence_languages(fence):
     with pytest.raises(ValueError, match="fence language"):
         OpenQuestion("Q", fence=fence)
+@
 
+The unset-fence serialisation test preserves the old canonical form of open
+questions that do not opt into upload highlighting.
+
+<<test functions>>=
 
 def test_open_question_to_dict_omits_an_unset_fence():
     assert OpenQuestion("Q").to_dict() == {
@@ -136,7 +180,12 @@ def test_open_question_to_dict_omits_an_unset_fence():
         "text": "Q",
         "max_chars": 280,
     }
+@
 
+When a fence is configured, it becomes part of the question data because it
+changes how uploaded file answers are presented in the results view.
+
+<<test functions>>=
 
 def test_open_question_to_dict_includes_a_configured_fence():
     assert OpenQuestion("Q", fence="python").to_dict() == {
@@ -197,14 +246,15 @@ The rest of the system works on a question union.  The helper that rebuilds a
 question from stored JSON is the bridge between the typed model and the JSON
 registry.
 
-Stored JSON is less typed than the in-memory dataclasses.  We therefore coerce
-[[fence]] back to [[str]] when it is present so older or hand-edited store
-files still rebuild into the same [[OpenQuestion]] shape as freshly rendered
-questions.
-
 <<classes>>=
 Question = MCQuestion | OpenQuestion | ScaleQuestion
 @
+
+\subsection{Rebuilding stored questions}
+
+The dispatcher reads the stored [[kind]] once, then hands each variant to the
+constructor that enforces that variant's invariants.  Unknown kinds fail loudly:
+guessing would make corrupted or future store files look valid.
 
 <<functions>>=
 def question_from_dict(data: Mapping[str, Any]) -> Question:
@@ -212,87 +262,127 @@ def question_from_dict(data: Mapping[str, Any]) -> Question:
 
     kind = data["kind"]
 
-    if kind == "mc":
-        return MCQuestion(
-            text=str(data["text"]),
-            options=tuple(data["options"]),
-            multi=bool(data.get("multi", False)),
-        )
-
-    if kind == "open":
-        return OpenQuestion(
-            text=str(data["text"]),
-            max_chars=int(data.get("max_chars", 280)),
-            fence=(
-                None if data.get("fence") is None
-                else str(data["fence"])
-            ),
-        )
-
-    if kind == "scale":
-        return ScaleQuestion(
-            text=str(data["text"]),
-            low=int(data.get("low", 1)),
-            high=int(data.get("high", 5)),
-            low_label=str(data.get("low_label", "")),
-            high_label=str(data.get("high_label", "")),
-        )
+    <<rebuild stored multiple-choice question>>
+    <<rebuild stored open question>>
+    <<rebuild stored scale question>>
 
     raise ValueError(f"unknown question kind: {kind}")
 @
 
-The round-trip test fixes the storage contract.  If any field is lost or
-renamed later, the test fails before old data is silently corrupted.
+Multiple-choice options are stored as JSON arrays, but the frozen dataclass uses
+a tuple so callers cannot mutate a registered question after hashing it.
+
+<<rebuild stored multiple-choice question>>=
+if kind == "mc":
+    return MCQuestion(
+        text=str(data["text"]),
+        options=tuple(data["options"]),
+        multi=bool(data.get("multi", False)),
+    )
+@
+
+Stored JSON is less typed than the in-memory dataclasses.  We therefore coerce
+[[fence]] back to [[str]] when it is present so older or hand-edited store files
+still rebuild into the same [[OpenQuestion]] shape as freshly rendered
+questions.
+
+<<rebuild stored open question>>=
+if kind == "open":
+    return OpenQuestion(
+        text=str(data["text"]),
+        max_chars=int(data.get("max_chars", 280)),
+        fence=None if data.get("fence") is None else str(data["fence"]),
+    )
+@
+
+Scale reconstruction keeps default bounds and labels here rather than in the
+store so old records inherit the same defaults as newly authored questions.
+
+<<rebuild stored scale question>>=
+if kind == "scale":
+    return ScaleQuestion(
+        text=str(data["text"]),
+        low=int(data.get("low", 1)),
+        high=int(data.get("high", 5)),
+        low_label=str(data.get("low_label", "")),
+        high_label=str(data.get("high_label", "")),
+    )
+@
+
+The multiple-choice round-trip test fixes the storage contract for option order
+and the multi-select flag.  If either field is lost or renamed later, old data
+would silently change meaning.
 
 <<test functions>>=
-@pytest.mark.parametrize(
-    ("payload", "expected_type"),
-    [
-        (
-            {
-                "kind": "mc",
-                "text": "How was the lecture?",
-                "options": ["Great", "OK", "Boring"],
-                "multi": True,
-            },
-            MCQuestion,
-        ),
-        (
-            {
-                "kind": "open",
-                "text": "One thing to change?",
-                "max_chars": 140,
-            },
-            OpenQuestion,
-        ),
-        (
-            {
-                "kind": "open",
-                "text": "Show your code",
-                "max_chars": 5000,
-                "fence": "python",
-            },
-            OpenQuestion,
-        ),
-        (
-            {
-                "kind": "scale",
-                "text": "Pace?",
-                "low": 1,
-                "high": 7,
-                "low_label": "slow",
-                "high_label": "fast",
-            },
-            ScaleQuestion,
-        ),
-    ],
-)
-def test_question_round_trip(payload, expected_type):
+def test_mc_question_round_trip():
+    payload = {
+        "kind": "mc",
+        "text": "How was the lecture?",
+        "options": ["Great", "OK", "Boring"],
+        "multi": True,
+    }
+
     question = question_from_dict(payload)
 
-    assert isinstance(question, expected_type)
+    assert isinstance(question, MCQuestion)
     assert question.to_dict() == payload
 @
+
+The basic open-question round trip preserves the historical shape without a
+fence key.
+
+<<test functions>>=
+def test_open_question_round_trip_without_fence():
+    payload = {
+        "kind": "open",
+        "text": "One thing to change?",
+        "max_chars": 140,
+    }
+
+    question = question_from_dict(payload)
+
+    assert isinstance(question, OpenQuestion)
+    assert question.to_dict() == payload
+@
+
+The fenced open-question round trip pins the newer upload-highlighting field.
+
+<<test functions>>=
+def test_open_question_round_trip_with_fence():
+    payload = {
+        "kind": "open",
+        "text": "Show your code",
+        "max_chars": 5000,
+        "fence": "python",
+    }
+
+    question = question_from_dict(payload)
+
+    assert isinstance(question, OpenQuestion)
+    assert question.to_dict() == payload
+@
+
+Scale round trips are mostly about keeping all four range fields tied together:
+the numeric bounds and their optional endpoint labels.
+
+<<test functions>>=
+def test_scale_question_round_trip():
+    payload = {
+        "kind": "scale",
+        "text": "Pace?",
+        "low": 1,
+        "high": 7,
+        "low_label": "slow",
+        "high_label": "fast",
+    }
+
+    question = question_from_dict(payload)
+
+    assert isinstance(question, ScaleQuestion)
+    assert question.to_dict() == payload
+@
+
+\subsection{Hashing canonical JSON}
 
 The canonical hash uses sorted JSON keys so that it depends on the meaning of
 the question, not on the incidental order in which Python produced a mapping.
@@ -322,7 +412,12 @@ def test_question_hash_is_stable_for_identical_questions():
 
     assert digest == question_hash(second)
     assert re.fullmatch(r"[0-9a-f]{64}", digest)
+@
 
+Changing the option order changes the meaning of a poll, so it must also change
+the canonical digest.
+
+<<test functions>>=
 
 def test_question_hash_changes_when_option_order_changes():
     first = MCQuestion("Pick one", ("A", "B", "C"))

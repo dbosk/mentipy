@@ -41,6 +41,8 @@ from mentipy.questions import (
 )
 @
 
+\section{Configuration}
+
 The configuration keys live here because both the LaTeX integration and the CLI
 need the same defaults, and they must agree even when the package is imported
 outside the [[mentipy]] command.  We therefore compute the config file path from
@@ -121,11 +123,12 @@ def normalize_config_key(key: str) -> str:
     return f"{CONFIG_NAMESPACE}.{key}"
 @
 
-The remaining configuration helpers are thin wrappers around [[typerconf]]'s
-[[Config]] object.  They keep the rest of the code free from path juggling and
-from repeated JSON parsing.  We also seed the object with a fresh empty mapping,
-because [[typerconf.Config()]] otherwise reuses a mutable default across calls,
-which leaks settings from one missing config file into the next.
+Loading the configuration is intentionally separated from reading individual
+settings.  The rest of the package should not know where the file lives or how
+[[typerconf]] persists it; those details are fixed here.  We also seed the
+object with a fresh empty mapping, because [[typerconf.Config()]] otherwise
+reuses a mutable default across calls, which leaks settings from one missing
+config file into the next.
 
 <<functions>>=
 def load_config(*, writeback: bool = False) -> typerconf.Config:
@@ -134,8 +137,14 @@ def load_config(*, writeback: bool = False) -> typerconf.Config:
     config = typerconf.Config({})
     config.read_config(config_path(), writeback=writeback)
     return config
+@
 
+Reading a setting first normalises the key and then falls back to the built-in
+defaults.  That two-step lookup is what lets callers pass either [[port]] or
+[[mentipy.port]] while still preserving explicit defaults for keys whose value
+is normally [[None]].
 
+<<functions>>=
 def get_setting(key: str, default: Any = None) -> Any:
     """Return the configured value for ``key``, or ``default``."""
 
@@ -146,15 +155,26 @@ def get_setting(key: str, default: Any = None) -> Any:
         return load_config().get(full_key)
     except KeyError:
         return fallback
+@
 
+Writing a setting uses the same normalisation path as reading, so the CLI can
+remain concise without creating a second spelling of each configuration key on
+disk.
 
+<<functions>>=
 def set_setting(key: str, value: Any):
     """Store ``value`` under ``key`` in the mentipy configuration."""
 
     config = load_config(writeback=True)
     config.set(normalize_config_key(key), value)
+@
 
+Listing settings reports the effective values rather than only the values
+present in the JSON file.  This makes [[mentipy config list]] useful before any
+configuration has been written, and it also gives tests one contract for the
+default table.
 
+<<functions>>=
 def list_settings() -> dict[str, Any]:
     """Return the effective values of the built-in mentipy settings."""
 
@@ -162,8 +182,13 @@ def list_settings() -> dict[str, Any]:
         full_key.split(".", 1)[1]: get_setting(full_key, default)
         for full_key, default in DEFAULT_SETTINGS.items()
     }
+@
 
+The CLI stores typed values by accepting JSON syntax first and falling back to
+text only when parsing fails.  This gives booleans, numbers, [[None]], and lists
+their natural JSON shapes without inventing a custom configuration language.
 
+<<functions>>=
 def parse_config_value(raw: str) -> Any:
     """Interpret ``raw`` as JSON when possible, else keep it as text."""
 
@@ -171,18 +196,32 @@ def parse_config_value(raw: str) -> Any:
         return json.loads(raw)
     except json.JSONDecodeError:
         return raw
+@
 
+\section{Store file primitives}
 
+The empty-store template is copied on demand rather than reused directly, so a
+caller who mutates the returned structure cannot accidentally mutate the module
+constant used for the next missing file.
+
+<<functions>>=
 def _blank_store() -> dict[str, Any]:
     return {
         "questions": dict(STORE_TEMPLATE["questions"]),
         "answers": dict(STORE_TEMPLATE["answers"]),
     }
+@
 
+Answer timestamps are stored as UTC ISO strings with a [[Z]] suffix.  That is a
+small readability concession for the JSON file while still being unambiguous
+for later time-window filtering.
 
+<<functions>>=
 def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 @
+
+\section{Persistent store}
 
 The store itself is small, but the class boundary matters: the HTTP server, the
 LaTeX integration, and the CLI can all share the same persistence rules.
@@ -207,7 +246,9 @@ class Store:
 @
 
 Reading the store on every operation is the simplest way to make the server see
-newly compiled questions without introducing cache invalidation.
+newly compiled questions without introducing cache invalidation.  Missing files
+are treated as empty stores, and older or hand-written files are normalised by
+adding the top-level collections the rest of the class expects.
 
 <<store methods>>=
 def _data(self) -> dict[str, Any]:
@@ -220,8 +261,13 @@ def _data(self) -> dict[str, Any]:
     data.setdefault("questions", {})
     data.setdefault("answers", {})
     return data
+@
 
+Writes go through a sibling temporary file and then [[os.replace]].  The
+temporary file may be incomplete if the process dies mid-write, but it never
+becomes the real store unless the final replace succeeds.
 
+<<store methods>>=
 def _write(self, data: dict[str, Any]):
     self.path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = self.path.with_name(f"{self.path.name}.tmp")
@@ -244,8 +290,13 @@ def test_setting_helpers_use_the_mentipy_namespace(tmp_path, monkeypatch):
 
     assert get_setting("mentipy.port") == 9000
     assert list_settings()["port"] == 9000
+@
 
+The platform-directory lookup should be a pure path calculation here.  Creating
+directories belongs to the command that writes a config file, not to a read-only
+helper that may run during import or documentation rendering.
 
+<<test functions>>=
 def test_config_path_keeps_platformdir_lookup_pure(monkeypatch):
     calls = []
 
@@ -264,8 +315,13 @@ def test_config_path_keeps_platformdir_lookup_pure(monkeypatch):
 
     assert path == Path("/tmp/mentipy-config/config.json")
     assert calls == [(CONFIG_NAMESPACE, False, False)]
+@
 
+This regression test protects the fresh [[typerconf.Config({})]] allocation in
+[[load_config()]].  Without it, two different missing config paths can
+unexpectedly share in-memory settings.
 
+<<test functions>>=
 def test_missing_temp_configs_do_not_share_state(tmp_path, monkeypatch):
     first = tmp_path / "one.json"
     second = tmp_path / "two.json"
@@ -282,8 +338,13 @@ def test_missing_temp_configs_do_not_share_state(tmp_path, monkeypatch):
     assert list_settings()["base_url"] is None
     assert list_settings()["public_base_url"] is None
     assert list_settings()["ssh_tunnel"] is None
+@
 
+Question rendering settings deserve a round-trip test because they default to
+different kinds of values: one uses [[None]] as an intentional auto-mode marker,
+while the other is a boolean flag.
 
+<<test functions>>=
 def test_question_rendering_settings_have_defaults_and_round_trip(
     tmp_path, monkeypatch
 ):
@@ -302,6 +363,8 @@ def test_question_rendering_settings_have_defaults_and_round_trip(
     assert list_settings()["question_environment"] == "exercise"
     assert list_settings()["show_url"] is False
 @
+
+\section{Registration and prefix resolution}
 
 Registration needs two properties.  It must be idempotent for the same content,
 and it must keep old printed URLs stable even when a later question shares the
@@ -326,8 +389,14 @@ def register(self, question: Question) -> str:
         data["answers"].setdefault(full_hash, [])
         self._write(data)
         return prefix
+@
 
+Prefix allocation looks for the shortest readable prefix that does not collide
+with a full hash and has not already been issued as an exact reservation.  The
+second condition is what keeps an old printed URL valid when a newer question
+shares its first characters.
 
+<<store methods>>=
 def _allocate_prefix(
     self, full_hash: str, questions: dict[str, dict[str, Any]]
 ) -> str:
@@ -342,8 +411,8 @@ def _allocate_prefix(
     raise RuntimeError("could not allocate a unique URL prefix")
 @
 
-The first test pins idempotence.  The second uses stub hashes so we can force
-the collision pattern that would otherwise be too rare to exercise naturally.
+The first registration test pins idempotence: recompiling or rerendering the
+same question should never mint a new classroom URL.
 
 <<test functions>>=
 def test_register_is_idempotent(tmp_path):
@@ -354,8 +423,13 @@ def test_register_is_idempotent(tmp_path):
     second = store.register(question)
 
     assert first == second
+@
 
+When no collision exists, registration should choose the configured minimum
+prefix length.  Stub hashes make this deterministic without depending on the
+canonical question hash implementation.
 
+<<test functions>>=
 def test_register_uses_shortest_available_prefix(tmp_path, monkeypatch):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     hashes = {
@@ -373,8 +447,12 @@ def test_register_uses_shortest_available_prefix(tmp_path, monkeypatch):
 
     assert first == "abcd"
     assert second == "dcba"
+@
 
+The collision test fixes the stability rule: the first issued prefix stays
+short, and only the later colliding question receives a longer prefix.
 
+<<test functions>>=
 def test_register_extends_only_the_newer_prefix(tmp_path, monkeypatch):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     hashes = {
@@ -407,8 +485,13 @@ def matches(self, prefix: str) -> list[str]:
     return sorted(
         full_hash for full_hash in data["questions"] if full_hash.startswith(prefix)
     )
+@
 
+Resolution first honours the exact issued prefixes written into printed URLs.
+Only then does it accept longer unique hash prefixes, which is convenient for
+manual CLI use but must not override those reservations.
 
+<<store methods>>=
 def resolve(self, prefix: str) -> str | None:
     """Return the full hash addressed by ``prefix``, if it is unambiguous."""
 
@@ -450,6 +533,8 @@ def test_resolve_accepts_exact_and_unique_prefixes(tmp_path, monkeypatch):
     assert store.resolve("ffff") is None
 @
 
+\section{Public question views}
+
 The HTTP server needs cheap read helpers for rendering pages and the CLI needs a
 stable listing for index-like views.
 
@@ -470,14 +555,23 @@ def metadata(self, full_hash: str) -> dict[str, Any]:
     """Return the stored metadata for ``full_hash``."""
 
     return _public_question_metadata(self._data()["questions"][full_hash])
+@
 
+Rehydrating a question goes through the public metadata view.  That keeps
+operational keys out of the canonical question factory and preserves the same
+boundary that external callers see.
 
+<<store methods>>=
 def question(self, full_hash: str) -> Question:
     """Return the typed question for ``full_hash``."""
 
     return question_from_dict(self.metadata(full_hash))
+@
 
+The question listing is sorted by issued prefix rather than insertion order so
+index pages and CLI output stay stable as the JSON object is rewritten.
 
+<<store methods>>=
 def all_questions(self) -> list[dict[str, Any]]:
     """Return all registered questions, ordered by issued prefix."""
 
@@ -493,8 +587,13 @@ def all_questions(self) -> list[dict[str, Any]]:
         rows.append(row)
 
     return rows
+@
 
+Prefix iteration is a small helper for server startup checks.  It takes a
+snapshot under the lock and yields afterwards, avoiding a long-held lock around
+caller code that merely consumes strings.
 
+<<store methods>>=
 def iter_prefixes(self) -> Iterator[str]:
     """Yield the URL prefix of every registered question."""
 
@@ -504,6 +603,8 @@ def iter_prefixes(self) -> Iterator[str]:
     for meta in data["questions"].values():
         yield meta["url_prefix"]
 @
+
+\subsection{Remembered QR artifacts}
 
 QR regeneration needs one extra piece of operational metadata that should not
 change the question's identity: the concrete files earlier renders wrote.  The
@@ -531,8 +632,12 @@ def remember_qr_target(self, full_hash: str, qr_path: str | Path):
 
         targets.append(target)
         self._write(data)
+@
 
+The regeneration path returns [[Path]] objects rather than raw JSON strings so
+callers can work at the filesystem abstraction level immediately.
 
+<<store methods>>=
 def qr_targets(self, full_hash: str) -> list[Path]:
     """Return remembered QR artifact paths for ``full_hash``."""
 
@@ -559,6 +664,8 @@ def test_remember_qr_target_deduplicates_repeated_paths(tmp_path):
     assert QR_TARGETS_KEY not in store.all_questions()[0]
 @
 
+\section{Answer recording}
+
 Answer recording is the only mutating operation after registration, so it is
 where the atomic rewrite matters most.  It is also the last write boundary
 shared by the HTTP server and any direct library caller.  Later readers assume
@@ -575,53 +682,88 @@ stable no matter whether a caller passed a list or a tuple.
 def _normalize_recorded_answer(question: Question, value: Any) -> Any:
     if isinstance(question, MCQuestion):
         if question.multi:
-            if not isinstance(value, (list, tuple)):
-                raise TypeError(
-                    "multi-select answers must be stored as a list or tuple"
-                )
-            if not value:
-                raise ValueError("choose at least one option")
+            <<normalise multi-select answer>>
 
-            indices = []
-            seen = set()
-            for index in value:
-                if type(index) is not int:
-                    raise TypeError(
-                        "multiple-choice answer indices must be integers"
-                    )
-                if index < 0 or index >= len(question.options):
-                    raise ValueError(
-                        "multiple-choice answer outside the allowed range"
-                    )
-                if index in seen:
-                    raise ValueError(
-                        "multiple-choice answer repeats the same option"
-                    )
-                seen.add(index)
-                indices.append(index)
-
-            return indices
-
-        if type(value) is not int:
-            raise TypeError(
-                "single-choice answers must be stored as an integer option index"
-            )
-        if value < 0 or value >= len(question.options):
-            raise ValueError("multiple-choice answer outside the allowed range")
-        return value
+        <<normalise single-choice answer>>
 
     if isinstance(question, ScaleQuestion):
-        if type(value) is not int:
-            raise TypeError("scale answers must be stored as integers")
-        if value < question.low or value > question.high:
-            raise ValueError("scale answer outside the allowed range")
-        return value
+        <<normalise scale answer>>
 
-    if not isinstance(value, str):
-        raise TypeError("open-text answers must be stored as strings")
-    if len(value) > question.max_chars:
-        raise ValueError("open-text answer exceeds the question limit")
-    return value
+    <<normalise open-text answer>>
+@
+
+Multi-select answers arrive as a collection of indices, but JSON should store a
+plain list in a stable order.  The loop therefore validates the collection and
+builds the exact list that will be persisted, rejecting duplicates because they
+would otherwise inflate later percentage calculations.
+
+<<normalise multi-select answer>>=
+if not isinstance(value, (list, tuple)):
+    raise TypeError(
+        "multi-select answers must be stored as a list or tuple"
+    )
+if not value:
+    raise ValueError("choose at least one option")
+
+indices = []
+seen = set()
+for index in value:
+    if type(index) is not int:
+        raise TypeError(
+            "multiple-choice answer indices must be integers"
+        )
+    if index < 0 or index >= len(question.options):
+        raise ValueError(
+            "multiple-choice answer outside the allowed range"
+        )
+    if index in seen:
+        raise ValueError(
+            "multiple-choice answer repeats the same option"
+        )
+    seen.add(index)
+    indices.append(index)
+
+return indices
+@
+
+Single-choice answers use the same option-index contract as multi-select
+answers, but exactly one integer is expected.  Checking [[type(value) is int]]
+keeps booleans out, since [[bool]] is an [[int]] subclass but is not a useful
+option index in a poll result.
+
+<<normalise single-choice answer>>=
+if type(value) is not int:
+    raise TypeError(
+        "single-choice answers must be stored as an integer option index"
+    )
+if value < 0 or value >= len(question.options):
+    raise ValueError("multiple-choice answer outside the allowed range")
+return value
+@
+
+Scale answers are also integers, but their valid range belongs to the question
+rather than to an option list.  Keeping that check in its own phase makes the
+similarity to multiple-choice answers visible while preserving the different
+source of the bounds.
+
+<<normalise scale answer>>=
+if type(value) is not int:
+    raise TypeError("scale answers must be stored as integers")
+if value < question.low or value > question.high:
+    raise ValueError("scale answer outside the allowed range")
+return value
+@
+
+Open-text answers are already JSON strings after validation.  The length limit
+is enforced before writing so later renderers and exports can trust the stored
+log without rechecking every entry.
+
+<<normalise open-text answer>>=
+if not isinstance(value, str):
+    raise TypeError("open-text answers must be stored as strings")
+if len(value) > question.max_chars:
+    raise ValueError("open-text answer exceeds the question limit")
+return value
 @
 
 <<store methods>>=
@@ -641,9 +783,8 @@ def record(self, full_hash: str, value: Any):
         self._write(data)
 @
 
-We test atomicity by forcing [[os.replace]] to fail after the temporary file has
-been written.  The original JSON file must remain intact.  We also test the
-lock by recording from two threads through the same store instance.
+Prefix iteration is intentionally small, but it supports server code that needs
+to inspect registered URLs without loading the whole question listing.
 
 <<test functions>>=
 def test_iter_prefixes_lists_the_registered_prefixes(tmp_path):
@@ -652,8 +793,13 @@ def test_iter_prefixes_lists_the_registered_prefixes(tmp_path):
     second = store.register(OpenQuestion("What should we repeat?"))
 
     assert set(store.iter_prefixes()) == {first, second}
+@
 
+We test atomicity by forcing [[os.replace]] to fail after the temporary file has
+been written.  The original JSON file must remain intact because that file is
+what a running server would continue to serve after a failed write.
 
+<<test functions>>=
 def test_record_leaves_the_original_file_intact_on_failed_replace(
     tmp_path, monkeypatch
 ):
@@ -672,8 +818,13 @@ def test_record_leaves_the_original_file_intact_on_failed_replace(
         store.record(full_hash, "hello")
 
     assert path.read_text(encoding="utf-8") == before
+@
 
+The instance lock protects the read-modify-write cycle.  Recording from two
+threads through the same [[Store]] instance should keep both answers rather
+than letting the later writer overwrite the earlier one.
 
+<<test functions>>=
 def test_record_keeps_answers_from_concurrent_threads(tmp_path):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(MCQuestion("Pick one", ("A", "B")))
@@ -696,8 +847,13 @@ def test_record_keeps_answers_from_concurrent_threads(tmp_path):
 
     assert len(answers) == 2
     assert sorted(answer["value"] for answer in answers) == [0, 1]
+@
 
+The validation table samples each question family and each important kind of
+bad shape: out-of-range option, wrong container element, wrong scalar type,
+out-of-range scale value, wrong text type, and overlong text.
 
+<<test functions>>=
 @pytest.mark.parametrize(
     ("question", "value"),
     [
@@ -720,8 +876,13 @@ def test_record_rejects_answers_that_do_not_match_the_question(
         store.record(full_hash, value)
 
     assert store.results(full_hash)["total"] == 0
+@
 
+Multi-select has two extra invariants that are not covered by the generic table:
+there must be at least one selected option, and each selected option may appear
+only once.
 
+<<test functions>>=
 def test_record_requires_non_empty_unique_multi_select_answers(tmp_path):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(MCQuestion("Pick", ("A", "B"), multi=True))
@@ -733,8 +894,13 @@ def test_record_requires_non_empty_unique_multi_select_answers(tmp_path):
         store.record(full_hash, [0, 0])
 
     assert store.results(full_hash)["total"] == 0
+@
 
+Tuples are accepted as input convenience, but the JSON log should not preserve
+that Python-specific shape.  The stored value is a list because that is the
+native JSON array representation read by every consumer.
 
+<<test functions>>=
 def test_record_normalizes_multi_select_tuples_to_lists(tmp_path):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(MCQuestion("Pick", ("A", "B", "C"), multi=True))
@@ -744,6 +910,8 @@ def test_record_normalizes_multi_select_tuples_to_lists(tmp_path):
 
     assert store.results(full_hash)["answers"][0]["value"] == [0, 2]
 @
+
+\section{Results aggregation}
 
 The result view aggregates answers according to the question type, but it
 also has to support two cross-cutting concerns the lecturer expects from a
@@ -965,8 +1133,13 @@ def test_results_window_filter_keeps_only_recent_answers(tmp_path):
     assert all_time["total"] == 2
     assert last_hour["window"] == "hour"
     assert all_time["window"] == "all"
+@
 
+Unknown window names should not break result rendering.  Falling back to the
+lifetime view gives links with stale or mistyped query parameters a safe default
+instead of an error page.
 
+<<test functions>>=
 def test_results_window_unknown_falls_back_to_all(tmp_path):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(MCQuestion("Pick one", ("A", "B")))

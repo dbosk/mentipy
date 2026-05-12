@@ -391,6 +391,10 @@ diff -u open.tex scale.tex
 The answer is no longer free text, but it is still not a listed category.
 @
 
+The outcome check asks learners to name the response-shape distinctions after
+experiencing them in concrete renderings.  The false alternative keeps serving
+separate from question-kind selection.
+
 <<question kinds steps>>=
 # Check the learning outcomes
 
@@ -587,6 +591,10 @@ grep -n "mode<article>" auto.tex
 The auto layout keeps both output contexts in one fragment.
 @
 
+The outcome check returns to the critical aspects: printed URL placement, QR
+sidecars, environment wrapping, and mode-aware output.  The false alternative
+tests whether learners distinguish [[auto]] from a slide-only layout.
+
 <<layout and environment steps>>=
 # Check the learning outcomes
 
@@ -758,6 +766,10 @@ MENTIPY_CONFIG=./mentipy-config.json \
 The prefix still comes from the store, but the base is now derived from the
 current machine and the chosen port.
 @
+
+The outcome check holds the prefix fixed while asking learners to distinguish
+the three base-URL sources.  The false alternative separates prefix discovery
+from URL construction.
 
 <<respondent urls steps>>=
 # Check the learning outcomes
@@ -939,6 +951,10 @@ timeout 1 env MENTIPY_CONFIG=./mentipy-config.json \
 Because `base_url` is still `auto`, the server resolves the current URL and
 regenerates the QR targets.  That is why it tells you to recompile the slides.
 @
+
+The outcome check separates runtime effects from document artifacts: public
+settings and result redirects matter while serving, whereas regenerated QR files
+still require rebuilding the document that includes them.
 
 <<serving and publication steps>>=
 # Check the learning outcomes

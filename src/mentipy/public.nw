@@ -27,6 +27,8 @@ import urllib.error
 import urllib.request
 @
 
+\section{Public surface and shared settings}
+
 We keep the external echo service, the UPnP tuning, and the SSH startup,
 keepalive, and shutdown timings as named constants so the behaviour stays
 explicit in both tests and user-facing errors.  The same bucket also holds a
@@ -75,6 +77,8 @@ def resolve_public_ip() -> str:
             "could not resolve the public IP address"
         ) from err
 @
+
+\section{UPnP exposure}
 
 The UPnP dependency stays optional because only one of the public modes needs
 it, and many users will never expose a lecture outside their own machine.  The
@@ -126,14 +130,21 @@ def _upnp_mapping(port: int) -> tuple[str, Callable[[], None]]:
         raise
 
     return f"http://{public_ip}:{port}", cleanup
+@
 
+The public UPnP function deliberately discards the cleanup callback.  It is the
+one-shot variant used when a caller only wants the advertised URL; the context
+manager below uses the private helper when teardown must be guaranteed.
 
+<<functions>>=
 def expose_upnp(port: int) -> str:
     """Expose ``port`` through UPnP and return the public URL."""
 
     public_url, _cleanup = _upnp_mapping(port)
     return public_url
 @
+
+\section{SSH reverse tunnels}
 
 The SSH endpoint needs two views of the same configuration string: the full
 [[user@host]] target that the [[ssh]] command needs, and the bare host that the
@@ -202,8 +213,15 @@ def _preflight_ssh_tunnel(host: str, remote_port: int) -> None:
             "check that sshd has 'GatewayPorts yes' and that the host "
             "firewall allows inbound TCP on the forwarded port"
         ) from err
+@
 
+Starting the SSH process is a two-phase check.  If the process exits during the
+startup grace period, [[ExitOnForwardFailure]] already gave us a synchronous
+failure and stderr is the useful diagnostic.  If the process is still running,
+the reverse forward may still be unreachable from outside the server, so the
+preflight probe must succeed before the URL is returned.
 
+<<functions>>=
 def expose_ssh(
     local_port: int, ssh_endpoint: str
 ) -> tuple[subprocess.Popen[str], str]:
@@ -285,8 +303,13 @@ def _drain_ssh_stderr(process: subprocess.Popen[str]) -> None:
                 returncode = None
         if returncode not in (None, 0):
             LOGGER.error("ssh tunnel exited (status %s)", returncode)
+@
 
+Stopping the child process is intentionally conservative.  A polite terminate
+keeps normal SSH shutdown quiet, but a stuck process must not outlive the
+lecture command that created it.
 
+<<functions>>=
 def _stop_ssh_process(process: subprocess.Popen[str]):
     if process.poll() is not None:
         return
@@ -298,6 +321,8 @@ def _stop_ssh_process(process: subprocess.Popen[str]):
         process.kill()
         process.wait()
 @
+
+\section{Unified exposure context}
 
 The CLI wants one uniform [[with]]-block no matter which strategy it picked.
 The context manager keeps that interface small and guarantees that teardown runs
@@ -331,6 +356,8 @@ def expose(
         cleanup()
 @
 
+\section{Public exposure contracts}
+
 Let's first pin the public IP helper, because both exposure strategies depend on
 its error handling.
 
@@ -353,8 +380,13 @@ def test_resolve_public_ip_reads_the_ipify_response(monkeypatch):
     )
 
     assert resolve_public_ip() == "198.51.100.4"
+@
 
+Network failures should be reported through the module's public exception type;
+callers should not have to know which stdlib exception [[urlopen]] happened to
+raise.
 
+<<test functions>>=
 def test_resolve_public_ip_wraps_network_errors(monkeypatch):
     def fail(_url, timeout):
         raise public_module.urllib.error.URLError("offline")
@@ -420,6 +452,8 @@ def test_expose_upnp_maps_the_requested_port(monkeypatch):
         UPNP_DESCRIPTION,
     )
 @
+
+\subsection{SSH startup and reachability}
 
 The SSH path is pure stdlib, so small fake processes can pin the command line,
 the startup diagnostics, and the long-lived stderr handling without talking to
@@ -501,8 +535,13 @@ def test_expose_ssh_starts_a_reverse_tunnel(monkeypatch):
     assert called["thread_daemon"] is True
     assert called["thread_name"] == "mentipy-ssh-stderr"
     assert called["thread_started"] is True
+@
 
+The successful path depends on the external host accepting a connection to the
+remote port, not merely on the SSH child staying alive.  This regression test
+keeps that preflight probe part of the public URL contract.
 
+<<test functions>>=
 def test_expose_ssh_succeeds_when_preflight_connects(monkeypatch):
     called = {}
 
@@ -558,8 +597,13 @@ def test_expose_ssh_succeeds_when_preflight_connects(monkeypatch):
     assert called["thread_daemon"] is True
     assert called["thread_name"] == "mentipy-ssh-stderr"
     assert called["thread_started"] is True
+@
 
+When the preflight probe fails, the long-lived SSH process is no longer useful:
+the URL would be misleading even though the child is running.  The failure tests
+therefore assert both the user-facing diagnostic and the cleanup path.
 
+<<test functions>>=
 def test_expose_ssh_raises_when_preflight_times_out(monkeypatch):
     called = {}
 
@@ -615,8 +659,13 @@ def test_expose_ssh_raises_when_preflight_times_out(monkeypatch):
     assert called["wait_timeouts"] == [SSH_STARTUP_TIMEOUT, SSH_SHUTDOWN_TIMEOUT]
     assert "thread_created" not in called
     assert "killed" not in called
+@
 
+A refused connection is the same operational problem as a timeout for this
+module: the advertised address is unreachable from the caller's network.  It
+should therefore produce the same GatewayPorts/firewall guidance and cleanup.
 
+<<test functions>>=
 def test_expose_ssh_raises_when_preflight_refused(monkeypatch):
     called = {}
 
@@ -672,8 +721,15 @@ def test_expose_ssh_raises_when_preflight_refused(monkeypatch):
     assert called["wait_timeouts"] == [SSH_STARTUP_TIMEOUT, SSH_SHUTDOWN_TIMEOUT]
     assert "thread_created" not in called
     assert "killed" not in called
+@
 
+\subsection{SSH process diagnostics}
 
+If [[ssh]] exits during startup, stderr is the only actionable detail.  The CLI
+prints a single-line error, so the wrapper flattens multiline SSH diagnostics
+instead of leaking terminal formatting from the child process.
+
+<<test functions>>=
 def test_expose_ssh_rejects_tunnels_that_exit_during_startup(monkeypatch):
     class FakeProcess:
         def __init__(self):
@@ -699,8 +755,13 @@ def test_expose_ssh_rejects_tunnels_that_exit_during_startup(monkeypatch):
     assert "status 255" in message
     assert "remote port forwarding failed for listen port 9000" in message
     assert "\n" not in message
+@
 
+Once startup has succeeded, stderr belongs in the log rather than in the
+foreground command output.  Draining the stream also prevents a noisy SSH client
+from blocking if it writes enough diagnostics.
 
+<<test functions>>=
 def test_expose_ssh_logs_stderr_lines_after_startup(caplog):
     class FakeProcess:
         def __init__(self):
@@ -716,8 +777,13 @@ def test_expose_ssh_logs_stderr_lines_after_startup(caplog):
         "ssh: first line",
         "ssh: second line",
     ]
+@
 
+The drain thread is also responsible for reaping the child.  Without the final
+[[wait()]], a tunnel that dies after startup could become a zombie while the
+lecture command continues running.
 
+<<test functions>>=
 def test_drain_ssh_stderr_reaps_a_finished_process(caplog):
     class FakeProcess:
         def __init__(self):
@@ -742,12 +808,19 @@ def test_drain_ssh_stderr_reaps_a_finished_process(caplog):
     assert [record.message for record in caplog.records] == [
         "ssh tunnel exited (status 255)",
     ]
+@
 
+Endpoint parsing fails before spawning [[ssh]].  That keeps malformed
+configuration cheap to diagnose and avoids leaving child processes around after
+an input-validation error.
 
+<<test functions>>=
 def test_expose_ssh_rejects_malformed_endpoints():
     with pytest.raises(PublicExposureError):
         expose_ssh(8080, "example.test:9000")
 @
+
+\subsection{Exposure cleanup}
 
 Finally, the public context manager must actually run its teardown hook when
 the server stops.
