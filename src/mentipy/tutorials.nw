@@ -266,11 +266,14 @@ mentipy render mc "Which part should we revisit next?" \
   "Proofs" "Examples" "Definitions" \
   --store ./mentipy.json \
   --base-url http://localhost:8080 \
-  --layout article > single.tex
+  --layout article \
+  --no-url > single.tex
 grep -n "Which part should we revisit next?" single.tex
 ```
 
-This is the default `mc` shape: one answer chosen from the listed options.
+This is the default `mc` shape: one answer chosen from the listed options.  The
+comparison renders in this lesson use `--no-url` so the diffs focus on answer
+shape rather than on content-derived URL prefixes.
 @
 
 Only one critical aspect changes in the next step: the same family now permits
@@ -284,6 +287,7 @@ required_patterns:
   - mentipy render mc
   - --multi
   - multi.tex
+  - --no-url
   - diff -u single.tex multi.tex
   - "Choose exactly one:"
   - "Choose one or more:"
@@ -299,7 +303,8 @@ mentipy render mc "Which part should we revisit next?" \
   --multi \
   --store ./mentipy.json \
   --base-url http://localhost:8080 \
-  --layout article > multi.tex
+  --layout article \
+  --no-url > multi.tex
 diff -u single.tex multi.tex
 ```
 
@@ -308,7 +313,9 @@ command-line change is the new `--multi` flag.
 @
 
 Once the learner has separated one-answer from many-answer polls, we can widen
-the contrast to free text.
+the contrast to free text.  A coding-oriented open question also shows why the
+new upload fence matters: the response is still free text, but an uploaded file
+can now preserve its code-block shape on the results page.
 
 <<question kinds steps>>=
 # Switch to free text
@@ -316,28 +323,34 @@ the contrast to free text.
 ```tutorial-step
 required_patterns:
   - mentipy render open
-  - --max-chars 160
-  - What is still unclear?
+  - --max-chars 2000
+  - --fence python
+  - Write a hello-world program in Python
+  - --no-url
   - diff -u multi.tex open.tex
   - "Choose one or more:"
   - Free-text answer
-hint: "Move away from listed options entirely and bound the answer by length
-  instead."
+hint: "Move away from listed options entirely, raise the text limit, and add
+  the fence hint for a code-oriented upload."
 ```
 
 Render an open-text question:
 
 ```sh
-mentipy render open "What is still unclear?" \
-  --max-chars 160 \
+mentipy render open \
+  "Write a hello-world program in Python and show the command that runs it." \
+  --max-chars 2000 \
+  --fence python \
   --store ./mentipy.json \
   --base-url http://localhost:8080 \
-  --layout article > open.tex
+  --layout article \
+  --no-url > open.tex
 diff -u multi.tex open.tex
 ```
 
 Instead of choosing one of the listed options, the respondent now writes free
-text up to `--max-chars 160`.
+text up to `--max-chars 2000`.  The added `--fence python` hint also tells the
+results page to wrap an uploaded file body in a Python-tagged Markdown fence.
 @
 
 The last rendering contrast narrows the free response again, but this time into
@@ -352,6 +365,7 @@ required_patterns:
   - --low 1
   - --high 5
   - How fast is today's pace?
+  - --no-url
   - diff -u open.tex scale.tex
   - Free-text answer
   - Range
@@ -369,7 +383,8 @@ mentipy render scale "How fast is today's pace?" \
   --high-label "Too fast" \
   --store ./mentipy.json \
   --base-url http://localhost:8080 \
-  --layout article > scale.tex
+  --layout article \
+  --no-url > scale.tex
 diff -u open.tex scale.tex
 ```
 
@@ -647,13 +662,15 @@ Register one question and list the store:
 ```sh
 mentipy render mc "How confident do you feel about the course goals?" \
   "Very confident" "Somewhat confident" "Not yet" \
-  --store ./mentipy.json \
+  --store ./respondent-urls.json \
   --base-url http://localhost:8080 \
   --layout article > question.tex
-mentipy list --store ./mentipy.json
+mentipy list --store ./respondent-urls.json
 ```
 
-The list output gives you the canonical prefix that later commands reuse.
+The list output gives you the canonical prefix that later commands reuse.  This
+lesson uses its own store file so earlier tutorial questions cannot change which
+prefix appears first in the listing.
 @
 
 The first URL contrast is the strongest one: an explicit base overrides every
@@ -664,8 +681,8 @@ configured default.
 
 ```tutorial-step
 required_patterns:
-  - "PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)"
-  - 'mentipy url "$PREFIX" --store ./mentipy.json --base http://slides.example'
+  - "PREFIX=$(mentipy list --store ./respondent-urls.json | cut -d' ' -f1)"
+  - 'mentipy url "$PREFIX" --store ./respondent-urls.json --base http://slides.example'
   - http://slides.example/
 hint: "Capture the prefix from the first column, then ask for the URL with an
   explicit base override."
@@ -674,24 +691,26 @@ hint: "Capture the prefix from the first column, then ask for the URL with an
 Reuse the stored prefix, but override the base explicitly:
 
 ```sh
-PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)
-mentipy url "$PREFIX" --store ./mentipy.json --base http://slides.example
+PREFIX=$(mentipy list --store ./respondent-urls.json | cut -d' ' -f1)
+mentipy url "$PREFIX" --store ./respondent-urls.json --base http://slides.example
 ```
 
 Only the base changed; the stored prefix stayed the same.
 @
 
 Next we remove the explicit override and let configuration supply the same kind
-of information.
+of information.  The tutorial writes that setting to a workspace-local config
+file through [[MENTIPY_CONFIG]], so trying the lesson does not overwrite the
+learner's normal [[mentipy]] defaults.
 
 <<respondent urls steps>>=
 # Read the base URL from config
 
 ```tutorial-step
 required_patterns:
-  - mentipy config set base_url http://config.example
-  - "PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)"
-  - 'mentipy url "$PREFIX" --store ./mentipy.json'
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config set base_url http://config.example
+  - "PREFIX=$(mentipy list --store ./respondent-urls.json | cut -d' ' -f1)"
+  - 'MENTIPY_CONFIG=./mentipy-config.json mentipy url "$PREFIX" --store ./respondent-urls.json'
   - http://config.example/
 hint: "Set base_url once in config, then omit --base when you ask for
   the URL."
@@ -700,9 +719,11 @@ hint: "Set base_url once in config, then omit --base when you ask for
 Store a configured base URL and reuse it:
 
 ```sh
-mentipy config set base_url http://config.example
-PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)
-mentipy url "$PREFIX" --store ./mentipy.json
+MENTIPY_CONFIG=./mentipy-config.json \
+  mentipy config set base_url http://config.example
+PREFIX=$(mentipy list --store ./respondent-urls.json | cut -d' ' -f1)
+MENTIPY_CONFIG=./mentipy-config.json \
+  mentipy url "$PREFIX" --store ./respondent-urls.json
 ```
 
 Now the explicit flag is gone, but the resulting URL still uses a chosen base.
@@ -716,9 +737,9 @@ at a chosen port.
 
 ```tutorial-step
 required_patterns:
-  - mentipy config set base_url auto
-  - "PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)"
-  - 'mentipy url "$PREFIX" --store ./mentipy.json --port 9123'
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config set base_url auto
+  - "PREFIX=$(mentipy list --store ./respondent-urls.json | cut -d' ' -f1)"
+  - 'MENTIPY_CONFIG=./mentipy-config.json mentipy url "$PREFIX" --store ./respondent-urls.json --port 9123'
   - mode: regex
     pattern: "https?://\\S+:9123/"
 hint: "Use the literal value auto and a non-default port so the resolution
@@ -728,9 +749,10 @@ hint: "Use the literal value auto and a non-default port so the resolution
 Ask mentipy to resolve the current LAN address automatically:
 
 ```sh
-mentipy config set base_url auto
-PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)
-mentipy url "$PREFIX" --store ./mentipy.json --port 9123
+MENTIPY_CONFIG=./mentipy-config.json mentipy config set base_url auto
+PREFIX=$(mentipy list --store ./respondent-urls.json | cut -d' ' -f1)
+MENTIPY_CONFIG=./mentipy-config.json \
+  mentipy url "$PREFIX" --store ./respondent-urls.json --port 9123
 ```
 
 The prefix still comes from the store, but the base is now derived from the
@@ -832,7 +854,7 @@ will trigger URL resolution at runtime.
 
 ```tutorial-step
 required_patterns:
-  - mentipy config set base_url auto
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config set base_url auto
   - mentipy render mc
   - --store ./mentipy.json
   - How confident do you feel about the course goals?
@@ -843,8 +865,9 @@ hint: "Set base_url to auto, then register one poll in the local store so
 Prepare one stored question and an auto-resolved base URL:
 
 ```sh
-mentipy config set base_url auto
-mentipy render mc "How confident do you feel about the course goals?" \
+MENTIPY_CONFIG=./mentipy-config.json mentipy config set base_url auto
+MENTIPY_CONFIG=./mentipy-config.json \
+  mentipy render mc "How confident do you feel about the course goals?" \
   "Very confident" "Somewhat confident" "Not yet" \
   --store ./mentipy.json > poll.tex
 ```
@@ -861,10 +884,10 @@ between local serving and the extra settings public exposure needs.
 
 ```tutorial-step
 required_patterns:
-  - mentipy config set ssh_tunnel alice@example.test:2222
-  - mentipy config set public_base_url https://polls.example
-  - mentipy config get ssh_tunnel
-  - mentipy config get public_base_url
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config set ssh_tunnel alice@example.test:2222
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config set public_base_url https://polls.example
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config get ssh_tunnel
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config get public_base_url
   - alice@example.test:2222
   - https://polls.example
 hint: "Store the SSH endpoint and the public base URL, then read them back so the
@@ -874,14 +897,20 @@ hint: "Store the SSH endpoint and the public base URL, then read them back so th
 Record the two public-exposure settings that the help text mentioned:
 
 ```sh
-mentipy config set ssh_tunnel alice@example.test:2222
-mentipy config set public_base_url https://polls.example
-mentipy config get ssh_tunnel
-mentipy config get public_base_url
+MENTIPY_CONFIG=./mentipy-config.json \
+  mentipy config set ssh_tunnel alice@example.test:2222
+MENTIPY_CONFIG=./mentipy-config.json \
+  mentipy config set public_base_url https://polls.example
+MENTIPY_CONFIG=./mentipy-config.json mentipy config get ssh_tunnel
+MENTIPY_CONFIG=./mentipy-config.json mentipy config get public_base_url
 ```
 
 These settings are inert by themselves, but they matter once you choose a public
-exposure mode.
+exposure mode.  SSH mode still depends on the remote server exposing the
+forwarded port publicly.  In practice that usually means [[GatewayPorts yes]]
+on the SSH server and a firewall rule that allows inbound TCP on the chosen
+port; otherwise [[mentipy serve --public ssh]] fails fast instead of printing a
+dead URL.
 @
 
 The final shell step keeps to local serving, but it is long enough to reveal the
@@ -892,7 +921,7 @@ regeneration message that matters for slide authors.
 
 ```tutorial-step
 required_patterns:
-  - timeout 1 mentipy serve --store ./mentipy.json --results
+  - timeout 1 env MENTIPY_CONFIG=./mentipy-config.json mentipy serve --store ./mentipy.json --results
   - Serving at
   - Regenerated
   - recompile your slides
@@ -903,7 +932,8 @@ hint: "Run the server under timeout so you can see the startup message and
 Start the local server briefly so you can see its startup message:
 
 ```sh
-timeout 1 mentipy serve --store ./mentipy.json --results
+timeout 1 env MENTIPY_CONFIG=./mentipy-config.json \
+  mentipy serve --store ./mentipy.json --results
 ```
 
 Because `base_url` is still `auto`, the server resolves the current URL and

@@ -16,11 +16,14 @@ from __future__ import annotations
 
 <<imports>>=
 import errno
+from email.parser import BytesParser
+from email.policy import default as default_policy
 from html import escape
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import logging
+import os
 import sys
 from socketserver import ThreadingMixIn
 from string import Template
@@ -28,6 +31,10 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from markdown_it import MarkdownIt
+from pygments import highlight as _pygments_highlight
+from pygments.formatters import HtmlFormatter as _HtmlFormatter
+from pygments.lexers import get_lexer_by_name
+from pygments.util import ClassNotFound
 
 from mentipy.questions import MCQuestion, OpenQuestion, ScaleQuestion
 from mentipy.store import Store
@@ -36,12 +43,17 @@ from mentipy.store import Store
 Using [[string.Template]] keeps the HTML easy to read without introducing a
 separate templating engine.
 
+The base page template also carries the viewport declaration.  Phone browsers
+otherwise assume a desktop-sized layout viewport and shrink the whole page to
+fit, which makes a polling form needlessly hard to read and tap.
+
 <<constants>>=
 PAGE_TEMPLATE = Template(
     """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>$title</title>
   $refresh
   <link rel="stylesheet" href="/static/style.css">
@@ -55,25 +67,48 @@ PAGE_TEMPLATE = Template(
 </html>
 """
 )
+@
 
+The stylesheet starts from the phone layout and adds one desktop-scale-up
+media query.  That keeps the common case --- a student answering on a phone
+--- readable on narrow screens, while still restoring the denser
+multi-column layout when enough width exists.
+
+<<constants>>=
 STYLE_CSS = """
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
 body {
   background: #f4f4f4;
   color: #111;
   font-family: sans-serif;
+  font-size: 1rem;
+  line-height: 1.4;
   margin: 0;
 }
 
 main {
   background: white;
-  margin: 2rem auto;
+  margin: 0 auto;
   max-width: 52rem;
-  padding: 2rem;
+  padding: 1rem;
 }
 
 form label {
-  display: block;
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
   margin: 0.5rem 0;
+  padding: 0.6rem 0;
+}
+
+input,
+select,
+textarea,
+button {
+  font-size: 1rem;
 }
 
 textarea {
@@ -83,11 +118,30 @@ textarea {
 
 button {
   margin-top: 1rem;
+  max-width: 20rem;
+  padding: 0.6rem 1rem;
+  width: 100%;
 }
 
 code {
   background: #f0f0f0;
   padding: 0.1rem 0.25rem;
+}
+
+pre {
+  background: #f0f0f0;
+  border-radius: 3px;
+  overflow-x: auto;
+  padding: 0.75rem 1rem;
+}
+
+pre code {
+  background: none;
+  padding: 0;
+}
+
+pre code.highlight {
+  background: none;
 }
 
 .window-filter {
@@ -101,8 +155,14 @@ code {
   margin: 0 0 1.25rem;
   padding: 0.5rem 0.75rem;
 }
-.window-filter label { display: inline; margin: 0; }
-.window-filter button { margin: 0; }
+.window-filter label {
+  display: inline;
+  margin: 0;
+  padding: 0;
+}
+.window-filter button {
+  margin: 0;
+}
 
 .bar-chart {
   display: grid;
@@ -113,15 +173,19 @@ code {
   align-items: center;
   display: grid;
   gap: 0.5rem;
-  grid-template-columns: minmax(5rem, 12rem) 1fr minmax(5rem, auto);
+  grid-template-columns: 1fr minmax(4rem, auto);
 }
-.bar-label { font-weight: bold; text-align: right; }
+.bar-label {
+  font-weight: bold;
+  grid-column: 1 / -1;
+}
 .bar-bar {
   background: #eee;
   border-radius: 3px;
   display: block;
   height: 1.5rem;
   overflow: hidden;
+  width: 100%;
 }
 .bar-fill {
   background: #4a90d9;
@@ -149,6 +213,26 @@ code {
 .md-answer > :first-child { margin-top: 0; }
 .md-answer > :last-child { margin-bottom: 0; }
 .md-answer ul, .md-answer ol { margin: 0.25rem 0 0.25rem 1.5rem; }
+
+@media (min-width: 40rem) {
+  main {
+    margin: 2rem auto;
+    padding: 2rem;
+  }
+
+  button {
+    width: auto;
+  }
+
+  .bar-row {
+    grid-template-columns: minmax(5rem, 12rem) 1fr minmax(5rem, auto);
+  }
+
+  .bar-label {
+    grid-column: auto;
+    text-align: right;
+  }
+}
 """.strip()
 
 REFRESH_SECONDS = 2
@@ -209,6 +293,130 @@ respondent count twice for the same option.  Rejecting those shapes here
 keeps the stored answers aligned with the per-respondent percentages the
 results view reports.
 
+Open questions now accept uploaded text files as an alternative to pasted text.
+That keeps long answers workable on phones, where copying a code file or essay
+into a textarea is often awkward.  File uploads switch the browser to multipart
+encoding, so the first helper below translates that body back into the same
+[[dict[str, list[str]]]] shape that [[parse_qs()]] already returns.  Uploaded
+file fields carry their sanitized basename as the first line of the field value;
+keeping the name adjacent to the body prevents crafted multipart forms from
+mixing one file's text with another file's label.
+
+The parser stays in the standard library.  [[cgi.FieldStorage]] used to be the
+obvious option, but it is deprecated and disappearing from newer Python
+versions.  [[BytesParser]] and [[default_policy]] give us MIME parsing without
+adding a framework dependency.
+
+Browsers usually omit a charset for uploaded files, so UTF-8 is the important
+default.  If decoding fails, we reject the upload explicitly instead of storing
+garbled text.
+
+<<constants>>=
+MIN_FORM_BODY_BYTES = 64 * 1024
+MULTIPART_SLACK_BYTES = 4096
+UPLOAD_FALLBACK_NAME = "upload"
+@
+
+<<functions>>=
+
+
+def _parse_multipart(
+    content_type: str, body: bytes
+) -> dict[str, list[str]]:
+    """Return form fields parsed from a multipart/form-data body."""
+
+    message = BytesParser(policy=default_policy).parsebytes(
+        b"Content-Type: "
+        + content_type.encode("utf-8")
+        + b"\r\nMIME-Version: 1.0\r\n\r\n"
+        + body
+    )
+    if not message.is_multipart():
+        raise ValueError("malformed multipart form data")
+
+    fields: dict[str, list[str]] = {}
+    for part in message.iter_parts():
+        if part.get_content_disposition() != "form-data":
+            raise ValueError("malformed multipart form data")
+
+        name = part.get_param("name", header="content-disposition")
+        if not name:
+            raise ValueError("malformed multipart form data")
+
+        payload = part.get_payload(decode=True) or b""
+        charset = part.get_param("charset", header="content-type") or "utf-8"
+        try:
+            text = payload.decode(charset)
+        except (LookupError, UnicodeDecodeError) as err:
+            raise ValueError(
+                "uploaded file is not valid text; save it as UTF-8"
+            ) from err
+
+        filename = part.get_filename()
+        if filename is not None:
+            if part.defects:
+                raise ValueError("malformed multipart form data")
+            safe_name = (
+                os.path.basename(filename or UPLOAD_FALLBACK_NAME)
+                or UPLOAD_FALLBACK_NAME
+            )
+            if "\r" in safe_name or "\n" in safe_name:
+                raise ValueError("malformed multipart form data")
+            fields.setdefault(name, []).append(f"{safe_name}\n{text}")
+        else:
+            fields.setdefault(name, []).append(text)
+
+    return fields
+@
+
+Markdown fences need one extra care point: uploaded source files may already
+contain backticks.  We therefore choose a closing fence that is strictly longer
+than the longest backtick run in the body, which is the CommonMark rule that
+keeps the outer fence from terminating early.
+
+<<functions>>=
+
+
+def _fence_block(fence_lang: str | None, body: str) -> str:
+    if fence_lang is None:
+        return body
+
+    longest_run = 0
+    current_run = 0
+    for char in body:
+        if char == "`":
+            current_run += 1
+            longest_run = max(longest_run, current_run)
+        else:
+            current_run = 0
+
+    fence = "`" * max(3, longest_run + 1)
+    return f"{fence}{fence_lang}\n{body}\n{fence}"
+@
+
+The request-size cap has to cover two different shapes.  Ordinary multiple
+choice and scale posts are tiny, so we keep a [[64 * 1024]] floor that accepts
+them without looking at question-specific limits.  Open questions can carry
+larger text bodies, so we add a [[* 4]] multiplier for the UTF-8 worst case and
+leave a little multipart framing slack on top.
+
+<<functions>>=
+
+
+def _max_request_body(question) -> int:
+    max_chars = question.max_chars if isinstance(question, OpenQuestion) else 0
+    return max(
+        max_chars * 4 + MULTIPART_SLACK_BYTES,
+        MIN_FORM_BODY_BYTES,
+    )
+@
+
+The final parser step normalises all question kinds into the values the store
+records.  For open questions, that means combining the textarea text and an
+optional uploaded file into one string.  We keep the uploaded basename but strip
+any path components so a browser or crafted client cannot smuggle [[../]] into
+the recorded label.
+
 <<functions>>=
 
 
@@ -240,7 +448,27 @@ def _parse_answer(question, fields: dict[str, list[str]]) -> Any:
         return index
 
     if isinstance(question, OpenQuestion):
-        value = fields.get("value", [""])[0]
+        text = fields.get("value", [""])[0]
+        file_upload = fields.get("file", [""])[0]
+        filename = UPLOAD_FALLBACK_NAME
+        file_text = ""
+        if file_upload:
+            filename, _separator, file_text = file_upload.partition("\n")
+            filename = filename or UPLOAD_FALLBACK_NAME
+
+        if text and file_text:
+            value = (
+                f"Text: {text}\n\n"
+                f"File {filename}:\n{_fence_block(question.fence, file_text)}"
+            )
+        elif file_text:
+            value = (
+                f"File {filename}:\n"
+                f"{_fence_block(question.fence, file_text)}"
+            )
+        else:
+            value = text
+
         if len(value) > question.max_chars:
             raise ValueError("text answer too long")
         return value
@@ -255,6 +483,157 @@ Let\'s pin those invariants directly on the parser before we exercise the
 full request/response path.
 
 <<test functions>>=
+def _multipart_form(parts, *, boundary="Boundary42"):
+    chunks = []
+
+    for part in parts:
+        chunks.append(f"--{boundary}\r\n".encode("ascii"))
+        disposition = (
+            f'Content-Disposition: form-data; name="{part["name"]}"'
+        )
+        if "filename" in part:
+            disposition += f'; filename="{part["filename"]}"'
+        chunks.append(disposition.encode("utf-8") + b"\r\n")
+        if "content_type" in part:
+            chunks.append(
+                f'Content-Type: {part["content_type"]}'.encode("utf-8")
+                + b"\r\n"
+            )
+        chunks.append(b"\r\n")
+        payload = part["body"]
+        if isinstance(payload, str):
+            payload = payload.encode(part.get("encoding", "utf-8"))
+        chunks.append(payload)
+        chunks.append(b"\r\n")
+
+    chunks.append(f"--{boundary}--\r\n".encode("ascii"))
+    return (
+        f"multipart/form-data; boundary={boundary}",
+        b"".join(chunks),
+    )
+
+
+def test_parse_multipart_extracts_regular_and_file_fields():
+    content_type, body = _multipart_form(
+        [
+            {"name": "value", "body": "run python solution.py"},
+            {
+                "name": "file",
+                "filename": "solution.py",
+                "body": "print('hi')\n",
+            },
+        ]
+    )
+
+    fields = server_module._parse_multipart(content_type, body)
+
+    assert fields["value"] == ["run python solution.py"]
+    assert fields["file"] == ["solution.py\nprint('hi')\n"]
+
+
+def test_parse_multipart_respects_an_explicit_charset():
+    content_type, body = _multipart_form(
+        [
+            {
+                "name": "file",
+                "filename": "notes.txt",
+                "body": "räksmörgås",
+                "encoding": "iso-8859-1",
+                "content_type": "text/plain; charset=iso-8859-1",
+            }
+        ]
+    )
+
+    fields = server_module._parse_multipart(content_type, body)
+
+    assert fields["file"] == ["notes.txt\nräksmörgås"]
+
+
+def test_parse_multipart_defaults_uploaded_files_to_utf8():
+    content_type, body = _multipart_form(
+        [
+            {
+                "name": "file",
+                "filename": "notes.txt",
+                "body": "blåbär",
+            }
+        ]
+    )
+
+    fields = server_module._parse_multipart(content_type, body)
+
+    assert fields["file"] == ["notes.txt\nblåbär"]
+
+
+def test_parse_multipart_rejects_non_text_uploads():
+    content_type, body = _multipart_form(
+        [
+            {
+                "name": "file",
+                "filename": "notes.txt",
+                "body": b"\xff\xfe\x00\x00",
+            }
+        ]
+    )
+
+    with pytest.raises(ValueError, match="save it as UTF-8"):
+        server_module._parse_multipart(content_type, body)
+
+
+def test_parse_multipart_normalises_the_uploaded_filename():
+    content_type, body = _multipart_form(
+        [
+            {
+                "name": "file",
+                "filename": "../../etc/passwd",
+                "body": "hunter2",
+            }
+        ]
+    )
+
+    fields = server_module._parse_multipart(content_type, body)
+
+    assert fields["file"] == ["passwd\nhunter2"]
+
+
+def test_parse_multipart_keeps_each_filename_with_its_file_body():
+    content_type, body = _multipart_form(
+        [
+            {"name": "file", "filename": "first.txt", "body": "one"},
+            {"name": "file", "filename": "second.txt", "body": "two"},
+        ]
+    )
+
+    fields = server_module._parse_multipart(content_type, body)
+
+    assert fields["file"] == ["first.txt\none", "second.txt\ntwo"]
+
+
+def test_parse_multipart_rejects_newlines_in_uploaded_filenames():
+    content_type, body = _multipart_form(
+        [
+            {
+                "name": "file",
+                "filename": "evil\nname.txt",
+                "body": "safe body",
+            },
+        ]
+    )
+
+    with pytest.raises(ValueError, match="malformed multipart"):
+        server_module._parse_multipart(content_type, body)
+
+
+def test_fence_block_extends_past_existing_backticks():
+    fenced = server_module._fence_block(
+        "python",
+        "print('hi')\n```\n# still inside the upload",
+    )
+
+    assert fenced.startswith("````python\n")
+    assert fenced.endswith("\n````")
+
+
 def test_parse_answer_rejects_invalid_multiple_choice_indices():
     with pytest.raises(ValueError):
         server_module._parse_answer(
@@ -284,6 +663,52 @@ def test_parse_answer_rejects_duplicate_multi_select_indices():
             {"value": ["1", "1"]},
         )
 
+
+def test_parse_answer_keeps_textarea_only_answers_unchanged():
+    assert server_module._parse_answer(
+        OpenQuestion("Comment?", max_chars=100),
+        {"value": ["plain text"]},
+    ) == "plain text"
+
+
+def test_parse_answer_records_uploaded_files_with_their_name():
+    assert server_module._parse_answer(
+        OpenQuestion("Comment?", max_chars=100),
+        {"file": ["notes.py\nprint('hi')"]},
+    ) == "File notes.py:\nprint('hi')"
+
+
+def test_parse_answer_combines_text_and_a_fenced_upload():
+    assert server_module._parse_answer(
+        OpenQuestion("Show your work", max_chars=200, fence="python"),
+        {
+            "value": ["python solution.py"],
+            "file": ["solution.py\nprint('hi')"],
+        },
+    ) == (
+        "Text: python solution.py\n\n"
+        "File solution.py:\n"
+        "```python\nprint('hi')\n```"
+    )
+
+
+def test_parse_answer_falls_back_to_upload_when_filename_is_missing():
+    assert server_module._parse_answer(
+        OpenQuestion("Comment?", max_chars=100),
+        {"file": ["\nhello"]},
+    ) == "File upload:\nhello"
+
+
+def test_parse_answer_rejects_combined_open_answers_that_are_too_long():
+    with pytest.raises(ValueError, match="text answer too long"):
+        server_module._parse_answer(
+            OpenQuestion("Comment?", max_chars=20),
+            {
+                "value": ["1234567890"],
+                "file": ["x.txt\nabcdefghij"],
+            },
+        )
+
 <<functions>>=
 
 
@@ -303,6 +728,15 @@ def _render_index(store: Store) -> str:
         return "<p>No questions have been registered yet.</p>"
 
     return "<ul>" + "".join(items) + "</ul>"
+@
+
+The form renderer mirrors the parser's input policy.  Open questions keep both
+the textarea and file picker visible because respondents may need a short note
+plus an uploaded artifact.  The [[accept]] list is only a browser hint, but it
+nudges the picker toward the text-like formats that [[_parse_multipart()]] can
+actually decode and that the results page can show meaningfully.
+
+<<functions>>=
 
 
 def _render_form(store: Store, full_hash: str) -> str:
@@ -325,8 +759,11 @@ def _render_form(store: Store, full_hash: str) -> str:
     if isinstance(question, OpenQuestion):
         return (
             f"<p>{escape(question.text)}</p>"
-            f'<form method="post" action="/{prefix}">' 
+            f'<form method="post" action="/{prefix}" '
+            'enctype="multipart/form-data">'
             f'<textarea name="value" maxlength="{question.max_chars}"></textarea>'
+            '<input type="file" name="file" '
+            'accept="text/*,.txt,.md,.tex,.py,.rst,.csv,.json">'
             "<button type=\"submit\">Submit</button></form>"
         )
 
@@ -352,6 +789,24 @@ def _render_form(store: Store, full_hash: str) -> str:
     )
 
 
+@
+
+The open-question form keeps both inputs visible because respondents may need
+to pair a short explanation with an uploaded artifact.  We pin the multipart
+encoding and the field names directly on the renderer so the browser and the
+parser stay in sync.
+
+<<test functions>>=
+def test_open_form_uses_multipart_and_renders_both_inputs(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?", max_chars=500))
+    full_hash = store.resolve(prefix)
+
+    rendered = server_module._render_form(store, full_hash)
+
+    assert 'enctype="multipart/form-data"' in rendered
+    assert 'name="value"' in rendered
+    assert 'name="file"' in rendered
 @
 
 \section{Rendering results}
@@ -543,8 +998,8 @@ of plain text.  Markdown is the de-facto convention for that, and
 [[markdown-it-py]] is a pure-Python CommonMark engine without external
 binaries to install.
 
-The danger of rendering user-submitted content is XSS.  We close two
-common vectors:
+The danger of rendering user-submitted content is XSS.  We close the common
+vectors at the markdown boundary:
 \begin{description}
 \item[Raw HTML] [[html=False]] makes the parser escape any literal
   [[<script>]], [[<iframe>]], or other tag in the input.
@@ -554,10 +1009,45 @@ common vectors:
   [[file:]] URLs).  Replacing the default with an explicit allow-list
   keeps the policy auditable in one place and prevents a future library
   upgrade from quietly broadening the accepted scheme set.
+\item[Remote images] The image rule is disabled, because an [[<img>]]
+  emitted from respondent markdown would make every results-page viewer
+  fetch attacker-chosen URLs.
 \end{description}
 Storage stays as the raw markdown source; rendering happens only at
 view time, so the JSON export remains a faithful, lossless copy of what
 the student typed.
+
+Syntax highlighting for fenced code blocks uses Pygments.  The
+[[_highlight_code]] callback receives the raw code content and the
+language name from the fenced-block marker.  When Pygments knows the
+language it returns a complete [[<pre><code>]] block with inline
+[[<span>]] elements; returning an empty string signals the renderer
+to fall back to its own plain-text escape, so unrecognised languages
+are still safe.  [[PYGMENTS_CSS]] is generated once at import time
+from the same [[_FORMATTER]] instance used at render time, guaranteeing
+the stylesheet and the highlighted spans always agree.
+
+<<constants>>=
+_FORMATTER = _HtmlFormatter(nowrap=True)
+PYGMENTS_CSS = _FORMATTER.get_style_defs(".highlight")
+
+
+def _highlight_code(content: str, lang: str, attrs: str) -> str:
+    """Return Pygments-highlighted HTML for ``content``, or '' to skip."""
+    if not lang:
+        return ""
+    try:
+        lexer = get_lexer_by_name(lang, stripall=False)
+    except ClassNotFound:
+        return ""
+    return (
+        f'<pre><code class="language-{lang} highlight">'
+        + _pygments_highlight(content, lexer, _FORMATTER)
+        + "</code></pre>"
+    )
+
+
+@
 
 <<constants>>=
 _MARKDOWN = MarkdownIt(
@@ -566,8 +1056,9 @@ _MARKDOWN = MarkdownIt(
         "html": False,
         "linkify": False,
         "typographer": False,
+        "highlight": _highlight_code,
     },
-)
+).disable("image")
 
 _SAFE_URL_SCHEMES = {"http", "https", "mailto"}
 @
@@ -630,6 +1121,32 @@ def test_open_answer_blocks_relative_url():
         "[here](relative/path)"
     )
     assert 'href="relative/path"' not in rendered
+
+
+def test_open_answer_disables_remote_images():
+    rendered = server_module._render_open_answer_markdown(
+        "![tracking pixel](https://attacker.example/pixel.png)"
+    )
+    assert "<img" not in rendered
+@
+
+Let's verify that fenced code blocks get Pygments spans for known
+languages and fall back to plain escaped output for unknown ones:
+
+<<test functions>>=
+def test_fenced_python_is_syntax_highlighted():
+    rendered = server_module._render_open_answer_markdown(
+        "```python\nprint('hi')\n```"
+    )
+    assert '<span class="nb">print</span>' in rendered
+
+
+def test_fenced_unknown_lang_gives_plain_output():
+    rendered = server_module._render_open_answer_markdown(
+        "```mermaid\ngraph TD\n```"
+    )
+    assert "<span" not in rendered
+    assert "graph TD" in rendered
 @
 
 \subsection{Rendering open-text answers}
@@ -849,7 +1366,7 @@ def _build_handler(store: Store, *, public_results: bool = False):
             if path == "/static/style.css":
                 self._send(
                     HTTPStatus.OK,
-                    STYLE_CSS,
+                    STYLE_CSS + "\n" + PYGMENTS_CSS,
                     content_type="text/css; charset=utf-8",
                 )
                 return
@@ -979,12 +1496,26 @@ def _build_handler(store: Store, *, public_results: bool = False):
             if full_hash is None:
                 return
 
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length).decode("utf-8")
-            fields = parse_qs(body, keep_blank_values=True)
             question = store.question(full_hash)
+            length = int(self.headers.get("Content-Length", "0"))
+            if length > _max_request_body(question):
+                self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                return
+
+            raw_body = self.rfile.read(length)
 
             try:
+                content_type = self.headers.get(
+                    "Content-Type",
+                    "application/x-www-form-urlencoded",
+                )
+                if content_type.startswith("multipart/form-data"):
+                    fields = _parse_multipart(content_type, raw_body)
+                else:
+                    fields = parse_qs(
+                        raw_body.decode("utf-8"),
+                        keep_blank_values=True,
+                    )
                 value = _parse_answer(question, fields)
             except (TypeError, ValueError) as err:
                 self._send(
@@ -1152,6 +1683,22 @@ def live_server(tmp_path):
         server.server_close()
 
 
+@pytest.fixture
+def live_server_open(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?", max_chars=5000))
+    server = create_server(store, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        yield store, prefix, server.server_address[1]
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
 def _request(port, method, path, body=None, headers=None):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     connection.request(method, path, body=body, headers=headers or {})
@@ -1224,6 +1771,36 @@ def test_server_routes_return_expected_status_codes(live_server):
     assert json.loads(body)["url_prefix"] == prefix
 @
 
+The viewport assertion guards the regression we are fixing here: without
+[[width=device-width]], phone browsers fall back to a desktop-sized layout
+viewport and shrink the form.
+
+<<test functions>>=
+def test_results_page_includes_viewport_meta(live_server):
+    _store, prefix, port = live_server
+
+    response, body = _request(port, "GET", f"/{prefix}/results")
+
+    assert response.status == 200
+    assert 'name="viewport"' in body
+    assert 'width=device-width' in body
+@
+
+The phone-first stylesheet is only meaningful if the desktop scale-up
+media query actually reaches the browser, so we assert the route serves a
+stylesheet that contains a [[min-width]] breakpoint.
+
+<<test functions>>=
+def test_style_css_serves_mobile_breakpoint(live_server):
+    _store, _prefix, port = live_server
+
+    response, body = _request(port, "GET", "/static/style.css")
+
+    assert response.status == 200
+    assert "@media" in body
+    assert "min-width" in body
+@
+
 Posting an answer should redirect and persist exactly one response.
 
 <<test functions>>=
@@ -1257,6 +1834,99 @@ def test_post_rejects_invalid_multiple_choice_answers(live_server):
 
     assert response.status == 400
     assert "outside the allowed range" in body
+    full_hash = store.resolve(prefix)
+    assert store.results(full_hash)["total"] == 0
+
+
+def test_post_records_multipart_file_uploads(live_server_open):
+    store, prefix, port = live_server_open
+    content_type, body = _multipart_form(
+        [
+            {
+                "name": "file",
+                "filename": "notes.txt",
+                "body": "uploaded answer",
+            }
+        ]
+    )
+
+    response, _body = _request(
+        port,
+        "POST",
+        f"/{prefix}",
+        body=body,
+        headers={"Content-Type": content_type},
+    )
+
+    assert response.status == 303
+    full_hash = store.resolve(prefix)
+    answers = store.results(full_hash)["answers"]
+    assert answers[0]["value"] == "File notes.txt:\nuploaded answer"
+
+
+def test_post_records_combined_text_and_upload(live_server_open):
+    store, prefix, port = live_server_open
+    content_type, body = _multipart_form(
+        [
+            {"name": "value", "body": "python solution.py"},
+            {
+                "name": "file",
+                "filename": "solution.py",
+                "body": "print('hi')",
+            },
+        ]
+    )
+
+    response, _body = _request(
+        port,
+        "POST",
+        f"/{prefix}",
+        body=body,
+        headers={"Content-Type": content_type},
+    )
+
+    assert response.status == 303
+    full_hash = store.resolve(prefix)
+    answers = store.results(full_hash)["answers"]
+    assert answers[0]["value"] == (
+        "Text: python solution.py\n\n"
+        "File solution.py:\nprint('hi')"
+    )
+
+
+def test_post_rejects_over_cap_request_body(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?", max_chars=1))
+
+    with _running_server(store) as port:
+        response, _body = _request(
+            port,
+            "POST",
+            f"/{prefix}",
+            body="x" * (MIN_FORM_BODY_BYTES + 1),
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded"
+            },
+        )
+
+    assert response.status == 413
+
+
+def test_post_rejects_malformed_multipart(live_server_open):
+    store, prefix, port = live_server_open
+
+    response, body = _request(
+        port,
+        "POST",
+        f"/{prefix}",
+        body=b"not actually multipart",
+        headers={
+            "Content-Type": "multipart/form-data; boundary=broken"
+        },
+    )
+
+    assert response.status == 400
+    assert "malformed multipart form data" in body
     full_hash = store.resolve(prefix)
     assert store.results(full_hash)["total"] == 0
 @
@@ -1531,6 +2201,7 @@ def test_ambiguous_prefix_returns_multiple_choices(tmp_path, monkeypatch):
 
 <<test [[server.py]]>>=
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 import errno
 import http.client
 import json
