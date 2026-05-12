@@ -31,6 +31,10 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from markdown_it import MarkdownIt
+from pygments import highlight as _pygments_highlight
+from pygments.formatters import HtmlFormatter as _HtmlFormatter
+from pygments.lexers import get_lexer_by_name
+from pygments.util import ClassNotFound
 
 from mentipy.questions import MCQuestion, OpenQuestion, ScaleQuestion
 from mentipy.store import Store
@@ -994,6 +998,38 @@ Storage stays as the raw markdown source; rendering happens only at
 view time, so the JSON export remains a faithful, lossless copy of what
 the student typed.
 
+Syntax highlighting for fenced code blocks uses Pygments.  The
+[[_highlight_code]] callback receives the raw code content and the
+language name from the fenced-block marker.  When Pygments knows the
+language it returns a complete [[<pre><code>]] block with inline
+[[<span>]] elements; returning an empty string signals the renderer
+to fall back to its own plain-text escape, so unrecognised languages
+are still safe.  [[PYGMENTS_CSS]] is generated once at import time
+from the same [[_FORMATTER]] instance used at render time, guaranteeing
+the stylesheet and the highlighted spans always agree.
+
+<<constants>>=
+_FORMATTER = _HtmlFormatter(nowrap=True)
+PYGMENTS_CSS = _FORMATTER.get_style_defs(".highlight")
+
+
+def _highlight_code(content: str, lang: str, attrs: str) -> str:
+    """Return Pygments-highlighted HTML for ``content``, or '' to skip."""
+    if not lang:
+        return ""
+    try:
+        lexer = get_lexer_by_name(lang, stripall=False)
+    except ClassNotFound:
+        return ""
+    return (
+        f'<pre><code class="language-{lang} highlight">'
+        + _pygments_highlight(content, lexer, _FORMATTER)
+        + "</code></pre>"
+    )
+
+
+@
+
 <<constants>>=
 _MARKDOWN = MarkdownIt(
     "commonmark",
@@ -1001,6 +1037,7 @@ _MARKDOWN = MarkdownIt(
         "html": False,
         "linkify": False,
         "typographer": False,
+        "highlight": _highlight_code,
     },
 )
 
@@ -1065,6 +1102,25 @@ def test_open_answer_blocks_relative_url():
         "[here](relative/path)"
     )
     assert 'href="relative/path"' not in rendered
+@
+
+Let's verify that fenced code blocks get Pygments spans for known
+languages and fall back to plain escaped output for unknown ones:
+
+<<test functions>>=
+def test_fenced_python_is_syntax_highlighted():
+    rendered = server_module._render_open_answer_markdown(
+        "```python\nprint('hi')\n```"
+    )
+    assert '<span class="nb">print</span>' in rendered
+
+
+def test_fenced_unknown_lang_gives_plain_output():
+    rendered = server_module._render_open_answer_markdown(
+        "```mermaid\ngraph TD\n```"
+    )
+    assert "<span" not in rendered
+    assert "graph TD" in rendered
 @
 
 \subsection{Rendering open-text answers}
@@ -1284,7 +1340,7 @@ def _build_handler(store: Store, *, public_results: bool = False):
             if path == "/static/style.css":
                 self._send(
                     HTTPStatus.OK,
-                    STYLE_CSS,
+                    STYLE_CSS + "\n" + PYGMENTS_CSS,
                     content_type="text/css; charset=utf-8",
                 )
                 return
