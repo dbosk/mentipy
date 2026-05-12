@@ -429,6 +429,7 @@ def open_text(
     text: str,
     *,
     max_chars: int = 280,
+    fence: str | None = None,
     store: Store | None = None,
     base_url: str | None = None,
     qr_dir: str | Path | None = None,
@@ -440,7 +441,7 @@ def open_text(
     """Return LaTeX for an open free-text question."""
 
     return question(
-        OpenQuestion(text=text, max_chars=max_chars),
+        OpenQuestion(text=text, max_chars=max_chars, fence=fence),
         store=store,
         base_url=base_url,
         qr_dir=qr_dir,
@@ -512,8 +513,14 @@ def test_mc_registers_the_question_and_references_the_qr(tmp_path, monkeypatch):
     assert f"\\input{{{QR_SUBPATH}/Q-{prefix}.pdf_tex}}" in rendered
     assert (tmp_path / DEFAULT_QR_DIR / f"Q-{prefix}.pdf").exists()
     assert (tmp_path / DEFAULT_QR_DIR / f"Q-{prefix}.pdf_tex").exists()
+@
 
 
+The open-text wrapper also accepts an optional fence language.  Lecturers can
+use that when a question expects code, so uploaded files later render as fenced
+blocks on the results page without changing the ordinary textarea flow.
+
+<<test functions>>=
 def test_open_text_registers_the_question_and_references_the_qr(
     tmp_path, monkeypatch
 ):
@@ -534,6 +541,28 @@ def test_open_text_registers_the_question_and_references_the_qr(
     assert "One thing to change?" in rendered
     assert f"\\input{{{QR_SUBPATH}/Q-{prefix}.pdf_tex}}" in rendered
     assert store.resolve(prefix) == entry["hash"]
+
+
+def test_open_text_passes_the_optional_fence_into_the_question(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    open_text(
+        "Show your code",
+        max_chars=5000,
+        fence="python",
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir=DEFAULT_QR_DIR,
+    )
+
+    [entry] = store.all_questions()
+    question = store.question(entry["hash"])
+
+    assert question.fence == "python"
+@
 
 
 def test_scale_registers_the_question_and_references_the_qr(tmp_path, monkeypatch):
