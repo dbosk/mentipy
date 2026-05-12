@@ -998,8 +998,8 @@ of plain text.  Markdown is the de-facto convention for that, and
 [[markdown-it-py]] is a pure-Python CommonMark engine without external
 binaries to install.
 
-The danger of rendering user-submitted content is XSS.  We close two
-common vectors:
+The danger of rendering user-submitted content is XSS.  We close the common
+vectors at the markdown boundary:
 \begin{description}
 \item[Raw HTML] [[html=False]] makes the parser escape any literal
   [[<script>]], [[<iframe>]], or other tag in the input.
@@ -1009,6 +1009,9 @@ common vectors:
   [[file:]] URLs).  Replacing the default with an explicit allow-list
   keeps the policy auditable in one place and prevents a future library
   upgrade from quietly broadening the accepted scheme set.
+\item[Remote images] The image rule is disabled, because an [[<img>]]
+  emitted from respondent markdown would make every results-page viewer
+  fetch attacker-chosen URLs.
 \end{description}
 Storage stays as the raw markdown source; rendering happens only at
 view time, so the JSON export remains a faithful, lossless copy of what
@@ -1055,7 +1058,7 @@ _MARKDOWN = MarkdownIt(
         "typographer": False,
         "highlight": _highlight_code,
     },
-)
+).disable("image")
 
 _SAFE_URL_SCHEMES = {"http", "https", "mailto"}
 @
@@ -1118,6 +1121,13 @@ def test_open_answer_blocks_relative_url():
         "[here](relative/path)"
     )
     assert 'href="relative/path"' not in rendered
+
+
+def test_open_answer_disables_remote_images():
+    rendered = server_module._render_open_answer_markdown(
+        "![tracking pixel](https://attacker.example/pixel.png)"
+    )
+    assert "<img" not in rendered
 @
 
 Let's verify that fenced code blocks get Pygments spans for known

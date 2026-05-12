@@ -157,7 +157,7 @@ article layout prints the respondent URL directly in the returned LaTeX, so
 always carries the canonical URL caption that [[mentipy serve]] later
 regenerates together with the QR image.  This keeps the printed caption and the
 matrix in sync after public URL rewrites, but it also means [[show_url]] only
-affects layouts that do \\emph{not} embed the QR sidecar.
+affects layouts that do \emph{not} embed the QR sidecar.
 
 <<functions>>=
 def _render_body(question: Question) -> str:

@@ -266,11 +266,14 @@ mentipy render mc "Which part should we revisit next?" \
   "Proofs" "Examples" "Definitions" \
   --store ./mentipy.json \
   --base-url http://localhost:8080 \
-  --layout article > single.tex
+  --layout article \
+  --no-url > single.tex
 grep -n "Which part should we revisit next?" single.tex
 ```
 
-This is the default `mc` shape: one answer chosen from the listed options.
+This is the default `mc` shape: one answer chosen from the listed options.  The
+comparison renders in this lesson use `--no-url` so the diffs focus on answer
+shape rather than on content-derived URL prefixes.
 @
 
 Only one critical aspect changes in the next step: the same family now permits
@@ -284,6 +287,7 @@ required_patterns:
   - mentipy render mc
   - --multi
   - multi.tex
+  - --no-url
   - diff -u single.tex multi.tex
   - "Choose exactly one:"
   - "Choose one or more:"
@@ -299,7 +303,8 @@ mentipy render mc "Which part should we revisit next?" \
   --multi \
   --store ./mentipy.json \
   --base-url http://localhost:8080 \
-  --layout article > multi.tex
+  --layout article \
+  --no-url > multi.tex
 diff -u single.tex multi.tex
 ```
 
@@ -321,6 +326,7 @@ required_patterns:
   - --max-chars 2000
   - --fence python
   - Write a hello-world program in Python
+  - --no-url
   - diff -u multi.tex open.tex
   - "Choose one or more:"
   - Free-text answer
@@ -337,7 +343,8 @@ mentipy render open \
   --fence python \
   --store ./mentipy.json \
   --base-url http://localhost:8080 \
-  --layout article > open.tex
+  --layout article \
+  --no-url > open.tex
 diff -u multi.tex open.tex
 ```
 
@@ -358,6 +365,7 @@ required_patterns:
   - --low 1
   - --high 5
   - How fast is today's pace?
+  - --no-url
   - diff -u open.tex scale.tex
   - Free-text answer
   - Range
@@ -375,7 +383,8 @@ mentipy render scale "How fast is today's pace?" \
   --high-label "Too fast" \
   --store ./mentipy.json \
   --base-url http://localhost:8080 \
-  --layout article > scale.tex
+  --layout article \
+  --no-url > scale.tex
 diff -u open.tex scale.tex
 ```
 
@@ -653,13 +662,15 @@ Register one question and list the store:
 ```sh
 mentipy render mc "How confident do you feel about the course goals?" \
   "Very confident" "Somewhat confident" "Not yet" \
-  --store ./mentipy.json \
+  --store ./respondent-urls.json \
   --base-url http://localhost:8080 \
   --layout article > question.tex
-mentipy list --store ./mentipy.json
+mentipy list --store ./respondent-urls.json
 ```
 
-The list output gives you the canonical prefix that later commands reuse.
+The list output gives you the canonical prefix that later commands reuse.  This
+lesson uses its own store file so earlier tutorial questions cannot change which
+prefix appears first in the listing.
 @
 
 The first URL contrast is the strongest one: an explicit base overrides every
@@ -670,8 +681,8 @@ configured default.
 
 ```tutorial-step
 required_patterns:
-  - "PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)"
-  - 'mentipy url "$PREFIX" --store ./mentipy.json --base http://slides.example'
+  - "PREFIX=$(mentipy list --store ./respondent-urls.json | cut -d' ' -f1)"
+  - 'mentipy url "$PREFIX" --store ./respondent-urls.json --base http://slides.example'
   - http://slides.example/
 hint: "Capture the prefix from the first column, then ask for the URL with an
   explicit base override."
@@ -680,8 +691,8 @@ hint: "Capture the prefix from the first column, then ask for the URL with an
 Reuse the stored prefix, but override the base explicitly:
 
 ```sh
-PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)
-mentipy url "$PREFIX" --store ./mentipy.json --base http://slides.example
+PREFIX=$(mentipy list --store ./respondent-urls.json | cut -d' ' -f1)
+mentipy url "$PREFIX" --store ./respondent-urls.json --base http://slides.example
 ```
 
 Only the base changed; the stored prefix stayed the same.
@@ -698,8 +709,8 @@ learner's normal [[mentipy]] defaults.
 ```tutorial-step
 required_patterns:
   - MENTIPY_CONFIG=./mentipy-config.json mentipy config set base_url http://config.example
-  - "PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)"
-  - 'MENTIPY_CONFIG=./mentipy-config.json mentipy url "$PREFIX" --store ./mentipy.json'
+  - "PREFIX=$(mentipy list --store ./respondent-urls.json | cut -d' ' -f1)"
+  - 'MENTIPY_CONFIG=./mentipy-config.json mentipy url "$PREFIX" --store ./respondent-urls.json'
   - http://config.example/
 hint: "Set base_url once in config, then omit --base when you ask for
   the URL."
@@ -710,9 +721,9 @@ Store a configured base URL and reuse it:
 ```sh
 MENTIPY_CONFIG=./mentipy-config.json \
   mentipy config set base_url http://config.example
-PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)
+PREFIX=$(mentipy list --store ./respondent-urls.json | cut -d' ' -f1)
 MENTIPY_CONFIG=./mentipy-config.json \
-  mentipy url "$PREFIX" --store ./mentipy.json
+  mentipy url "$PREFIX" --store ./respondent-urls.json
 ```
 
 Now the explicit flag is gone, but the resulting URL still uses a chosen base.
@@ -727,8 +738,8 @@ at a chosen port.
 ```tutorial-step
 required_patterns:
   - MENTIPY_CONFIG=./mentipy-config.json mentipy config set base_url auto
-  - "PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)"
-  - 'MENTIPY_CONFIG=./mentipy-config.json mentipy url "$PREFIX" --store ./mentipy.json --port 9123'
+  - "PREFIX=$(mentipy list --store ./respondent-urls.json | cut -d' ' -f1)"
+  - 'MENTIPY_CONFIG=./mentipy-config.json mentipy url "$PREFIX" --store ./respondent-urls.json --port 9123'
   - mode: regex
     pattern: "https?://\\S+:9123/"
 hint: "Use the literal value auto and a non-default port so the resolution
@@ -739,9 +750,9 @@ Ask mentipy to resolve the current LAN address automatically:
 
 ```sh
 MENTIPY_CONFIG=./mentipy-config.json mentipy config set base_url auto
-PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)
+PREFIX=$(mentipy list --store ./respondent-urls.json | cut -d' ' -f1)
 MENTIPY_CONFIG=./mentipy-config.json \
-  mentipy url "$PREFIX" --store ./mentipy.json --port 9123
+  mentipy url "$PREFIX" --store ./respondent-urls.json --port 9123
 ```
 
 The prefix still comes from the store, but the base is now derived from the
