@@ -688,16 +688,18 @@ Only the base changed; the stored prefix stayed the same.
 @
 
 Next we remove the explicit override and let configuration supply the same kind
-of information.
+of information.  The tutorial writes that setting to a workspace-local config
+file through [[MENTIPY_CONFIG]], so trying the lesson does not overwrite the
+learner's normal [[mentipy]] defaults.
 
 <<respondent urls steps>>=
 # Read the base URL from config
 
 ```tutorial-step
 required_patterns:
-  - mentipy config set base_url http://config.example
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config set base_url http://config.example
   - "PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)"
-  - 'mentipy url "$PREFIX" --store ./mentipy.json'
+  - 'MENTIPY_CONFIG=./mentipy-config.json mentipy url "$PREFIX" --store ./mentipy.json'
   - http://config.example/
 hint: "Set base_url once in config, then omit --base when you ask for
   the URL."
@@ -706,9 +708,11 @@ hint: "Set base_url once in config, then omit --base when you ask for
 Store a configured base URL and reuse it:
 
 ```sh
-mentipy config set base_url http://config.example
+MENTIPY_CONFIG=./mentipy-config.json \
+  mentipy config set base_url http://config.example
 PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)
-mentipy url "$PREFIX" --store ./mentipy.json
+MENTIPY_CONFIG=./mentipy-config.json \
+  mentipy url "$PREFIX" --store ./mentipy.json
 ```
 
 Now the explicit flag is gone, but the resulting URL still uses a chosen base.
@@ -722,9 +726,9 @@ at a chosen port.
 
 ```tutorial-step
 required_patterns:
-  - mentipy config set base_url auto
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config set base_url auto
   - "PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)"
-  - 'mentipy url "$PREFIX" --store ./mentipy.json --port 9123'
+  - 'MENTIPY_CONFIG=./mentipy-config.json mentipy url "$PREFIX" --store ./mentipy.json --port 9123'
   - mode: regex
     pattern: "https?://\\S+:9123/"
 hint: "Use the literal value auto and a non-default port so the resolution
@@ -734,9 +738,10 @@ hint: "Use the literal value auto and a non-default port so the resolution
 Ask mentipy to resolve the current LAN address automatically:
 
 ```sh
-mentipy config set base_url auto
+MENTIPY_CONFIG=./mentipy-config.json mentipy config set base_url auto
 PREFIX=$(mentipy list --store ./mentipy.json | cut -d' ' -f1)
-mentipy url "$PREFIX" --store ./mentipy.json --port 9123
+MENTIPY_CONFIG=./mentipy-config.json \
+  mentipy url "$PREFIX" --store ./mentipy.json --port 9123
 ```
 
 The prefix still comes from the store, but the base is now derived from the
@@ -838,7 +843,7 @@ will trigger URL resolution at runtime.
 
 ```tutorial-step
 required_patterns:
-  - mentipy config set base_url auto
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config set base_url auto
   - mentipy render mc
   - --store ./mentipy.json
   - How confident do you feel about the course goals?
@@ -849,8 +854,9 @@ hint: "Set base_url to auto, then register one poll in the local store so
 Prepare one stored question and an auto-resolved base URL:
 
 ```sh
-mentipy config set base_url auto
-mentipy render mc "How confident do you feel about the course goals?" \
+MENTIPY_CONFIG=./mentipy-config.json mentipy config set base_url auto
+MENTIPY_CONFIG=./mentipy-config.json \
+  mentipy render mc "How confident do you feel about the course goals?" \
   "Very confident" "Somewhat confident" "Not yet" \
   --store ./mentipy.json > poll.tex
 ```
@@ -867,10 +873,10 @@ between local serving and the extra settings public exposure needs.
 
 ```tutorial-step
 required_patterns:
-  - mentipy config set ssh_tunnel alice@example.test:2222
-  - mentipy config set public_base_url https://polls.example
-  - mentipy config get ssh_tunnel
-  - mentipy config get public_base_url
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config set ssh_tunnel alice@example.test:2222
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config set public_base_url https://polls.example
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config get ssh_tunnel
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config get public_base_url
   - alice@example.test:2222
   - https://polls.example
 hint: "Store the SSH endpoint and the public base URL, then read them back so the
@@ -880,10 +886,12 @@ hint: "Store the SSH endpoint and the public base URL, then read them back so th
 Record the two public-exposure settings that the help text mentioned:
 
 ```sh
-mentipy config set ssh_tunnel alice@example.test:2222
-mentipy config set public_base_url https://polls.example
-mentipy config get ssh_tunnel
-mentipy config get public_base_url
+MENTIPY_CONFIG=./mentipy-config.json \
+  mentipy config set ssh_tunnel alice@example.test:2222
+MENTIPY_CONFIG=./mentipy-config.json \
+  mentipy config set public_base_url https://polls.example
+MENTIPY_CONFIG=./mentipy-config.json mentipy config get ssh_tunnel
+MENTIPY_CONFIG=./mentipy-config.json mentipy config get public_base_url
 ```
 
 These settings are inert by themselves, but they matter once you choose a public
@@ -902,7 +910,7 @@ regeneration message that matters for slide authors.
 
 ```tutorial-step
 required_patterns:
-  - timeout 1 mentipy serve --store ./mentipy.json --results
+  - timeout 1 env MENTIPY_CONFIG=./mentipy-config.json mentipy serve --store ./mentipy.json --results
   - Serving at
   - Regenerated
   - recompile your slides
@@ -913,7 +921,8 @@ hint: "Run the server under timeout so you can see the startup message and
 Start the local server briefly so you can see its startup message:
 
 ```sh
-timeout 1 mentipy serve --store ./mentipy.json --results
+timeout 1 env MENTIPY_CONFIG=./mentipy-config.json \
+  mentipy serve --store ./mentipy.json --results
 ```
 
 Because `base_url` is still `auto`, the server resolves the current URL and

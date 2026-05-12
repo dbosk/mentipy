@@ -277,7 +277,10 @@ Open questions now accept uploaded text files as an alternative to pasted text.
 That keeps long answers workable on phones, where copying a code file or essay
 into a textarea is often awkward.  File uploads switch the browser to multipart
 encoding, so the first helper below translates that body back into the same
-[[dict[str, list[str]]]] shape that [[parse_qs()]] already returns.
+[[dict[str, list[str]]]] shape that [[parse_qs()]] already returns.  Uploaded
+file fields carry their sanitized basename as the first line of the field value;
+keeping the name adjacent to the body prevents crafted multipart forms from
+mixing one file's text with another file's label.
 
 The parser stays in the standard library.  [[cgi.FieldStorage]] used to be the
 obvious option, but it is deprecated and disappearing from newer Python
@@ -329,13 +332,19 @@ def _parse_multipart(
                 "uploaded file is not valid text; save it as UTF-8"
             ) from err
 
-        fields.setdefault(name, []).append(text)
         filename = part.get_filename()
         if filename is not None:
-            fields.setdefault("filename", []).append(
+            if part.defects:
+                raise ValueError("malformed multipart form data")
+            safe_name = (
                 os.path.basename(filename or UPLOAD_FALLBACK_NAME)
                 or UPLOAD_FALLBACK_NAME
             )
+            if "\r" in safe_name or "\n" in safe_name:
+                raise ValueError("malformed multipart form data")
+            fields.setdefault(name, []).append(f"{safe_name}\n{text}")
+        else:
+            fields.setdefault(name, []).append(text)
 
     return fields
 @
@@ -420,9 +429,12 @@ def _parse_answer(question, fields: dict[str, list[str]]) -> Any:
 
     if isinstance(question, OpenQuestion):
         text = fields.get("value", [""])[0]
-        file_text = fields.get("file", [""])[0]
-        filename = fields.get("filename", [UPLOAD_FALLBACK_NAME])[0]
-        filename = filename or UPLOAD_FALLBACK_NAME
+        file_upload = fields.get("file", [""])[0]
+        filename = UPLOAD_FALLBACK_NAME
+        file_text = ""
+        if file_upload:
+            filename, _separator, file_text = file_upload.partition("\n")
+            filename = filename or UPLOAD_FALLBACK_NAME
 
         if text and file_text:
             value = (
@@ -496,8 +508,7 @@ def test_parse_multipart_extracts_regular_and_file_fields():
     fields = server_module._parse_multipart(content_type, body)
 
     assert fields["value"] == ["run python solution.py"]
-    assert fields["file"] == ["print('hi')\n"]
-    assert fields["filename"] == ["solution.py"]
+    assert fields["file"] == ["solution.py\nprint('hi')\n"]
 
 
 def test_parse_multipart_respects_an_explicit_charset():
@@ -515,7 +526,7 @@ def test_parse_multipart_respects_an_explicit_charset():
 
     fields = server_module._parse_multipart(content_type, body)
 
-    assert fields["file"] == ["räksmörgås"]
+    assert fields["file"] == ["notes.txt\nräksmörgås"]
 
 
 def test_parse_multipart_defaults_uploaded_files_to_utf8():
@@ -531,7 +542,7 @@ def test_parse_multipart_defaults_uploaded_files_to_utf8():
 
     fields = server_module._parse_multipart(content_type, body)
 
-    assert fields["file"] == ["blåbär"]
+    assert fields["file"] == ["notes.txt\nblåbär"]
 
 
 def test_parse_multipart_rejects_non_text_uploads():
@@ -562,7 +573,35 @@ def test_parse_multipart_normalises_the_uploaded_filename():
 
     fields = server_module._parse_multipart(content_type, body)
 
-    assert fields["filename"] == ["passwd"]
+    assert fields["file"] == ["passwd\nhunter2"]
+
+
+def test_parse_multipart_keeps_each_filename_with_its_file_body():
+    content_type, body = _multipart_form(
+        [
+            {"name": "file", "filename": "first.txt", "body": "one"},
+            {"name": "file", "filename": "second.txt", "body": "two"},
+        ]
+    )
+
+    fields = server_module._parse_multipart(content_type, body)
+
+    assert fields["file"] == ["first.txt\none", "second.txt\ntwo"]
+
+
+def test_parse_multipart_rejects_newlines_in_uploaded_filenames():
+    content_type, body = _multipart_form(
+        [
+            {
+                "name": "file",
+                "filename": "evil\nname.txt",
+                "body": "safe body",
+            },
+        ]
+    )
+
+    with pytest.raises(ValueError, match="malformed multipart"):
+        server_module._parse_multipart(content_type, body)
 
 
 def test_fence_block_extends_past_existing_backticks():
@@ -615,7 +654,7 @@ def test_parse_answer_keeps_textarea_only_answers_unchanged():
 def test_parse_answer_records_uploaded_files_with_their_name():
     assert server_module._parse_answer(
         OpenQuestion("Comment?", max_chars=100),
-        {"file": ["print('hi')"], "filename": ["notes.py"]},
+        {"file": ["notes.py\nprint('hi')"]},
     ) == "File notes.py:\nprint('hi')"
 
 
@@ -624,8 +663,7 @@ def test_parse_answer_combines_text_and_a_fenced_upload():
         OpenQuestion("Show your work", max_chars=200, fence="python"),
         {
             "value": ["python solution.py"],
-            "file": ["print('hi')"],
-            "filename": ["solution.py"],
+            "file": ["solution.py\nprint('hi')"],
         },
     ) == (
         "Text: python solution.py\n\n"
@@ -637,7 +675,7 @@ def test_parse_answer_combines_text_and_a_fenced_upload():
 def test_parse_answer_falls_back_to_upload_when_filename_is_missing():
     assert server_module._parse_answer(
         OpenQuestion("Comment?", max_chars=100),
-        {"file": ["hello"], "filename": [""]},
+        {"file": ["\nhello"]},
     ) == "File upload:\nhello"
 
 
@@ -647,8 +685,7 @@ def test_parse_answer_rejects_combined_open_answers_that_are_too_long():
             OpenQuestion("Comment?", max_chars=20),
             {
                 "value": ["1234567890"],
-                "file": ["abcdefghij"],
-                "filename": ["x.txt"],
+                "file": ["x.txt\nabcdefghij"],
             },
         )
 

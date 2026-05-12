@@ -71,8 +71,10 @@ def test_mc_question_requires_options():
 Open questions need the prompt and a character limit, and they can optionally
 carry a markdown fence language for uploaded file bodies.  The limit belongs to
 the question data because it affects both the HTTP form and the canonical hash.
-The fence hint also belongs here, but we omit it from the canonical JSON when
-it is unset so existing open-question hashes stay byte-for-byte stable.
+The fence hint also belongs here, but it has to be a single CommonMark info word:
+whitespace or backticks would change the structure of the generated fence rather
+than just its language tag.  We omit the hint from the canonical JSON when it is
+unset so existing open-question hashes stay byte-for-byte stable.
 
 <<classes>>=
 @dataclass(frozen=True)
@@ -91,6 +93,14 @@ class OpenQuestion:
     def __post_init__(self):
         if self.max_chars <= 0:
             raise ValueError("open questions need a positive character limit")
+        if self.fence is not None and (
+            not self.fence
+            or any(char.isspace() or char == "`" for char in self.fence)
+        ):
+            raise ValueError(
+                "markdown fence language must be a non-empty word "
+                "without whitespace or backticks"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly representation of the question."""
@@ -112,6 +122,12 @@ from impossible forms:
 def test_open_question_requires_positive_limit():
     with pytest.raises(ValueError):
         OpenQuestion("Feedback?", max_chars=0)
+
+
+@pytest.mark.parametrize("fence", ["", "python code", "python\n", "py`thon"])
+def test_open_question_rejects_malformed_fence_languages(fence):
+    with pytest.raises(ValueError, match="fence language"):
+        OpenQuestion("Q", fence=fence)
 
 
 def test_open_question_to_dict_omits_an_unset_fence():
