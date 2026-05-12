@@ -945,8 +945,10 @@ def test_view_command_prints_a_snapshot_once(tmp_path, monkeypatch):
 @
 
 The watcher intentionally owns the refresh loop rather than pushing that loop
-into the store.  The store supplies snapshots; the CLI decides how often to
-redraw and treats [[Ctrl-C]] as a normal way to leave the live display.
+into the store.  The display policy depends on the question kind.  Aggregate
+questions redraw because their meaning is in changing counts; open questions
+print the initial view once and then append only newly arrived answers, avoiding
+screen flutter while keeping a chronological transcript visible.
 
 <<cli setup>>=
 @cli.command()
@@ -958,29 +960,55 @@ def watch(
     """Show live results for ``prefix`` in the terminal."""
 
     active_store = _configured_store(store)
+    full_hash = _resolve_full_hash(active_store, prefix)
+    console = _result_console()
+    initial_results = active_store.results(full_hash)
 
     try:
-        while True:
-            typer.echo(CLEAR_SCREEN, nl=False)
-            _render_results_snapshot(active_store, prefix)
-            time.sleep(interval)
+        if initial_results["question"]["kind"] == "open":
+            _render_results(initial_results, console=console)
+            seen = len(initial_results["answers"])
+            while True:
+                time.sleep(interval)
+                results = active_store.results(full_hash)
+                answers = results["answers"]
+                if len(answers) > seen:
+                    _render_open_answers(
+                        answers[seen:],
+                        console=console,
+                        start=seen + 1,
+                    )
+                    seen = len(answers)
+        else:
+            while True:
+                typer.echo(CLEAR_SCREEN, nl=False)
+                _render_results(active_store.results(full_hash), console=console)
+                time.sleep(interval)
     except KeyboardInterrupt:
         return
 @
 
 The live command keeps refreshing until interrupted.  For multiple-choice
-questions the shared renderer still produces the count table, so a single
-iteration is enough to verify the command-loop contract.
+questions the shared renderer still produces the count table, so the redraw
+loop remains the right behaviour: a later answer changes the aggregate rather
+than adding a useful transcript line.
 
 <<test functions>>=
-def test_watch_command_prints_a_snapshot(tmp_path, monkeypatch):
+def test_watch_command_redraws_aggregate_questions(tmp_path, monkeypatch):
     runner = CliRunner()
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(MCQuestion("Pick one", ("A", "B")))
     full_hash = store.resolve(prefix)
     store.record(full_hash, 1)
+    sleeps = 0
+    monkeypatch.setattr("mentipy.cli.CLEAR_SCREEN", "[clear]")
 
     def stop_after_first_sleep(_interval):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 1:
+            store.record(full_hash, 0)
+            return
         raise KeyboardInterrupt
 
     monkeypatch.setattr("mentipy.cli.time.sleep", stop_after_first_sleep)
@@ -991,24 +1019,34 @@ def test_watch_command_prints_a_snapshot(tmp_path, monkeypatch):
     )
 
     assert result.exit_code == 0
+    assert result.stdout.count("[clear]") == 2
     assert "Responses: 1" in result.stdout
+    assert "Responses: 2" in result.stdout
+    assert "A: 1" in result.stdout
     assert "B: 1" in result.stdout
 @
 
-Open answers exercise the part of [[watch]] that matters for live qualitative
-feedback: the loop must delegate to the same Markdown renderer as [[view]] so
-formatting and answer separators stay consistent.
+Open answers exercise the append-only path.  The first snapshot gives context;
+after that, new answers are the only useful new information, so the command
+should not clear the terminal or reprint the header on each poll.
 
 <<test functions>>=
-def test_watch_command_renders_open_answers_with_markdown(tmp_path, monkeypatch):
+def test_watch_command_appends_new_open_answers(tmp_path, monkeypatch):
     runner = CliRunner()
     store, prefix = _store_with_markdown_answer(tmp_path)
+    full_hash = store.resolve(prefix)
     monkeypatch.setattr(
         "mentipy.cli.format_timestamp",
         lambda timestamp: "2026-05-12 13:30",
     )
+    sleeps = 0
 
     def stop_after_first_sleep(_interval):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 1:
+            store.record(full_hash, "```python\nprint('new')\n```")
+            return
         raise KeyboardInterrupt
 
     monkeypatch.setattr("mentipy.cli.time.sleep", stop_after_first_sleep)
@@ -1019,9 +1057,14 @@ def test_watch_command_renders_open_answers_with_markdown(tmp_path, monkeypatch)
     )
 
     assert result.exit_code == 0
+    assert CLEAR_SCREEN not in result.stdout
+    assert result.stdout.count("Responses:") == 1
+    assert "Responses: 1" in result.stdout
     assert "2026-05-12 13:30" in result.stdout
     assert "Answer 1" in result.stdout
+    assert "Answer 2" in result.stdout
     assert "important observation" in result.stdout
+    assert "print" in result.stdout
     assert "**important**" not in result.stdout
 @
 
