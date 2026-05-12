@@ -18,7 +18,9 @@ from __future__ import annotations
 <<imports>>=
 from contextlib import contextmanager
 from enum import Enum
+import logging
 import subprocess
+import threading
 from typing import Callable, Iterator
 import urllib.error
 import urllib.request
@@ -26,7 +28,8 @@ import urllib.request
 
 We keep the external echo service, the UPnP tuning, and the SSH startup,
 keepalive, and shutdown timings as named constants so the behaviour stays
-explicit in both tests and user-facing errors.
+explicit in both tests and user-facing errors.  The same bucket also holds a
+module logger so late SSH failures can reuse Python's normal stderr handling.
 
 <<constants>>=
 IPIFY_URL = "https://api.ipify.org"
@@ -37,6 +40,7 @@ UPNP_DESCRIPTION = "mentipy"
 SSH_KEEPALIVE_SECONDS = 30
 SSH_STARTUP_TIMEOUT = 1
 SSH_SHUTDOWN_TIMEOUT = 5
+LOGGER = logging.getLogger(__name__)
 @
 
 The CLI only needs a small enum and a typed failure mode.  The implementation
@@ -190,7 +194,7 @@ def expose_ssh(
         process = subprocess.Popen(
             command,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
         )
     except OSError as err:
@@ -199,11 +203,52 @@ def expose_ssh(
     try:
         returncode = process.wait(timeout=SSH_STARTUP_TIMEOUT)
     except subprocess.TimeoutExpired:
+        threading.Thread(
+            target=_drain_ssh_stderr,
+            args=(process,),
+            daemon=True,
+            name="mentipy-ssh-stderr",
+        ).start()
         return process, f"http://{host}:{remote_port}"
 
+    stderr_text = ""
+    if process.stderr is not None:
+        stderr_text = " ".join(
+            line.strip()
+            for line in process.stderr.read().splitlines()
+            if line.strip()
+        )
+    detail = f": {stderr_text}" if stderr_text else ""
     raise PublicExposureError(
-        f"the SSH reverse tunnel exited early (status {returncode})"
+        f"the SSH reverse tunnel exited early (status {returncode}){detail}"
     )
+@
+
+Once startup succeeds, [[ssh]] still reports later failures on stderr.  A small
+reader thread can forward those lines through the module logger, and the final
+[[wait()]] reaps the child when the tunnel dies.
+
+<<functions>>=
+def _drain_ssh_stderr(process: subprocess.Popen[str]) -> None:
+    stream = process.stderr
+    if stream is None:
+        return
+
+    try:
+        for line in stream:
+            stripped = line.rstrip()
+            if stripped:
+                LOGGER.error("ssh: %s", stripped)
+    finally:
+        returncode = process.poll()
+        if returncode is None:
+            try:
+                returncode = process.wait(timeout=SSH_SHUTDOWN_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                returncode = None
+        if returncode not in (None, 0):
+            LOGGER.error("ssh tunnel exited (status %s)", returncode)
+
 
 def _stop_ssh_process(process: subprocess.Popen[str]):
     if process.poll() is not None:
@@ -339,14 +384,18 @@ def test_expose_upnp_maps_the_requested_port(monkeypatch):
     )
 @
 
-The SSH path is pure stdlib, so the interesting cases are the command we spawn
-and the endpoint formats we accept.
+The SSH path is pure stdlib, so small fake processes can pin the command line,
+the startup diagnostics, and the long-lived stderr handling without talking to
+a real SSH server.
 
 <<test functions>>=
 def test_expose_ssh_starts_a_reverse_tunnel(monkeypatch):
     called = {}
 
     class FakeProcess:
+        def __init__(self):
+            self.stderr = io.StringIO("")
+
         def poll(self):
             return None
 
@@ -354,12 +403,23 @@ def test_expose_ssh_starts_a_reverse_tunnel(monkeypatch):
             called["startup_timeout"] = timeout
             raise public_module.subprocess.TimeoutExpired(["ssh"], timeout)
 
+    class FakeThread:
+        def __init__(self, *, target, args, daemon, name):
+            called["thread_target"] = target
+            called["thread_args"] = args
+            called["thread_daemon"] = daemon
+            called["thread_name"] = name
+
+        def start(self):
+            called["thread_started"] = True
+
     def fake_popen(command, **kwargs):
         called["command"] = command
         called["kwargs"] = kwargs
         return FakeProcess()
 
     monkeypatch.setattr(public_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(public_module.threading, "Thread", FakeThread)
 
     process, public_url = expose_ssh(8080, "alice@example.test:9000")
 
@@ -376,11 +436,25 @@ def test_expose_ssh_starts_a_reverse_tunnel(monkeypatch):
         f"ServerAliveInterval={SSH_KEEPALIVE_SECONDS}",
         "alice@example.test",
     ]
+    assert called["kwargs"]["stdout"] is public_module.subprocess.DEVNULL
+    assert called["kwargs"]["stderr"] is public_module.subprocess.PIPE
+    assert called["kwargs"]["text"] is True
     assert called["startup_timeout"] == SSH_STARTUP_TIMEOUT
+    assert called["thread_target"] is public_module._drain_ssh_stderr
+    assert called["thread_args"] == (process,)
+    assert called["thread_daemon"] is True
+    assert called["thread_name"] == "mentipy-ssh-stderr"
+    assert called["thread_started"] is True
 
 
 def test_expose_ssh_rejects_tunnels_that_exit_during_startup(monkeypatch):
     class FakeProcess:
+        def __init__(self):
+            self.stderr = io.StringIO(
+                "remote port forwarding failed\n"
+                "for listen port 9000\n"
+            )
+
         def wait(self, timeout):
             assert timeout == SSH_STARTUP_TIMEOUT
             return 255
@@ -391,8 +465,56 @@ def test_expose_ssh_rejects_tunnels_that_exit_during_startup(monkeypatch):
         lambda *_args, **_kwargs: FakeProcess(),
     )
 
-    with pytest.raises(PublicExposureError, match=r"status 255"):
+    with pytest.raises(PublicExposureError) as err:
         expose_ssh(8080, "alice@example.test:9000")
+
+    message = str(err.value)
+    assert "status 255" in message
+    assert "remote port forwarding failed for listen port 9000" in message
+    assert "\n" not in message
+
+
+def test_expose_ssh_logs_stderr_lines_after_startup(caplog):
+    class FakeProcess:
+        def __init__(self):
+            self.stderr = io.StringIO("first line\nsecond line\n")
+
+        def poll(self):
+            return 0
+
+    with caplog.at_level(logging.ERROR, logger="mentipy.public"):
+        public_module._drain_ssh_stderr(FakeProcess())
+
+    assert [record.message for record in caplog.records] == [
+        "ssh: first line",
+        "ssh: second line",
+    ]
+
+
+def test_drain_ssh_stderr_reaps_a_finished_process(caplog):
+    class FakeProcess:
+        def __init__(self):
+            self.stderr = io.StringIO("")
+            self.returncode = None
+            self.wait_timeouts = []
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout):
+            self.wait_timeouts.append(timeout)
+            self.returncode = 255
+            return self.returncode
+
+    process = FakeProcess()
+
+    with caplog.at_level(logging.ERROR, logger="mentipy.public"):
+        public_module._drain_ssh_stderr(process)
+
+    assert process.wait_timeouts == [SSH_SHUTDOWN_TIMEOUT]
+    assert [record.message for record in caplog.records] == [
+        "ssh tunnel exited (status 255)",
+    ]
 
 
 def test_expose_ssh_rejects_malformed_endpoints():
@@ -442,6 +564,8 @@ def test_expose_context_manager_runs_cleanup(monkeypatch):
 @
 
 <<test [[public.py]]>>=
+import io
+import logging
 import sys
 import types
 
