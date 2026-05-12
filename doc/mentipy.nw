@@ -503,19 +503,21 @@ Rendered in the document, that call becomes:
 \section{Choosing the Respondent URL}
 
 Real lecture sources will often keep the local server address in configuration
-instead of repeating it in every call.  Returning to the first [[mc()]] poll,
-the next example keeps the same helper, question, and QR settings, but omits
-[[base_url]] so that the fallback path becomes visible.
+instead of repeating it in every call.  The next example uses a fresh poll so
+the resolved URL lands on its own QR artifact instead of overwriting the file
+from \enquote{A Single-Choice Poll}, and omits [[base_url]] so that the
+fallback
+path becomes visible.
 
-\subsection{The Same Poll with the Auto-Resolved Default}
+\subsection{A Fresh Poll with the Auto-Resolved Default}
 
 \begin{pyblock}
 from mentipy.latex import mc
 
 print(
     mc(
-        "How confident do you feel about the course goals?",
-        ["Very confident", "Somewhat confident", "Not yet"],
+        "Ready for the next section?",
+        ["Yes", "Need a recap", "Not yet"],
         qr_dir="mentipy-obj",
         layout="article+qr",
     )
@@ -530,13 +532,17 @@ Rendered in the document, that call becomes:
 
   \textbf{What varies}: Whether [[base_url]] is passed explicitly.
 
-  \textbf{What stays invariant}: The [[mc()]] helper, the question text, the
-  options, the QR output directory, the QR format, and the article layout.
+  \textbf{What stays invariant}: The [[mc()]] helper, the single-choice shape
+  with three options, the QR output directory, the QR format, and the article
+  layout.
 
   \textbf{What this reveals}: When [[base_url]] is omitted, the helper reads
   the [[mentipy.base_url]] setting.  If that setting is absent, it resolves
   the current LAN address together with [[mentipy.port]], so the QR is a
-  compile-time placeholder that [[mentipy serve]] can refresh later.
+  compile-time placeholder that [[mentipy serve]] can refresh later.  We use a
+  fresh poll here because mentipy keys QR files by content-derived hash;
+  re-rendering the first example with a different [[base_url]] would overwrite
+  that example's QR file in place rather than producing a second one.
 }
 
 \section{Serving and Recompiling}
