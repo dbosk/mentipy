@@ -19,6 +19,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from enum import Enum
 import logging
+import socket
 import subprocess
 import threading
 from typing import Callable, Iterator
@@ -140,10 +141,11 @@ audience-facing URL should contain.
 
 Starting the child process is not enough to trust that URL.  [[ssh]] still has
 to authenticate and install the reverse forward, and
-[[ExitOnForwardFailure=yes]] reports setup problems by exiting the child.  We
-therefore wait through a short startup grace period: a healthy tunnel keeps
-running, while a failed setup dies early and becomes a user-facing
-[[PublicExposureError]] instead of a dead printed link.
+[[ExitOnForwardFailure=yes]] reports setup problems by exiting the child.  Even
+after that grace period, the SSH server can still keep the reverse port on
+[[127.0.0.1]] or behind a firewall.  We therefore wait through a short
+startup grace period and then probe the advertised [[host:remote_port]] before
+we print a public URL.
 
 <<functions>>=
 def _parse_ssh_endpoint(ssh_endpoint: str) -> tuple[str, str, int]:
@@ -170,6 +172,36 @@ def _parse_ssh_endpoint(ssh_endpoint: str) -> tuple[str, str, int]:
         raise PublicExposureError("ssh tunnel port must be positive")
 
     return target, host, remote_port
+
+@
+
+The startup grace period only tells us that the SSH client stayed alive.  A
+reverse forward can still be useless if [[sshd]] leaves it on [[127.0.0.1]] or
+if a host firewall blocks the chosen port.  A short TCP probe back to
+[[host:remote_port]] catches those server-side failures before we print the
+URL.  The probe only needs the handshake: [[sshd]] accepts first and only then
+opens the channel back to [[localhost:local_port]], so the local HTTP server
+does not need to be listening yet.
+
+<<constants>>=
+SSH_PREFLIGHT_TIMEOUT = 5
+@
+
+<<functions>>=
+def _preflight_ssh_tunnel(host: str, remote_port: int) -> None:
+    """Verify that ``host:remote_port`` accepts TCP from this machine."""
+
+    try:
+        with socket.create_connection(
+            (host, remote_port), timeout=SSH_PREFLIGHT_TIMEOUT
+        ):
+            return
+    except OSError as err:
+        raise PublicExposureError(
+            f"could not reach {host}:{remote_port} from this machine; "
+            "check that sshd has 'GatewayPorts yes' and that the host "
+            "firewall allows inbound TCP on the forwarded port"
+        ) from err
 
 
 def expose_ssh(
@@ -203,6 +235,11 @@ def expose_ssh(
     try:
         returncode = process.wait(timeout=SSH_STARTUP_TIMEOUT)
     except subprocess.TimeoutExpired:
+        try:
+            _preflight_ssh_tunnel(host, remote_port)
+        except PublicExposureError:
+            _stop_ssh_process(process)
+            raise
         threading.Thread(
             target=_drain_ssh_stderr,
             args=(process,),
@@ -392,6 +429,15 @@ a real SSH server.
 def test_expose_ssh_starts_a_reverse_tunnel(monkeypatch):
     called = {}
 
+    class FakeConnection:
+        def __enter__(self):
+            called["connection_entered"] = True
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            called["connection_exited"] = True
+            return False
+
     class FakeProcess:
         def __init__(self):
             self.stderr = io.StringIO("")
@@ -418,7 +464,14 @@ def test_expose_ssh_starts_a_reverse_tunnel(monkeypatch):
         called["kwargs"] = kwargs
         return FakeProcess()
 
+    def fake_create_connection(address, timeout):
+        called["connection"] = (address, timeout)
+        return FakeConnection()
+
     monkeypatch.setattr(public_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        public_module.socket, "create_connection", fake_create_connection
+    )
     monkeypatch.setattr(public_module.threading, "Thread", FakeThread)
 
     process, public_url = expose_ssh(8080, "alice@example.test:9000")
@@ -440,11 +493,185 @@ def test_expose_ssh_starts_a_reverse_tunnel(monkeypatch):
     assert called["kwargs"]["stderr"] is public_module.subprocess.PIPE
     assert called["kwargs"]["text"] is True
     assert called["startup_timeout"] == SSH_STARTUP_TIMEOUT
+    assert called["connection"] == (("example.test", 9000), SSH_PREFLIGHT_TIMEOUT)
+    assert called["connection_entered"] is True
+    assert called["connection_exited"] is True
     assert called["thread_target"] is public_module._drain_ssh_stderr
     assert called["thread_args"] == (process,)
     assert called["thread_daemon"] is True
     assert called["thread_name"] == "mentipy-ssh-stderr"
     assert called["thread_started"] is True
+
+
+def test_expose_ssh_succeeds_when_preflight_connects(monkeypatch):
+    called = {}
+
+    class FakeConnection:
+        def __enter__(self):
+            called["connection_entered"] = True
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            called["connection_exited"] = True
+            return False
+
+    class FakeProcess:
+        def __init__(self):
+            self.stderr = io.StringIO("")
+
+        def wait(self, timeout):
+            raise public_module.subprocess.TimeoutExpired(["ssh"], timeout)
+
+    class FakeThread:
+        def __init__(self, *, target, args, daemon, name):
+            called["thread_target"] = target
+            called["thread_args"] = args
+            called["thread_daemon"] = daemon
+            called["thread_name"] = name
+
+        def start(self):
+            called["thread_started"] = True
+
+    def fake_create_connection(address, timeout):
+        called["connection"] = (address, timeout)
+        return FakeConnection()
+
+    monkeypatch.setattr(
+        public_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: FakeProcess(),
+    )
+    monkeypatch.setattr(
+        public_module.socket, "create_connection", fake_create_connection
+    )
+    monkeypatch.setattr(public_module.threading, "Thread", FakeThread)
+
+    process, public_url = expose_ssh(8080, "alice@example.test:9000")
+
+    assert process.__class__.__name__ == "FakeProcess"
+    assert public_url == "http://example.test:9000"
+    assert called["connection"] == (("example.test", 9000), SSH_PREFLIGHT_TIMEOUT)
+    assert called["connection_entered"] is True
+    assert called["connection_exited"] is True
+    assert called["thread_target"] is public_module._drain_ssh_stderr
+    assert called["thread_args"] == (process,)
+    assert called["thread_daemon"] is True
+    assert called["thread_name"] == "mentipy-ssh-stderr"
+    assert called["thread_started"] is True
+
+
+def test_expose_ssh_raises_when_preflight_times_out(monkeypatch):
+    called = {}
+
+    class FakeProcess:
+        def __init__(self):
+            self.stderr = io.StringIO("")
+
+        def poll(self):
+            if called.get("terminated"):
+                return 0
+            return None
+
+        def wait(self, timeout):
+            called.setdefault("wait_timeouts", []).append(timeout)
+            if timeout == SSH_STARTUP_TIMEOUT:
+                raise public_module.subprocess.TimeoutExpired(["ssh"], timeout)
+            return 0
+
+        def terminate(self):
+            called["terminated"] = True
+
+        def kill(self):
+            called["killed"] = True
+
+    class FakeThread:
+        def __init__(self, **_kwargs):
+            called["thread_created"] = True
+
+        def start(self):
+            called["thread_started"] = True
+
+    def fake_create_connection(address, timeout):
+        called["connection"] = (address, timeout)
+        raise public_module.socket.timeout("timed out")
+
+    monkeypatch.setattr(
+        public_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: FakeProcess(),
+    )
+    monkeypatch.setattr(
+        public_module.socket, "create_connection", fake_create_connection
+    )
+    monkeypatch.setattr(public_module.threading, "Thread", FakeThread)
+
+    with pytest.raises(PublicExposureError) as err:
+        expose_ssh(8080, "alice@example.test:9000")
+
+    assert "GatewayPorts yes" in str(err.value)
+    assert "firewall" in str(err.value)
+    assert called["connection"] == (("example.test", 9000), SSH_PREFLIGHT_TIMEOUT)
+    assert called["terminated"] is True
+    assert called["wait_timeouts"] == [SSH_STARTUP_TIMEOUT, SSH_SHUTDOWN_TIMEOUT]
+    assert "thread_created" not in called
+    assert "killed" not in called
+
+
+def test_expose_ssh_raises_when_preflight_refused(monkeypatch):
+    called = {}
+
+    class FakeProcess:
+        def __init__(self):
+            self.stderr = io.StringIO("")
+
+        def poll(self):
+            if called.get("terminated"):
+                return 0
+            return None
+
+        def wait(self, timeout):
+            called.setdefault("wait_timeouts", []).append(timeout)
+            if timeout == SSH_STARTUP_TIMEOUT:
+                raise public_module.subprocess.TimeoutExpired(["ssh"], timeout)
+            return 0
+
+        def terminate(self):
+            called["terminated"] = True
+
+        def kill(self):
+            called["killed"] = True
+
+    class FakeThread:
+        def __init__(self, **_kwargs):
+            called["thread_created"] = True
+
+        def start(self):
+            called["thread_started"] = True
+
+    def fake_create_connection(address, timeout):
+        called["connection"] = (address, timeout)
+        raise ConnectionRefusedError("refused")
+
+    monkeypatch.setattr(
+        public_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: FakeProcess(),
+    )
+    monkeypatch.setattr(
+        public_module.socket, "create_connection", fake_create_connection
+    )
+    monkeypatch.setattr(public_module.threading, "Thread", FakeThread)
+
+    with pytest.raises(PublicExposureError) as err:
+        expose_ssh(8080, "alice@example.test:9000")
+
+    assert "GatewayPorts yes" in str(err.value)
+    assert "firewall" in str(err.value)
+    assert called["connection"] == (("example.test", 9000), SSH_PREFLIGHT_TIMEOUT)
+    assert called["terminated"] is True
+    assert called["wait_timeouts"] == [SSH_STARTUP_TIMEOUT, SSH_SHUTDOWN_TIMEOUT]
+    assert "thread_created" not in called
+    assert "killed" not in called
 
 
 def test_expose_ssh_rejects_tunnels_that_exit_during_startup(monkeypatch):

@@ -887,7 +887,11 @@ mentipy config get public_base_url
 ```
 
 These settings are inert by themselves, but they matter once you choose a public
-exposure mode.
+exposure mode.  SSH mode still depends on the remote server exposing the
+forwarded port publicly.  In practice that usually means [[GatewayPorts yes]]
+on the SSH server and a firewall rule that allows inbound TCP on the chosen
+port; otherwise [[mentipy serve --public ssh]] fails fast instead of printing a
+dead URL.
 @
 
 The final shell step keeps to local serving, but it is long enough to reveal the

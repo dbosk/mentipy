@@ -434,6 +434,11 @@ mentipy serve --public ssh
 \end{minted}
 
 The render step only needs the public URL that the QR code should embed.
+The runtime tunnel still depends on the SSH server exposing that forwarded
+port to the outside world: OpenSSH commonly needs [[GatewayPorts yes]], and
+the host firewall must allow inbound TCP on the chosen remote port.  If either
+side is missing, [[mentipy serve --public ssh]] now stops with a diagnostic
+instead of printing a dead URL.
 
 \ltnote{%
   \textbf{Variation pattern}: Generalization
@@ -670,6 +675,13 @@ The SSH mode needs one extra configuration value:
 mentipy config set ssh_tunnel danielb@server.tld:8080
 mentipy serve --store ./mentipy.json --public ssh
 \end{minted}
+
+For that tunnel to be public, the SSH server must accept the remote forward on
+a public interface and allow inbound TCP to the chosen port.  In practice this
+often means [[GatewayPorts yes]] in [[sshd_config]] plus a host-firewall rule
+for the chosen port.  When those server-side pieces are missing,
+[[mentipy serve --public ssh]] now fails fast and tells the lecturer what to
+check.
 
 The polling server is intentionally simple.  Anyone with the URL can submit
 answers and, if [[--results]] is enabled, watch the live results page.  That is
