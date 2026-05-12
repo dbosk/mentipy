@@ -63,8 +63,9 @@ PAGE_TEMPLATE = Template(
 @
 
 The stylesheet starts from the phone layout and adds one desktop-scale-up
-media query.  That keeps the common classroom path readable on narrow screens
-while still restoring the denser multi-column layout when enough width exists.
+media query.  That keeps the common case --- a student answering on a phone
+--- readable on narrow screens, while still restoring the denser
+multi-column layout when enough width exists.
 
 <<constants>>=
 STYLE_CSS = """
@@ -1282,9 +1283,14 @@ def test_server_routes_return_expected_status_codes(live_server):
     response, body = _request(port, "GET", f"/{prefix}/results.json")
     assert response.status == 200
     assert json.loads(body)["url_prefix"] == prefix
+@
 
+The viewport assertion guards the regression we are fixing here: without
+[[width=device-width]], phone browsers fall back to a desktop-sized layout
+viewport and shrink the form.
 
-def test_page_includes_viewport_meta(live_server):
+<<test functions>>=
+def test_results_page_includes_viewport_meta(live_server):
     _store, prefix, port = live_server
 
     response, body = _request(port, "GET", f"/{prefix}/results")
@@ -1292,8 +1298,13 @@ def test_page_includes_viewport_meta(live_server):
     assert response.status == 200
     assert 'name="viewport"' in body
     assert 'width=device-width' in body
+@
 
+The phone-first stylesheet is only meaningful if the desktop scale-up
+media query actually reaches the browser, so we assert the route serves a
+stylesheet that contains a [[min-width]] breakpoint.
 
+<<test functions>>=
 def test_style_css_serves_mobile_breakpoint(live_server):
     _store, _prefix, port = live_server
 
