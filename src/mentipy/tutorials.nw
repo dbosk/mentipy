@@ -308,7 +308,9 @@ command-line change is the new `--multi` flag.
 @
 
 Once the learner has separated one-answer from many-answer polls, we can widen
-the contrast to free text.
+the contrast to free text.  A coding-oriented open question also shows why the
+new upload fence matters: the response is still free text, but an uploaded file
+can now preserve its code-block shape on the results page.
 
 <<question kinds steps>>=
 # Switch to free text
@@ -316,20 +318,23 @@ the contrast to free text.
 ```tutorial-step
 required_patterns:
   - mentipy render open
-  - --max-chars 160
-  - What is still unclear?
+  - --max-chars 2000
+  - --fence python
+  - Write a hello-world program in Python
   - diff -u multi.tex open.tex
   - "Choose one or more:"
   - Free-text answer
-hint: "Move away from listed options entirely and bound the answer by length
-  instead."
+hint: "Move away from listed options entirely, raise the text limit, and add
+  the fence hint for a code-oriented upload."
 ```
 
 Render an open-text question:
 
 ```sh
-mentipy render open "What is still unclear?" \
-  --max-chars 160 \
+mentipy render open \
+  "Write a hello-world program in Python and show the command that runs it." \
+  --max-chars 2000 \
+  --fence python \
   --store ./mentipy.json \
   --base-url http://localhost:8080 \
   --layout article > open.tex
@@ -337,7 +342,8 @@ diff -u multi.tex open.tex
 ```
 
 Instead of choosing one of the listed options, the respondent now writes free
-text up to `--max-chars 160`.
+text up to `--max-chars 2000`.  The added `--fence python` hint also tells the
+results page to wrap an uploaded file body in a Python-tagged Markdown fence.
 @
 
 The last rendering contrast narrows the free response again, but this time into

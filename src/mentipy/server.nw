@@ -338,6 +338,14 @@ def _parse_multipart(
             )
 
     return fields
+@
+
+Markdown fences need one extra care point: uploaded source files may already
+contain backticks.  We therefore choose a closing fence that is strictly longer
+than the longest backtick run in the body, which is the CommonMark rule that
+keeps the outer fence from terminating early.
+
+<<functions>>=
 
 
 def _fence_block(fence_lang: str | None, body: str) -> str:
@@ -355,6 +363,15 @@ def _fence_block(fence_lang: str | None, body: str) -> str:
 
     fence = "`" * max(3, longest_run + 1)
     return f"{fence}{fence_lang}\n{body}\n{fence}"
+@
+
+The request-size cap has to cover two different shapes.  Ordinary multiple
+choice and scale posts are tiny, so we keep a [[64 * 1024]] floor that accepts
+them without looking at question-specific limits.  Open questions can carry
+larger text bodies, so we add a [[* 4]] multiplier for the UTF-8 worst case and
+leave a little multipart framing slack on top.
+
+<<functions>>=
 
 
 def _max_request_body(question) -> int:
@@ -363,6 +380,15 @@ def _max_request_body(question) -> int:
         max_chars * 4 + MULTIPART_SLACK_BYTES,
         MIN_FORM_BODY_BYTES,
     )
+@
+
+The final parser step normalises all question kinds into the values the store
+records.  For open questions, that means combining the textarea text and an
+optional uploaded file into one string.  We keep the uploaded basename but strip
+any path components so a browser or crafted client cannot smuggle [[../]] into
+the recorded label.
+
+<<functions>>=
 
 
 def _parse_answer(question, fields: dict[str, list[str]]) -> Any:
@@ -645,6 +671,15 @@ def _render_index(store: Store) -> str:
         return "<p>No questions have been registered yet.</p>"
 
     return "<ul>" + "".join(items) + "</ul>"
+@
+
+The form renderer mirrors the parser's input policy.  Open questions keep both
+the textarea and file picker visible because respondents may need a short note
+plus an uploaded artifact.  The [[accept]] list is only a browser hint, but it
+nudges the picker toward the text-like formats that [[_parse_multipart()]] can
+actually decode and that the results page can show meaningfully.
+
+<<functions>>=
 
 
 def _render_form(store: Store, full_hash: str) -> str:

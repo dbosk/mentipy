@@ -598,6 +598,51 @@ def render_open(
     )
 
 
+@
+
+The optional [[--fence]] flag keeps the CLI and LaTeX helper in sync.  A
+lecturer can say [[--fence python]] when the question expects a code upload,
+and uploaded files will later be wrapped in a Markdown fence on the results
+page so the renderer emits a language-tagged [[<code class="language-...">]]
+block.
+
+Like the other render subcommands, [[open]] only has to build the question,
+delegate the real formatting work, and persist the metadata that later layers
+use.  The CLI test therefore only needs to verify that [[--fence]] reaches the
+stored [[OpenQuestion]].
+
+<<test functions>>=
+def test_render_open_threads_the_fence_option_into_the_question(tmp_path):
+    runner = CliRunner()
+    store_path = tmp_path / "mentipy.json"
+
+    result = runner.invoke(
+        cli,
+        [
+            "render",
+            "open",
+            "Show your code",
+            "--max-chars",
+            "5000",
+            "--fence",
+            "python",
+            "--store",
+            str(store_path),
+            "--base-url",
+            "http://example.test:8080",
+            "--qr-dir",
+            str(tmp_path / DEFAULT_QR_DIR),
+        ],
+    )
+
+    assert result.exit_code == 0
+    [entry] = Store(store_path).all_questions()
+    question = Store(store_path).question(entry["hash"])
+    assert question.fence == "python"
+@
+
+
+<<cli setup>>=
 @render_cli.command("scale")
 def render_scale(
     text: str,
@@ -633,41 +678,6 @@ def render_scale(
             ),
         )
     )
-@
-
-The optional [[--fence]] flag keeps the CLI and LaTeX helper in sync.  A
-lecturer can say [[--fence python]] when the question expects a code upload, and
-uploaded files will later render as syntax-highlighted blocks on the results
-page.
-
-<<test functions>>=
-def test_render_open_threads_the_fence_option_into_the_question(tmp_path):
-    runner = CliRunner()
-    store_path = tmp_path / "mentipy.json"
-
-    result = runner.invoke(
-        cli,
-        [
-            "render",
-            "open",
-            "Show your code",
-            "--max-chars",
-            "5000",
-            "--fence",
-            "python",
-            "--store",
-            str(store_path),
-            "--base-url",
-            "http://example.test:8080",
-            "--qr-dir",
-            str(tmp_path / DEFAULT_QR_DIR),
-        ],
-    )
-
-    assert result.exit_code == 0
-    [entry] = Store(store_path).all_questions()
-    question = Store(store_path).question(entry["hash"])
-    assert question.fence == "python"
 @
 
 
@@ -1290,8 +1300,9 @@ def test_serve_command_closes_the_public_exposure_context(tmp_path, monkeypatch)
     assert state == {"entered": True, "closed": True}
 @
 
-The render subcommands should stay as thin as the rest of the CLI: they build a
-store, delegate to the LaTeX helpers, and print the returned fragment.
+The remaining render-subcommand tests pin the shared CLI wiring: the commands
+should print the generated fragment, honor the layout and environment flags,
+and mention the relevant config keys in help.
 
 <<test functions>>=
 def test_render_mc_prints_slide_latex_and_writes_the_question(tmp_path):

@@ -77,7 +77,11 @@ it is unset so existing open-question hashes stay byte-for-byte stable.
 <<classes>>=
 @dataclass(frozen=True)
 class OpenQuestion:
-    """An open free-text question."""
+    """An open-text question with a character cap.
+
+    The optional fence language tags uploaded file bodies as
+    fenced Markdown.
+    """
 
     text: str
     max_chars: int = 280
@@ -176,6 +180,11 @@ def test_scale_question_requires_ordered_bounds():
 The rest of the system works on a question union.  The helper that rebuilds a
 question from stored JSON is the bridge between the typed model and the JSON
 registry.
+
+Stored JSON is less typed than the in-memory dataclasses.  We therefore coerce
+[[fence]] back to [[str]] when it is present so older or hand-edited store
+files still rebuild into the same [[OpenQuestion]] shape as freshly rendered
+questions.
 
 <<classes>>=
 Question = MCQuestion | OpenQuestion | ScaleQuestion

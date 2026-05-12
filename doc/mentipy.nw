@@ -356,6 +356,91 @@ Included in the document, that output compiles to:
   choice even when the names differ.
 }
 
+\subsection{An Open-Text Poll for a Code Snippet}
+
+A coding-oriented prompt benefits from the upload form: a respondent can
+attach the file they wrote instead of pasting it into a textarea on a phone.
+Passing [[fence="python"]] tells [[mentipy]] to wrap uploaded file bodies in a
+Python-tagged Markdown fence, so the results page renders the upload as a
+language-tagged code block.
+
+\begin{pyblock}
+from mentipy.latex import open_text
+
+print(
+    open_text(
+        "Write a hello-world program in Python and show the command that "
+        "runs it.",
+        max_chars=2000,
+        fence="python",
+        base_url="http://localhost:8080",
+        qr_dir="mentipy-obj",
+        layout="article+qr",
+    )
+)
+\end{pyblock}
+
+Rendered in the document, that call becomes:
+\begin{center}\printpythontex\end{center}
+
+The CLI keeps the same shape and adds [[--fence]] to match the helper:
+
+\begin{minted}{text}
+mentipy render open \
+  "Write a hello-world program in Python and show the command that runs it." \
+  --max-chars 2000 --fence python \
+  --base-url http://localhost:8080 --qr-dir mentipy-obj --layout article+qr
+\end{minted}
+
+\begin{pycode}
+print(
+    render_cli(
+        [
+            "render",
+            "open",
+            "Write a hello-world program in Python and show the command "
+            "that runs it.",
+            "--max-chars",
+            "2000",
+            "--fence",
+            "python",
+            "--base-url",
+            "http://localhost:8080",
+            "--qr-dir",
+            "mentipy-obj",
+            "--layout",
+            "article+qr",
+        ]
+    )
+)
+\end{pycode}
+\saveprintpythontex{cli-open-fence}
+
+The command prints the following LaTeX:
+\useprintpythontex[verbatim]{cli-open-fence}
+
+Included in the document, that output compiles to:
+\begin{center}\useprintpythontex{cli-open-fence}\end{center}
+
+\ltnote{%
+  \textbf{Variation pattern}: Generalization
+
+  \textbf{What varies}: That the open-text helper now also carries a fence
+  language hint ([[fence="python"]] on the Python side, [[--fence python]] on
+  the CLI).
+
+  \textbf{What stays invariant}: The Python-vs-CLI public-name
+  correspondence between [[open_text]] and [[open]], the question prompt, the
+  base URL, the QR directory, and the layout.
+
+  \textbf{What this reveals}: The optional fence argument slots into the same
+  authoring-path correspondence already established for [[max_chars]] /
+  [[--max-chars]].  When a respondent uploads a file, [[mentipy]] wraps the
+  body in a fenced Markdown block tagged with the fence language, so the
+  results page renders the upload as a language-tagged code block rather than
+  as raw prose.
+}
+
 \subsection{Discovering the Public Names}
 
 The names are easy to discover from the interfaces themselves.  On the CLI
