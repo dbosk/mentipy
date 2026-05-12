@@ -36,6 +36,8 @@ from pathlib import Path
 import segno
 @
 
+\section{Generating QR artifacts}
+
 The QR output should be readable from a projected slide, so we keep the chosen
 error correction level and pixel scale as named constants.
 
@@ -174,8 +176,12 @@ _TEX_ESCAPES = {
 }
 @
 
-The original tests pin two properties we rely on downstream: that the PDF is
-real, and that regenerating the same QR code is deterministic.
+\section{QR artifact contracts}
+
+The first downstream dependency is mundane but important: LaTeX and browsers
+expect an actual file, not merely a successful return value.  Checking the PDF
+header catches regressions where [[segno]] was called with the wrong target or
+where the parent-directory setup silently failed.
 
 <<test functions>>=
 def test_make_qr_writes_a_pdf(tmp_path):
@@ -184,8 +190,13 @@ def test_make_qr_writes_a_pdf(tmp_path):
     assert output.exists()
     assert output.stat().st_size > 0
     assert output.read_bytes()[:5] == b"%PDF-"
+@
 
+Regeneration may run several times for the same question as the public address
+changes or the document is rebuilt.  For a fixed URL, however, the artifact
+should be stable; otherwise a rebuild alone would create needless file churn.
 
+<<test functions>>=
 def test_make_qr_is_deterministic_for_the_same_url(tmp_path):
     first = make_qr("http://localhost:8080/abcd", tmp_path / "first.pdf")
     second = make_qr("http://localhost:8080/abcd", tmp_path / "second.pdf")
@@ -246,8 +257,13 @@ def test_make_qr_sidecar_escapes_special_chars_in_url(tmp_path):
     assert "poll\\_42" in contents
     assert "lang=en\\&debug=1" in contents
     assert "\\#answer" in contents
+@
 
+Runtime QR regeneration writes to an absolute path, but the document should
+keep including the relative path it was compiled with.  This test fixes that
+distinction so a future refactor does not collapse the two path roles.
 
+<<test functions>>=
 def test_make_qr_sidecar_can_keep_a_relative_include_path(tmp_path):
     qr_subpath = Path(DEFAULT_QR_DIR).as_posix()
     output = make_qr(

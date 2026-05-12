@@ -40,6 +40,8 @@ from mentipy.questions import MCQuestion, OpenQuestion, ScaleQuestion
 from mentipy.store import Store
 @
 
+\section{Page shell and shared helpers}
+
 Using [[string.Template]] keeps the HTML easy to read without introducing a
 separate templating engine.
 
@@ -279,7 +281,7 @@ def _ambiguous_matches(store: Store, prefix: str) -> list[dict[str, Any]]:
     return matches
 @
 
-\subsection{Parsing submitted answers}
+\section{Parsing submitted answers}
 
 The HTTP handler receives raw form fields from the network, not trusted
 Python values.  We validate them in [[_parse_answer()]] so
@@ -511,8 +513,14 @@ def _multipart_form(parts, *, boundary="Boundary42"):
         f"multipart/form-data; boundary={boundary}",
         b"".join(chunks),
     )
+@
+
+The multipart parser must keep ordinary fields and uploaded file fields in the
+same shape that URL-encoded parsing returns.  A single test with both field
+kinds catches accidental divergence between the two request encodings.
 
 
+<<test functions>>=
 def test_parse_multipart_extracts_regular_and_file_fields():
     content_type, body = _multipart_form(
         [
@@ -529,8 +537,14 @@ def test_parse_multipart_extracts_regular_and_file_fields():
 
     assert fields["value"] == ["run python solution.py"]
     assert fields["file"] == ["solution.py\nprint('hi')\n"]
+@
+
+Uploaded text files rarely include enough metadata to rely on clients being
+consistent.  We therefore test both an explicit charset and the UTF-8 fallback
+that ordinary browser uploads use.
 
 
+<<test functions>>=
 def test_parse_multipart_respects_an_explicit_charset():
     content_type, body = _multipart_form(
         [
@@ -563,8 +577,13 @@ def test_parse_multipart_defaults_uploaded_files_to_utf8():
     fields = server_module._parse_multipart(content_type, body)
 
     assert fields["file"] == ["notes.txt\nblåbär"]
+@
+
+When the bytes are not valid text, failing fast is safer than recording
+replacement characters that would make the student's answer unrecoverable.
 
 
+<<test functions>>=
 def test_parse_multipart_rejects_non_text_uploads():
     content_type, body = _multipart_form(
         [
@@ -578,8 +597,14 @@ def test_parse_multipart_rejects_non_text_uploads():
 
     with pytest.raises(ValueError, match="save it as UTF-8"):
         server_module._parse_multipart(content_type, body)
+@
+
+File names are displayed with uploaded answers, so they are treated as labels,
+not paths.  These tests pin the basename rule and the one-to-one pairing between
+each uploaded body and its own filename.
 
 
+<<test functions>>=
 def test_parse_multipart_normalises_the_uploaded_filename():
     content_type, body = _multipart_form(
         [
@@ -607,8 +632,13 @@ def test_parse_multipart_keeps_each_filename_with_its_file_body():
     fields = server_module._parse_multipart(content_type, body)
 
     assert fields["file"] == ["first.txt\none", "second.txt\ntwo"]
+@
+
+Newlines in filenames would corrupt the internal [[filename\nbody]] encoding, so
+the parser rejects them instead of trying to repair the label.
 
 
+<<test functions>>=
 def test_parse_multipart_rejects_newlines_in_uploaded_filenames():
     content_type, body = _multipart_form(
         [
@@ -622,8 +652,14 @@ def test_parse_multipart_rejects_newlines_in_uploaded_filenames():
 
     with pytest.raises(ValueError, match="malformed multipart"):
         server_module._parse_multipart(content_type, body)
+@
+
+The fence helper exists because uploaded code may itself contain Markdown code
+fences.  The test uses a body with an existing triple-backtick run so the outer
+fence has to grow.
 
 
+<<test functions>>=
 def test_fence_block_extends_past_existing_backticks():
     fenced = server_module._fence_block(
         "python",
@@ -632,8 +668,13 @@ def test_fence_block_extends_past_existing_backticks():
 
     assert fenced.startswith("````python\n")
     assert fenced.endswith("\n````")
+@
+
+Multiple-choice validation keeps both single-select and multi-select answers
+inside the rendered option range.
 
 
+<<test functions>>=
 def test_parse_answer_rejects_invalid_multiple_choice_indices():
     with pytest.raises(ValueError):
         server_module._parse_answer(
@@ -646,24 +687,40 @@ def test_parse_answer_rejects_invalid_multiple_choice_indices():
             MCQuestion("Pick one", ("A", "B"), multi=True),
             {"value": ["0", "2"]},
         )
+@
+
+A multi-select poll with no selected checkboxes is different from a valid empty
+list, because the form never presents an explicit ":none" option.
 
 
+<<test functions>>=
 def test_parse_answer_requires_a_choice_for_multi_select():
     with pytest.raises(ValueError):
         server_module._parse_answer(
             MCQuestion("Pick one", ("A", "B"), multi=True),
             {},
         )
+@
+
+Repeated checkbox values would let a crafted request count one respondent more
+than once for the same option, so duplicates are rejected before storage.
 
 
+<<test functions>>=
 def test_parse_answer_rejects_duplicate_multi_select_indices():
     with pytest.raises(ValueError):
         server_module._parse_answer(
             MCQuestion("Pick one", ("A", "B"), multi=True),
             {"value": ["1", "1"]},
         )
+@
+
+Open answers have three useful shapes: just pasted text, just an uploaded file,
+or both.  The next tests pin the stored text for each shape so the results page
+can render a predictable markdown source.
 
 
+<<test functions>>=
 def test_parse_answer_keeps_textarea_only_answers_unchanged():
     assert server_module._parse_answer(
         OpenQuestion("Comment?", max_chars=100),
@@ -697,8 +754,13 @@ def test_parse_answer_falls_back_to_upload_when_filename_is_missing():
         OpenQuestion("Comment?", max_chars=100),
         {"file": ["\nhello"]},
     ) == "File upload:\nhello"
+@
+
+The length cap is applied after pasted text and upload content have been
+combined, because the store records that combined value as the answer.
 
 
+<<test functions>>=
 def test_parse_answer_rejects_combined_open_answers_that_are_too_long():
     with pytest.raises(ValueError, match="text answer too long"):
         server_module._parse_answer(
@@ -708,6 +770,9 @@ def test_parse_answer_rejects_combined_open_answers_that_are_too_long():
                 "file": ["x.txt\nabcdefghij"],
             },
         )
+@
+
+\section{Rendering question forms}
 
 <<functions>>=
 
@@ -1092,16 +1157,27 @@ def test_open_answer_renders_basic_markdown():
     assert "<strong>bold</strong>" in rendered
     assert "<ul>" in rendered
     assert "<li>a</li>" in rendered
+@
+
+Raw HTML is the most direct XSS path, so this test pins the renderer to escaped
+text rather than emitted tags.
 
 
+<<test functions>>=
 def test_open_answer_escapes_raw_html_tags():
     rendered = server_module._render_open_answer_markdown(
         "<script>alert(1)</script>"
     )
     assert "<script>alert" not in rendered
     assert "&lt;script&gt;" in rendered
+@
+
+Link policy is intentionally allow-list based: active schemes are stripped,
+ordinary [[https]] links survive, and relative links are rejected because the
+polling server has no stable document root for them.
 
 
+<<test functions>>=
 def test_open_answer_strips_javascript_url():
     rendered = server_module._render_open_answer_markdown(
         "[click](javascript:alert(1))"
@@ -1121,8 +1197,13 @@ def test_open_answer_blocks_relative_url():
         "[here](relative/path)"
     )
     assert 'href="relative/path"' not in rendered
+@
+
+Images are disabled independently of link validation because an image element
+would make every lecturer viewing the results fetch a respondent-chosen URL.
 
 
+<<test functions>>=
 def test_open_answer_disables_remote_images():
     rendered = server_module._render_open_answer_markdown(
         "![tracking pixel](https://attacker.example/pixel.png)"
@@ -1231,6 +1312,8 @@ def _json_results(
     )
 @
 
+\section{Serving and routing}
+
 The custom server class enables threading, keeps worker threads from blocking
 shutdown, and centralizes request-thread error reporting.
 
@@ -1294,249 +1377,283 @@ def _build_handler(store: Store, *, public_results: bool = False):
     class MentipyHandler(BaseHTTPRequestHandler):
         server_version = "mentipy/0.1"
 
-        def log_message(self, *_args):
-            return
-
-        def _is_local(self) -> bool:
-            return is_local_address(self.client_address[0])
-
-        def _send(
-            self,
-            status: HTTPStatus,
-            body: str,
-            *,
-            content_type: str = "text/html; charset=utf-8",
-            headers: dict[str, str] | None = None,
-        ):
-            payload = body.encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(payload)))
-            if headers:
-                for name, value in headers.items():
-                    self.send_header(name, value)
-            self.end_headers()
-            self.wfile.write(payload)
-
-        def _redirect(self, location: str):
-            self.send_response(HTTPStatus.SEE_OTHER)
-            self.send_header("Location", location)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-
-        def _resolve(self, prefix: str) -> str | None:
-            full_hash = store.resolve(prefix)
-            if full_hash is not None:
-                return full_hash
-
-            matches = _ambiguous_matches(store, prefix)
-            if len(matches) > 1:
-                items = "".join(
-                    "<li>"
-                    f'<a href="/{candidate["url_prefix"]}"><code>{candidate["url_prefix"]}</code></a> '
-                    f'{escape(candidate["text"])}'
-                    "</li>"
-                    for candidate in matches
-                )
-                self._send(
-                    HTTPStatus.MULTIPLE_CHOICES,
-                    _page(
-                        "Ambiguous prefix",
-                        "Ambiguous prefix",
-                        f"<p>{escape(prefix)} matches multiple questions.</p>"
-                        f"<ul>{items}</ul>",
-                    ),
-                )
-                return None
-
-            self._send(
-                HTTPStatus.NOT_FOUND,
-                _page(
-                    "Unknown question",
-                    "Unknown question",
-                    f"<p>No question matches <code>{escape(prefix)}</code>.</p>",
-                ),
-            )
-            return None
-
-        def do_GET(self):
-            parsed = urlparse(self.path)
-            path = parsed.path
-
-            if path == "/static/style.css":
-                self._send(
-                    HTTPStatus.OK,
-                    STYLE_CSS + "\n" + PYGMENTS_CSS,
-                    content_type="text/css; charset=utf-8",
-                )
-                return
-
-            if path == "/":
-                if not self._is_local():
-                    self._send(
-                        HTTPStatus.FORBIDDEN,
-                        _page(
-                            "Forbidden",
-                            "Forbidden",
-                            "<p>The question index is only available on localhost.</p>",
-                        ),
-                    )
-                    return
-
-                self._send(
-                    HTTPStatus.OK,
-                    _page("Questions", "Questions", _render_index(store)),
-                )
-                return
-
-            segments = [segment for segment in path.split("/") if segment]
-            if not segments:
-                self.send_error(HTTPStatus.NOT_FOUND)
-                return
-
-            self._handle_question_get(segments, parsed.query)
-
-        def _handle_question_get(
-            self, segments: list[str], query: str
-        ):
-            if len(segments) == 2 and segments[1] == "thanks":
-                full_hash = self._resolve(segments[0])
-                if full_hash is None:
-                    return
-                title = store.metadata(full_hash)["text"]
-                self._send(
-                    HTTPStatus.OK,
-                    _page(
-                        "Thanks",
-                        title,
-                        "<p>Thanks, your answer was recorded.</p>",
-                    ),
-                )
-                return
-
-            if len(segments) == 2 and segments[1] == "results":
-                if not public_results and not self._is_local():
-                    self._send(
-                        HTTPStatus.FORBIDDEN,
-                        _page(
-                            "Forbidden",
-                            "Forbidden",
-                            "<p>Results pages are only available on localhost.</p>",
-                        ),
-                    )
-                    return
-
-                full_hash = self._resolve(segments[0])
-                if full_hash is None:
-                    return
-
-                title = store.metadata(full_hash)["text"]
-                window = _parse_window(query)
-                self._send(
-                    HTTPStatus.OK,
-                    _page(
-                        f"Results for {title}",
-                        title,
-                        _render_results(
-                            store, full_hash, window=window
-                        ),
-                        refresh=True,
-                    ),
-                )
-                return
-
-            if len(segments) == 2 and segments[1] == "results.json":
-                if not self._is_local():
-                    self._send(
-                        HTTPStatus.FORBIDDEN,
-                        _page(
-                            "Forbidden",
-                            "Forbidden",
-                            "<p>Result exports are only available on localhost.</p>",
-                        ),
-                    )
-                    return
-
-                full_hash = self._resolve(segments[0])
-                if full_hash is None:
-                    return
-
-                window = _parse_window(query)
-                self._send(
-                    HTTPStatus.OK,
-                    _json_results(
-                        store, full_hash, window=window
-                    ),
-                    content_type="application/json; charset=utf-8",
-                )
-                return
-
-            if len(segments) != 1:
-                self.send_error(HTTPStatus.NOT_FOUND)
-                return
-
-            full_hash = self._resolve(segments[0])
-            if full_hash is None:
-                return
-
-            title = store.metadata(full_hash)["text"]
-            self._send(
-                HTTPStatus.OK,
-                _page(title, title, _render_form(store, full_hash)),
-            )
-
-        def do_POST(self):
-            parsed = urlparse(self.path)
-            segments = [segment for segment in parsed.path.split("/") if segment]
-            if len(segments) != 1:
-                self.send_error(HTTPStatus.NOT_FOUND)
-                return
-
-            full_hash = self._resolve(segments[0])
-            if full_hash is None:
-                return
-
-            question = store.question(full_hash)
-            length = int(self.headers.get("Content-Length", "0"))
-            if length > _max_request_body(question):
-                self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
-                return
-
-            raw_body = self.rfile.read(length)
-
-            try:
-                content_type = self.headers.get(
-                    "Content-Type",
-                    "application/x-www-form-urlencoded",
-                )
-                if content_type.startswith("multipart/form-data"):
-                    fields = _parse_multipart(content_type, raw_body)
-                else:
-                    fields = parse_qs(
-                        raw_body.decode("utf-8"),
-                        keep_blank_values=True,
-                    )
-                value = _parse_answer(question, fields)
-            except (TypeError, ValueError) as err:
-                self._send(
-                    HTTPStatus.BAD_REQUEST,
-                    _page(
-                        "Invalid answer",
-                        "Invalid answer",
-                        f"<p>{escape(str(err))}</p>",
-                    ),
-                )
-                return
-
-            store.record(full_hash, value)
-            prefix = store.metadata(full_hash)["url_prefix"]
-            if public_results:
-                self._redirect(f"/{prefix}/results")
-                return
-            self._redirect(f"/{prefix}/thanks")
+        <<mentipy handler helpers>>
+        <<mentipy handler prefix resolution>>
+        <<mentipy handler get routes>>
+        <<mentipy handler post routes>>
 
     return MentipyHandler
+@
 
+The first methods are deliberately mechanical: suppress default request
+logging, check whether an admin-only route comes from localhost, and write
+small UTF-8 responses with explicit lengths.  Keeping these operations as
+handler-local helpers avoids repeating HTTP header details in every route.
+
+<<mentipy handler helpers>>=
+def log_message(self, *_args):
+    return
+
+def _is_local(self) -> bool:
+    return is_local_address(self.client_address[0])
+
+def _send(
+    self,
+    status: HTTPStatus,
+    body: str,
+    *,
+    content_type: str = "text/html; charset=utf-8",
+    headers: dict[str, str] | None = None,
+):
+    payload = body.encode("utf-8")
+    self.send_response(status)
+    self.send_header("Content-Type", content_type)
+    self.send_header("Content-Length", str(len(payload)))
+    if headers:
+        for name, value in headers.items():
+            self.send_header(name, value)
+    self.end_headers()
+    self.wfile.write(payload)
+
+def _redirect(self, location: str):
+    self.send_response(HTTPStatus.SEE_OTHER)
+    self.send_header("Location", location)
+    self.send_header("Content-Length", "0")
+    self.end_headers()
+@
+
+Route handlers work with printed URL prefixes, but the store records answers by
+canonical hash.  Resolution therefore has two failure modes worth presenting to
+the user: no question matches, or the supplied short prefix is ambiguous.  The
+ambiguous case returns [[300 Multiple Choices]] rather than guessing.
+
+<<mentipy handler prefix resolution>>=
+def _resolve(self, prefix: str) -> str | None:
+    full_hash = store.resolve(prefix)
+    if full_hash is not None:
+        return full_hash
+
+    matches = _ambiguous_matches(store, prefix)
+    if len(matches) > 1:
+        items = "".join(
+            "<li>"
+            f'<a href="/{candidate["url_prefix"]}"><code>{candidate["url_prefix"]}</code></a> '
+            f'{escape(candidate["text"])}'
+            "</li>"
+            for candidate in matches
+        )
+        self._send(
+            HTTPStatus.MULTIPLE_CHOICES,
+            _page(
+                "Ambiguous prefix",
+                "Ambiguous prefix",
+                f"<p>{escape(prefix)} matches multiple questions.</p>"
+                f"<ul>{items}</ul>",
+            ),
+        )
+        return None
+
+    self._send(
+        HTTPStatus.NOT_FOUND,
+        _page(
+            "Unknown question",
+            "Unknown question",
+            f"<p>No question matches <code>{escape(prefix)}</code>.</p>",
+        ),
+    )
+    return None
+@
+
+The [[GET]] routes separate presenter-only surfaces from student-facing ones.
+The index and JSON export remain local-only, the results page is local-only
+unless the CLI explicitly enables public results, and ordinary question forms
+are available to anyone who has the URL.
+
+<<mentipy handler get routes>>=
+def do_GET(self):
+    parsed = urlparse(self.path)
+    path = parsed.path
+
+    if path == "/static/style.css":
+        self._send(
+            HTTPStatus.OK,
+            STYLE_CSS + "\n" + PYGMENTS_CSS,
+            content_type="text/css; charset=utf-8",
+        )
+        return
+
+    if path == "/":
+        if not self._is_local():
+            self._send(
+                HTTPStatus.FORBIDDEN,
+                _page(
+                    "Forbidden",
+                    "Forbidden",
+                    "<p>The question index is only available on localhost.</p>",
+                ),
+            )
+            return
+
+        self._send(
+            HTTPStatus.OK,
+            _page("Questions", "Questions", _render_index(store)),
+        )
+        return
+
+    segments = [segment for segment in path.split("/") if segment]
+    if not segments:
+        self.send_error(HTTPStatus.NOT_FOUND)
+        return
+
+    self._handle_question_get(segments, parsed.query)
+
+def _handle_question_get(self, segments: list[str], query: str):
+    if len(segments) == 2 and segments[1] == "thanks":
+        full_hash = self._resolve(segments[0])
+        if full_hash is None:
+            return
+        title = store.metadata(full_hash)["text"]
+        self._send(
+            HTTPStatus.OK,
+            _page(
+                "Thanks",
+                title,
+                "<p>Thanks, your answer was recorded.</p>",
+            ),
+        )
+        return
+
+    if len(segments) == 2 and segments[1] == "results":
+        if not public_results and not self._is_local():
+            self._send(
+                HTTPStatus.FORBIDDEN,
+                _page(
+                    "Forbidden",
+                    "Forbidden",
+                    "<p>Results pages are only available on localhost.</p>",
+                ),
+            )
+            return
+
+        full_hash = self._resolve(segments[0])
+        if full_hash is None:
+            return
+
+        title = store.metadata(full_hash)["text"]
+        window = _parse_window(query)
+        self._send(
+            HTTPStatus.OK,
+            _page(
+                f"Results for {title}",
+                title,
+                _render_results(store, full_hash, window=window),
+                refresh=True,
+            ),
+        )
+        return
+
+    if len(segments) == 2 and segments[1] == "results.json":
+        if not self._is_local():
+            self._send(
+                HTTPStatus.FORBIDDEN,
+                _page(
+                    "Forbidden",
+                    "Forbidden",
+                    "<p>Result exports are only available on localhost.</p>",
+                ),
+            )
+            return
+
+        full_hash = self._resolve(segments[0])
+        if full_hash is None:
+            return
+
+        window = _parse_window(query)
+        self._send(
+            HTTPStatus.OK,
+            _json_results(store, full_hash, window=window),
+            content_type="application/json; charset=utf-8",
+        )
+        return
+
+    if len(segments) != 1:
+        self.send_error(HTTPStatus.NOT_FOUND)
+        return
+
+    full_hash = self._resolve(segments[0])
+    if full_hash is None:
+        return
+
+    title = store.metadata(full_hash)["text"]
+    self._send(
+        HTTPStatus.OK,
+        _page(title, title, _render_form(store, full_hash)),
+    )
+@
+
+Submitting an answer is the only mutating route.  It first limits the request
+body using the question-specific cap, then chooses the parser from the content
+type, delegates semantic validation to [[_parse_answer()]], records one answer,
+and redirects to either the private thanks page or the public results page.
+
+<<mentipy handler post routes>>=
+def do_POST(self):
+    parsed = urlparse(self.path)
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    if len(segments) != 1:
+        self.send_error(HTTPStatus.NOT_FOUND)
+        return
+
+    full_hash = self._resolve(segments[0])
+    if full_hash is None:
+        return
+
+    question = store.question(full_hash)
+    length = int(self.headers.get("Content-Length", "0"))
+    if length > _max_request_body(question):
+        self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+        return
+
+    raw_body = self.rfile.read(length)
+
+    try:
+        content_type = self.headers.get(
+            "Content-Type",
+            "application/x-www-form-urlencoded",
+        )
+        if content_type.startswith("multipart/form-data"):
+            fields = _parse_multipart(content_type, raw_body)
+        else:
+            fields = parse_qs(
+                raw_body.decode("utf-8"),
+                keep_blank_values=True,
+            )
+        value = _parse_answer(question, fields)
+    except (TypeError, ValueError) as err:
+        self._send(
+            HTTPStatus.BAD_REQUEST,
+            _page(
+                "Invalid answer",
+                "Invalid answer",
+                f"<p>{escape(str(err))}</p>",
+            ),
+        )
+        return
+
+    store.record(full_hash, value)
+    prefix = store.metadata(full_hash)["url_prefix"]
+    if public_results:
+        self._redirect(f"/{prefix}/results")
+        return
+    self._redirect(f"/{prefix}/thanks")
+@
+
+Creating the server is intentionally a thin wrapper around the threaded server
+class and the generated handler.  That keeps port binding visible to callers
+such as the CLI while preserving the store and [[public_results]] policy inside
+the handler closure.
+
+<<functions>>=
 
 def create_server(
     store: Store,
@@ -1551,8 +1668,13 @@ def create_server(
         (host, port),
         _build_handler(store, public_results=public_results),
     )
+@
+
+The blocking [[serve()]] helper owns server shutdown.  Even on interruption the
+socket is closed, so repeated classroom runs can reuse the same configured port.
 
 
+<<functions>>=
 def serve(
     store: Store,
     host: str = "0.0.0.0",
@@ -1836,8 +1958,14 @@ def test_post_rejects_invalid_multiple_choice_answers(live_server):
     assert "outside the allowed range" in body
     full_hash = store.resolve(prefix)
     assert store.results(full_hash)["total"] == 0
+@
+
+Posting uploaded files through the live HTTP stack verifies the route-level
+multipart branch, not just the parser helper.  The two cases mirror the two open
+answer shapes lecturers expect to see in results: file only and text plus file.
 
 
+<<test functions>>=
 def test_post_records_multipart_file_uploads(live_server_open):
     store, prefix, port = live_server_open
     content_type, body = _multipart_form(
@@ -1892,8 +2020,13 @@ def test_post_records_combined_text_and_upload(live_server_open):
         "Text: python solution.py\n\n"
         "File solution.py:\nprint('hi')"
     )
+@
+
+The body-size guard should reject oversized requests before parsing, which
+protects both URL-encoded text and multipart uploads from unbounded reads.
 
 
+<<test functions>>=
 def test_post_rejects_over_cap_request_body(tmp_path):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(OpenQuestion("Comment?", max_chars=1))
@@ -1910,8 +2043,13 @@ def test_post_rejects_over_cap_request_body(tmp_path):
         )
 
     assert response.status == 413
+@
+
+Malformed multipart data is reported as a bad answer and must not create an
+empty response record for the question.
 
 
+<<test functions>>=
 def test_post_rejects_malformed_multipart(live_server_open):
     store, prefix, port = live_server_open
 
@@ -2011,10 +2149,8 @@ def test_public_results_mode_redirects_to_results_and_allows_remote_view(
 @
 
 The integration tests put it all together: a real server, a real store,
-and the full HTML/JSON response.  We verify that the window filter
-form, the bar chart, the markdown-rendered open answers, the omitted
-timestamps, and the lossless JSON export all behave end-to-end---each
-of these is one of the user-visible promises of this change.
+and the full HTML response.  The first pair verifies that the window selector
+is visible and that the selected window actually reaches the store filter.
 
 <<test functions>>=
 def test_results_page_includes_window_filter_form(tmp_path):
@@ -2060,8 +2196,14 @@ def test_results_page_window_query_filters_recent_only(tmp_path):
     assert "Total responses: <strong>2</strong>" in all_time
     assert 'value="hour" selected' in last_hour
     assert 'value="all" selected' in all_time
+@
+
+Scale results combine descriptive statistics with a histogram.  Exercising the
+full route catches mismatches between the store's numeric summary shape and the
+renderer's bucket layout.
 
 
+<<test functions>>=
 def test_results_page_renders_bar_chart_for_scale(tmp_path):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(
@@ -2079,8 +2221,13 @@ def test_results_page_renders_bar_chart_for_scale(tmp_path):
     assert 'class="stats"' in body
     assert "Mean:" in body
     assert "Median:" in body
+@
+
+Open answers are rendered as Markdown for scanning, but timestamps stay out of
+the HTML view because they add noise during a live lecture.
 
 
+<<test functions>>=
 def test_results_page_open_question_renders_md_without_timestamp(
     tmp_path,
 ):
@@ -2095,8 +2242,13 @@ def test_results_page_open_question_renders_md_without_timestamp(
     assert "<strong>important</strong>" in body
     answers = store.results(full_hash)["answers"]
     assert answers[0]["ts"] not in body
+@
+
+The JSON endpoint is the lossless export path: it keeps raw Markdown and
+timestamps, and it applies the same window filter as the HTML results page.
 
 
+<<test functions>>=
 def test_results_json_keeps_raw_markdown_value(tmp_path):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(OpenQuestion("Comment?"))

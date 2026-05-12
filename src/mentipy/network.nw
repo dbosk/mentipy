@@ -19,6 +19,8 @@ from __future__ import annotations
 import socket
 @
 
+\section{Local address discovery}
+
 The outbound address lookup uses the standard UDP-connect trick.  The kernel
 consults its routing table, which tells us which local IPv4 address would be
 used to reach a remote peer, but UDP does not send any packets just because we
@@ -34,9 +36,9 @@ LOCAL_IP_PROBE_PORT = 80
 
 The public helpers in this module are intentionally tiny.  [[local_ip()]] asks
 the kernel for the outbound IPv4 address and falls back to loopback if the host
-has no usable route.  [[resolve_base_url()]] then centralises the small sentinel
-family so callers do not each need to special-case [[None]], the empty string,
-and the user-facing [[auto]] alias.
+has no usable route.  The fallback keeps offline demos usable: every other
+module can still build a syntactically valid URL even when it is not shareable
+on the LAN.
 
 <<functions>>=
 def local_ip() -> str:
@@ -50,8 +52,17 @@ def local_ip() -> str:
         return LOCAL_IP_FALLBACK
 
     return address or LOCAL_IP_FALLBACK
+@
 
+\section{Base URL resolution}
 
+The configuration layer treats [[None]] as the stable stored representation of
+\enquote{auto}, while command-line users may also type an empty value or the
+word [[auto]].  Centralising that small sentinel family here prevents the CLI,
+LaTeX renderer, and tests from drifting into subtly different URL-resolution
+rules.
+
+<<functions>>=
 def resolve_base_url(value: str | None, port: int) -> str:
     """Return an explicit base URL or derive one from the local IP."""
 
@@ -61,8 +72,9 @@ def resolve_base_url(value: str | None, port: int) -> str:
     return f"http://{local_ip()}:{port}"
 @
 
-The tests pin both the routing-table lookup and the sentinel handling.  That
-keeps later CLI and LaTeX tests free to stub only the high-level helper.
+The first tests pin the routing-table lookup.  Later CLI and LaTeX tests can
+then stub [[local_ip()]] or [[resolve_base_url()]] directly instead of
+duplicating the socket-level setup.
 
 <<test functions>>=
 def test_local_ip_uses_the_kernel_route_lookup(monkeypatch):
@@ -96,8 +108,13 @@ def test_local_ip_uses_the_kernel_route_lookup(monkeypatch):
         "kind": network_module.socket.SOCK_DGRAM,
         "address": (LOCAL_IP_PROBE_HOST, LOCAL_IP_PROBE_PORT),
     }
+@
 
+Offline hosts should not make URL rendering fail.  The loopback fallback is not
+a promise that the URL is reachable from students' devices; it is the safest
+local address for previewing output on the presenter's machine.
 
+<<test functions>>=
 def test_local_ip_falls_back_to_loopback_on_os_error(monkeypatch):
     class FakeSocket:
         def __enter__(self):
@@ -115,16 +132,26 @@ def test_local_ip_falls_back_to_loopback_on_os_error(monkeypatch):
     )
 
     assert local_ip() == LOCAL_IP_FALLBACK
+@
 
+Explicit base URLs must pass through unchanged.  This keeps manually configured
+reverse proxies and public tunnel URLs from being replaced by the local LAN
+address just because a port number is also available.
 
+<<test functions>>=
 def test_resolve_base_url_keeps_explicit_values(monkeypatch):
     monkeypatch.setattr("mentipy.network.local_ip", lambda: "192.0.2.25")
 
     assert resolve_base_url("http://example.test:9000", 8080) == (
         "http://example.test:9000"
     )
+@
 
+All accepted auto spellings should collapse to the same derived URL.  The test
+keeps the spelling variation visible while holding the port and fake LAN
+address invariant.
 
+<<test functions>>=
 def test_resolve_base_url_expands_auto_sentinels(monkeypatch):
     monkeypatch.setattr("mentipy.network.local_ip", lambda: "192.0.2.25")
 

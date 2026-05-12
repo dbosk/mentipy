@@ -15,6 +15,12 @@ from __future__ import annotations
 <<cli setup>>
 @
 
+The imports show the CLI's intended role.  It depends on Typer for argument
+parsing, on the lower-level modules for behaviour, and on a few standard
+library modules for terminal formatting and serialisation.  Keeping those
+concerns in the imported modules is what lets the command functions below stay
+mostly as wiring.
+
 <<imports>>=
 from contextlib import contextmanager
 import csv
@@ -63,10 +69,17 @@ from mentipy.store import (
 )
 @
 
+\section{Shared options and constants}
+
 The watcher redraws the terminal, the public-exposure flow prints a fixed
 warning, and several commands share the same configuration-backed defaults.
 Keeping the user-facing strings here makes the help text consistent and exposes
 the relevant configuration keys wherever users look for them.
+
+The configuration command needs the full list of supported keys, while its help
+text should expose the short names people actually type at the terminal.  We
+derive the help text from the same tuple so adding a setting cannot leave the
+configuration help stale.
 
 <<constants>>=
 CLEAR_SCREEN = "\033[2J\033[H"
@@ -90,7 +103,13 @@ CONFIG_HELP = (
     + ", ".join(key.split(".", 1)[1] for key in CONFIG_KEYS)
     + "."
 )
+@
 
+Typer options are module-level objects because several commands share them.
+The help strings name the backing configuration keys explicitly; this makes the
+terminal help double as a compact map from command flags to persistent settings.
+
+<<constants>>=
 HOST_HELP = f"Bind address. Defaults to config setting {HOST_CONFIG}."
 PORT_HELP = f"Bind port. Defaults to config setting {PORT_CONFIG}."
 STORE_HELP = f"Path to mentipy.json. Defaults to config setting {STORE_CONFIG}."
@@ -152,7 +171,14 @@ LIST_FULL_OPTION = typer.Option(
     "--full",
     help="Show the full question text in a wrapped table.",
 )
+@
 
+Question listings should fit normal terminals without assuming one particular
+width.  The public-exposure warning is also a constant so [[serve]] and [[url]]
+print the same risk statement whenever they make an unauthenticated endpoint
+reachable from outside the local machine.
+
+<<constants>>=
 LIST_PREVIEW_WIDTH = 30
 LIST_COLUMN_GAP = 2
 LIST_FALLBACK_WIDTH = 80
@@ -165,8 +191,12 @@ WARNING_TEXT = (
 )
 @
 
-The helpers below do the command-independent work: resolving prefixes,
-serialising exports, and formatting question listings plus live watcher output.
+\section{Shared command helpers}
+
+The first helper family centralises configuration defaults.  Command functions
+should not have to remember how missing [[--store]], [[--port]], or
+[[--base-url]] values map onto persisted settings; they should only decide
+which explicit command-line value, if any, takes precedence.
 
 <<functions>>=
 def _configured_store(path: str | None) -> Store:
@@ -181,8 +211,14 @@ def _configured_base(base: str | None) -> str | None:
     if base is not None:
         return base
     return get_setting(BASE_URL_CONFIG)
+@
 
+The render subcommands all expose the same layout, URL, QR, and store options.
+Collecting those keyword arguments in one helper keeps the individual command
+bodies focused on constructing the right question kind rather than duplicating
+the shared registration/rendering policy.
 
+<<functions>>=
 def _render_common_kwargs(
     *,
     store: str | None,
@@ -202,8 +238,14 @@ def _render_common_kwargs(
         "qr_format": qr_format,
         "layout": layout,
     }
+@
 
+URL commands accept any stored prefix or full hash, but they should always
+print the canonical issued prefix.  The resolver therefore first asks the store
+for an exact issued prefix, then reports ambiguous partial matches as CLI input
+errors instead of guessing.
 
+<<functions>>=
 def _join_url(base_url: str, prefix: str) -> str:
     return f"{base_url.rstrip('/')}/{prefix}"
 
@@ -222,8 +264,14 @@ def _resolve_full_hash(store: Store, prefix: str) -> str:
 def _canonical_prefix(store: Store, prefix: str) -> str:
     full_hash = _resolve_full_hash(store, prefix)
     return store.metadata(full_hash)["url_prefix"]
+@
 
+Terminal output needs small presentation helpers.  Values from configuration
+may be strings, numbers, booleans, or [[None]], so JSON is the safest fallback
+representation; question text is collapsed to a single line before truncation
+or wrapping so stored newlines do not break the table layout.
 
+<<functions>>=
 def _format_value(value) -> str:
     if isinstance(value, str):
         return value
@@ -243,8 +291,14 @@ def _question_summary(text: str) -> str:
 
 def _terminal_width() -> int:
     return shutil.get_terminal_size((LIST_FALLBACK_WIDTH, 24)).columns
+@
 
+The default listing optimises for scanning: prefix first, short preview second.
+The [[--full]] variant spends the available terminal width on wrapped question
+text while preserving a fixed prefix column, so long questions remain readable
+without hiding the URL token lecturers need.
 
+<<functions>>=
 def _question_listing(entries: list[dict[str, object]], *, full: bool) -> str:
     if not entries:
         return "No questions registered yet."
@@ -278,8 +332,13 @@ def _question_listing(entries: list[dict[str, object]], *, full: bool) -> str:
             lines.append(f"{indent}{line}")
 
     return "\n".join(lines)
+@
 
+The watcher produces one complete snapshot per refresh.  Multiple-choice and
+scale questions can summarize counts directly, while open-text questions keep
+the answer timestamps so a lecturer can see both content and recency.
 
+<<functions>>=
 def _watch_snapshot(store: Store, prefix: str) -> str:
     full_hash = _resolve_full_hash(store, prefix)
     results = store.results(full_hash)
@@ -308,8 +367,13 @@ def _watch_snapshot(store: Store, prefix: str) -> str:
         lines.append("No answers yet.")
 
     return "\n".join(lines)
+@
 
+CSV export deliberately flattens multi-select answers with a separator instead
+of inventing one column per option.  That keeps the file shape stable across
+question kinds and leaves detailed per-option counts to the JSON export.
 
+<<functions>>=
 def _results_csv(results: dict) -> str:
     buffer = io.StringIO()
     writer = csv.writer(buffer)
@@ -322,8 +386,14 @@ def _results_csv(results: dict) -> str:
         writer.writerow([answer["ts"], value])
 
     return buffer.getvalue().rstrip()
+@
 
+Typer's boolean option cannot natively express [[--public ssh]] as a value after
+the flag, so we allow extra arguments and parse exactly one optional mode
+ourselves.  This preserves a compact CLI while still rejecting stray arguments
+close to the command boundary.
 
+<<functions>>=
 def _parse_public_mode(
     ctx: typer.Context,
     public: bool,
@@ -360,6 +430,8 @@ def _parse_public_mode(
     return mode
 
 @
+
+\section{Tutorial and public-serving helpers}
 
 Both [[serve]] and [[url]] need the same public URL semantics: SSH mode must
 read [[SSH_TUNNEL_CONFIG]], [[PUBLIC_BASE_URL_CONFIG]] must override any derived
@@ -458,6 +530,8 @@ def _serve_publicly(
         )
 @
 
+\section{Command setup}
+
 Typer lets us keep the public CLI declaration close to the implementation.
 
 <<cli setup>>=
@@ -481,8 +555,16 @@ add_typer_subcommand(
     namespace=TUTORIAL_NAMESPACE,
     tutorial_paths=_tutorial_paths(),
 )
+@
 
+\section{Serving commands}
 
+The local serving path resolves the address that should appear in remembered
+QR codes before starting the HTTP server.  A pinned base URL is trusted as-is;
+otherwise the current bind port is used to resolve a LAN-style URL and refresh
+the QR artifacts that LaTeX will later include.
+
+<<cli setup>>=
 @cli.command(context_settings={"allow_extra_args": True})
 def serve(
     ctx: typer.Context,
@@ -526,8 +608,16 @@ def serve(
         public=public_mode,
         results=results,
     )
+@
 
+\section{Render commands}
 
+Rendering multiple-choice questions is representative of the render command
+family: Typer captures question-specific arguments, then the shared render
+options are passed through unchanged to the LaTeX helper that owns
+registration, QR creation, and layout selection.
+
+<<cli setup>>=
 @render_cli.command("mc")
 def render_mc(
     text: str,
@@ -559,8 +649,14 @@ def render_mc(
             ),
         )
     )
+@
 
+Open-text rendering adds the [[--fence]] option, but otherwise follows the same
+thin-wrapper pattern.  The command constructs an [[OpenQuestion]] through the
+LaTeX helper and leaves all persistence and formatting decisions below the CLI
+layer.
 
+<<cli setup>>=
 @render_cli.command("open")
 def render_open(
     text: str,
@@ -599,6 +695,8 @@ def render_open(
 
 
 @
+
+\subsection{Open-question fence option}
 
 The optional [[--fence]] flag keeps the CLI and LaTeX helper in sync.  A
 lecturer can say [[--fence python]] when the question expects a code upload,
@@ -642,6 +740,10 @@ def test_render_open_threads_the_fence_option_into_the_question(tmp_path):
 @
 
 
+Scale rendering differs only in the endpoint labels and numeric bounds.  Keeping
+it as another thin wrapper makes the three render commands vary only in the
+question data they introduce.
+
 <<cli setup>>=
 @render_cli.command("scale")
 def render_scale(
@@ -681,6 +783,8 @@ def render_scale(
 @
 
 
+\section{Listing, watching, and exporting}
+
 The list command gives a quick view of the registered questions.  The default
 format stays compact enough for scanning, while [[--full]] spends the terminal
 width on wrapped question text.
@@ -694,8 +798,13 @@ def list_questions(
     """List the registered questions."""
 
     typer.echo(_question_listing(_configured_store(store).all_questions(), full=full))
+@
 
+The watcher intentionally owns the refresh loop rather than pushing that loop
+into the store.  The store supplies snapshots; the CLI decides how often to
+redraw and treats [[Ctrl-C]] as a normal way to leave the live display.
 
+<<cli setup>>=
 @cli.command()
 def watch(
     prefix: str,
@@ -713,8 +822,13 @@ def watch(
             time.sleep(interval)
     except KeyboardInterrupt:
         return
+@
 
+Exports resolve the supplied prefix once and then serialise the store's result
+shape.  JSON is the lossless format; CSV is the spreadsheet-friendly view for
+raw answer rows.
 
+<<cli setup>>=
 @cli.command()
 def export(
     prefix: str,
@@ -736,8 +850,16 @@ def export(
         return
 
     raise typer.BadParameter("format must be either 'json' or 'csv'")
+@
 
+\section{URL generation}
 
+The URL command mirrors [[serve]] without starting the server.  Public mode
+borrows the exposure context just long enough to print the externally reachable
+address, while local mode resolves the configured or explicit base URL through
+the network helper.
+
+<<cli setup>>=
 @cli.command(context_settings={"allow_extra_args": True})
 def url(
     ctx: typer.Context,
@@ -767,8 +889,16 @@ def url(
 
     chosen_base = resolve_base_url(_configured_base(base), chosen_port)
     typer.echo(_join_url(chosen_base, _canonical_prefix(active_store, prefix)))
+@
 
+\section{Configuration commands}
 
+Configuration commands are intentionally direct wrappers around the store
+helpers.  That keeps parsing rules, key normalisation, and environment-variable
+overrides in one module rather than teaching the CLI a second configuration
+model.
+
+<<cli setup>>=
 @config_cli.command("get")
 def config_get(key: str):
     """Read a mentipy configuration value."""
@@ -804,8 +934,11 @@ def main():
     cli()
 @
 
-The command tests mostly verify wiring.  The heavy lifting has already been
-tested in the lower-level modules.
+\section{Tutorial command contracts}
+
+Tutorial tests check that the embedded files are exposed in their intended
+learning sequence and that [[pytorial]]'s generated subcommands are reachable
+through the Mentipy CLI namespace.
 
 <<test functions>>=
 def test_tutorial_paths_use_the_learning_sequence():
@@ -857,8 +990,15 @@ def test_tutorial_list_starts_with_using_tutorials(tmp_path, monkeypatch):
         "respondent-urls",
         "serving-and-publication",
     ]
+@
 
+\section{Configuration command contracts}
 
+Configuration command tests stay at the CLI boundary: they verify that values
+round-trip through the persistent configuration helpers and that nullable
+defaults remain visible rather than disappearing from [[config list]].
+
+<<test functions>>=
 def test_config_set_get_round_trip(tmp_path, monkeypatch):
     runner = CliRunner()
     monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
@@ -903,8 +1043,14 @@ def test_config_list_includes_nullable_defaults(tmp_path, monkeypatch):
     assert "base_url = null" in result.stdout
     assert "public_base_url = null" in result.stdout
     assert "ssh_tunnel = null" in result.stdout
+@
 
+\section{Serving command contracts}
 
+Serving with only local networking should honour persisted defaults and expose
+the same configuration keys in help that the command actually reads.
+
+<<test functions>>=
 def test_serve_command_uses_config_defaults(tmp_path, monkeypatch):
     runner = CliRunner()
     monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
@@ -974,8 +1120,14 @@ def test_serve_command_passes_public_results_flag(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert called["path"] == tmp_path / "answers.json"
     assert called["public_results"] is True
+@
 
+When the base URL is automatic or unset, starting the local server must refresh
+remembered QR artifacts using the same port the server will bind.  These tests
+stub the network and QR helpers so the assertion stays at the CLI decision
+point.
 
+<<test functions>>=
 def test_serve_regenerates_qrs_when_base_url_is_auto(tmp_path, monkeypatch):
     runner = CliRunner()
     monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
@@ -1066,6 +1218,8 @@ def test_serve_uses_bind_port_for_resolved_url(tmp_path, monkeypatch):
     assert called["resolve"] == (None, 9123)
     assert "Serving at http://192.0.2.30:9123" in result.stdout
 @
+
+\section{Public serving contracts}
 
 The public mode adds configuration lookup and a managed exposure lifetime around
 the same server call, so the CLI tests can keep using stubs and assert the
@@ -1169,8 +1323,13 @@ def test_serve_command_public_ssh_requires_configuration(tmp_path, monkeypatch):
 
     assert result.exit_code != 0
     assert SSH_TUNNEL_CONFIG in result.output
+@
 
+Public URL selection has two invariants: an explicit public base URL wins over
+the transport-derived address, and QR regeneration is only necessary when the
+public address differs from the base URL already embedded in the slides.
 
+<<test functions>>=
 def test_public_base_url_overrides_the_derived_url(tmp_path, monkeypatch):
     runner = CliRunner()
     config_path = tmp_path / "config.json"
@@ -1300,9 +1459,10 @@ def test_serve_command_closes_the_public_exposure_context(tmp_path, monkeypatch)
     assert state == {"entered": True, "closed": True}
 @
 
-The remaining render-subcommand tests pin the shared CLI wiring: the commands
-should print the generated fragment, honor the layout and environment flags,
-and mention the relevant config keys in help.
+\section{Render command contracts}
+
+The render-subcommand tests first pin the basic path: a command should print the
+generated fragment and leave behind a registered question for later serving.
 
 <<test functions>>=
 def test_render_mc_prints_slide_latex_and_writes_the_question(tmp_path):
@@ -1331,8 +1491,13 @@ def test_render_mc_prints_slide_latex_and_writes_the_question(tmp_path):
     assert "How was the lecture?" in result.stdout
     assert "\\input{" in result.stdout
     assert Store(store_path).all_questions()
+@
 
+Layout and environment flags are the main places where CLI defaults can drift
+from the LaTeX helper defaults.  These tests keep the command-line switches,
+environment-variable fallback, and explicit overrides aligned.
 
+<<test functions>>=
 def test_render_mc_env_option_wraps_the_question(tmp_path):
     runner = CliRunner()
 
@@ -1461,8 +1626,13 @@ def test_render_mc_environment_follows_env_var_unless_env_option_wins(
     assert result.exit_code == 0
     assert "\\begin{exercise}" in result.stdout
     assert "\\begin{exo}" not in result.stdout
+@
 
+Finally, the render help text should name every configuration key whose value
+can affect generated LaTeX.  That makes the help page a reliable discovery
+surface for both transient flags and persistent settings.
 
+<<test functions>>=
 def test_render_help_mentions_the_relevant_config_keys():
     runner = CliRunner()
 
@@ -1480,8 +1650,11 @@ def test_render_help_mentions_the_relevant_config_keys():
         assert key in result.output
 @
 
-The interactive watcher test interrupts the sleep call after the first redraw so
-the command remains a normal unit test.
+\section{Listing, watching, and export contracts}
+
+The listing tests exercise both display modes.  The compact form must not leak
+full hashes, while [[--full]] should wrap long text under a stable prefix
+column.
 
 <<test functions>>=
 def test_list_command_reports_empty_store(tmp_path):
@@ -1527,8 +1700,12 @@ def test_list_command_full_wraps_question_text(tmp_path, monkeypatch):
         f"{prefix}  one two three four\n"
         f"{' ' * (len(prefix) + LIST_COLUMN_GAP)}five six seven"
     )
+@
 
+The interactive watcher test interrupts the sleep call after the first redraw so
+the command remains a normal unit test.
 
+<<test functions>>=
 def test_watch_command_prints_a_snapshot(tmp_path, monkeypatch):
     runner = CliRunner()
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
@@ -1551,7 +1728,9 @@ def test_watch_command_prints_a_snapshot(tmp_path, monkeypatch):
     assert "B: 1" in result.stdout
 @
 
-Export and URL commands should be deterministic wrappers around the stored data.
+Export commands should be deterministic wrappers around the stored data.  JSON
+keeps the complete result shape, while CSV provides the row-oriented answer
+view expected by spreadsheet tools.
 
 <<test functions>>=
 def test_export_json_and_csv(tmp_path):
@@ -1572,8 +1751,16 @@ def test_export_json_and_csv(tmp_path):
     assert result.exit_code == 0
     assert "ts,value" in result.stdout
     assert "hello" in result.stdout
+@
 
+\section{Local URL contracts}
 
+Local URL tests keep prefix canonicalisation and automatic base resolution
+separate.  Passing a full hash should still print the issued short prefix, and
+automatic resolution should use either the configured port or the explicit
+[[--port]] override.
+
+<<test functions>>=
 def test_url_command_uses_the_canonical_prefix(tmp_path):
     runner = CliRunner()
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
@@ -1642,8 +1829,15 @@ def test_url_command_uses_the_explicit_port_for_auto_resolution(
     assert result.exit_code == 0
     assert called == {"value": None, "port": 9124}
     assert result.stdout.strip() == f"http://192.0.2.30:9124/{prefix}"
+@
 
+\section{Public URL contracts}
 
+Public URL tests mirror the serving tests without starting an HTTP server.  They
+pin warning output, exposure lifetime, public-base override precedence, and the
+rule that [[--base]] and [[--public]] are mutually exclusive address sources.
+
+<<test functions>>=
 def test_url_command_public_without_value_defaults_to_upnp(tmp_path, monkeypatch):
     runner = CliRunner()
     config_path = tmp_path / "config.json"
