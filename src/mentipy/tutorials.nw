@@ -716,7 +716,7 @@ learner's normal [[mentipy]] defaults.
 
 ```tutorial-step
 required_patterns:
-  - MENTIPY_CONFIG=./mentipy-config.json mentipy config set base_url http://config.example
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config mentipy.base_url --set http://config.example
   - "PREFIX=$(mentipy list --store ./respondent-urls.json | cut -d' ' -f1)"
   - 'MENTIPY_CONFIG=./mentipy-config.json mentipy url "$PREFIX" --store ./respondent-urls.json'
   - http://config.example/
@@ -728,7 +728,7 @@ Store a configured base URL and reuse it:
 
 ```sh
 MENTIPY_CONFIG=./mentipy-config.json \
-  mentipy config set base_url http://config.example
+  mentipy config mentipy.base_url --set http://config.example
 PREFIX=$(mentipy list --store ./respondent-urls.json | cut -d' ' -f1)
 MENTIPY_CONFIG=./mentipy-config.json \
   mentipy url "$PREFIX" --store ./respondent-urls.json
@@ -745,7 +745,7 @@ at a chosen port.
 
 ```tutorial-step
 required_patterns:
-  - MENTIPY_CONFIG=./mentipy-config.json mentipy config set base_url auto
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config mentipy.base_url --set auto
   - "PREFIX=$(mentipy list --store ./respondent-urls.json | cut -d' ' -f1)"
   - 'MENTIPY_CONFIG=./mentipy-config.json mentipy url "$PREFIX" --store ./respondent-urls.json --port 9123'
   - mode: regex
@@ -757,7 +757,8 @@ hint: "Use the literal value auto and a non-default port so the resolution
 Ask mentipy to resolve the current LAN address automatically:
 
 ```sh
-MENTIPY_CONFIG=./mentipy-config.json mentipy config set base_url auto
+MENTIPY_CONFIG=./mentipy-config.json \
+  mentipy config mentipy.base_url --set auto
 PREFIX=$(mentipy list --store ./respondent-urls.json | cut -d' ' -f1)
 MENTIPY_CONFIG=./mentipy-config.json \
   mentipy url "$PREFIX" --store ./respondent-urls.json --port 9123
@@ -866,7 +867,7 @@ will trigger URL resolution at runtime.
 
 ```tutorial-step
 required_patterns:
-  - MENTIPY_CONFIG=./mentipy-config.json mentipy config set base_url auto
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config mentipy.base_url --set auto
   - mentipy render mc
   - --store ./mentipy.json
   - How confident do you feel about the course goals?
@@ -877,7 +878,8 @@ hint: "Set base_url to auto, then register one poll in the local store so
 Prepare one stored question and an auto-resolved base URL:
 
 ```sh
-MENTIPY_CONFIG=./mentipy-config.json mentipy config set base_url auto
+MENTIPY_CONFIG=./mentipy-config.json \
+  mentipy config mentipy.base_url --set auto
 MENTIPY_CONFIG=./mentipy-config.json \
   mentipy render mc "How confident do you feel about the course goals?" \
   "Very confident" "Somewhat confident" "Not yet" \
@@ -896,10 +898,10 @@ between local serving and the extra settings public exposure needs.
 
 ```tutorial-step
 required_patterns:
-  - MENTIPY_CONFIG=./mentipy-config.json mentipy config set ssh_tunnel alice@example.test:2222
-  - MENTIPY_CONFIG=./mentipy-config.json mentipy config set public_base_url https://polls.example
-  - MENTIPY_CONFIG=./mentipy-config.json mentipy config get ssh_tunnel
-  - MENTIPY_CONFIG=./mentipy-config.json mentipy config get public_base_url
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config mentipy.ssh_tunnel --set alice@example.test:2222
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config mentipy.public_base_url --set https://polls.example
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config mentipy.ssh_tunnel
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config mentipy.public_base_url
   - alice@example.test:2222
   - https://polls.example
 hint: "Store the SSH endpoint and the public base URL, then read them back so the
@@ -910,11 +912,11 @@ Record the two public-exposure settings that the help text mentioned:
 
 ```sh
 MENTIPY_CONFIG=./mentipy-config.json \
-  mentipy config set ssh_tunnel alice@example.test:2222
+  mentipy config mentipy.ssh_tunnel --set alice@example.test:2222
 MENTIPY_CONFIG=./mentipy-config.json \
-  mentipy config set public_base_url https://polls.example
-MENTIPY_CONFIG=./mentipy-config.json mentipy config get ssh_tunnel
-MENTIPY_CONFIG=./mentipy-config.json mentipy config get public_base_url
+  mentipy config mentipy.public_base_url --set https://polls.example
+MENTIPY_CONFIG=./mentipy-config.json mentipy config mentipy.ssh_tunnel
+MENTIPY_CONFIG=./mentipy-config.json mentipy config mentipy.public_base_url
 ```
 
 These settings are inert by themselves, but they matter once you choose a public

@@ -39,6 +39,7 @@ from rich.markdown import Markdown
 from rich.table import Table
 from rich.text import Text
 import typer
+import typerconf
 
 from mentipy.latex import (
     mc as render_mc_question,
@@ -51,6 +52,7 @@ from mentipy.public import PublicExposureError, PublicMode, expose
 from mentipy.server import serve as serve_http
 from mentipy.store import (
     BASE_URL_CONFIG,
+    config_path,
     DEFAULT_HOST,
     DEFAULT_PORT,
     DEFAULT_STORE_PATH,
@@ -67,10 +69,6 @@ from mentipy.store import (
     Store,
     format_timestamp,
     get_setting,
-    list_settings,
-    load_config,
-    normalize_config_key,
-    parse_config_value,
     set_setting,
 )
 @
@@ -82,32 +80,32 @@ warning, and several commands share the same configuration-backed defaults.
 Keeping the user-facing strings here makes the help text consistent and exposes
 the relevant configuration keys wherever users look for them.
 
-The configuration command needs the full list of supported keys, while its help
-text should expose the short names people actually type at the terminal.  We
-derive the help text from the same tuple so adding a setting cannot leave the
-configuration help stale.
+The hand-written [[config]] help is gone once we switch to TyperConf's generic
+path-based command.  We therefore keep the canonical Mentipy key list here and
+reuse it in the LaTeX reference output, which keeps the human-facing manual in
+sync with the actual settings.
 
 <<constants>>=
 CLEAR_SCREEN = "\033[2J\033[H"
 
-CONFIG_KEYS = (
-    BASE_URL_CONFIG,
-    HOST_CONFIG,
-    MIN_PREFIX_CONFIG,
-    PORT_CONFIG,
-    PUBLIC_BASE_URL_CONFIG,
-    QR_DIR_CONFIG,
-    QR_FORMAT_CONFIG,
-    QUESTION_ENVIRONMENT_CONFIG,
-    SHOW_URL_CONFIG,
-    SSH_TUNNEL_CONFIG,
-    STORE_CONFIG,
-)
-
-CONFIG_HELP = (
-    "Read and write mentipy configuration. Built-in settings: "
-    + ", ".join(key.split(".", 1)[1] for key in CONFIG_KEYS)
-    + "."
+CONFIG_KEY_HELP = (
+    (
+        BASE_URL_CONFIG,
+        "Base respondent URL. Use auto or null to resolve the LAN address later.",
+    ),
+    (HOST_CONFIG, "Bind address for mentipy serve."),
+    (MIN_PREFIX_CONFIG, "Minimum issued hash-prefix length in the store."),
+    (PORT_CONFIG, "Bind port and fallback port for auto-resolved URLs."),
+    (
+        PUBLIC_BASE_URL_CONFIG,
+        "Public URL preferred over a derived UPnP or SSH endpoint.",
+    ),
+    (QR_DIR_CONFIG, "Default QR output directory."),
+    (QR_FORMAT_CONFIG, "Default QR image format."),
+    (QUESTION_ENVIRONMENT_CONFIG, "Default LaTeX environment name."),
+    (SHOW_URL_CONFIG, "Default URL visibility for QR-less article layouts."),
+    (SSH_TUNNEL_CONFIG, "SSH endpoint for mentipy serve --public ssh."),
+    (STORE_CONFIG, "Default path to mentipy.json."),
 )
 @
 
@@ -221,6 +219,79 @@ def _configured_base(base: str | None) -> str | None:
     return get_setting(BASE_URL_CONFIG)
 @
 
+TyperConf already provides the path-based configuration command shape we want.
+We register that command directly and point it at Mentipy's config file so the
+CLI and Python-side helpers read the same settings.
+
+<<functions>>=
+def _add_config_command(app: typer.Typer, *, conf_path: str | None = None):
+    typerconf.add_config_typer(
+        app,
+        conf_path=conf_path or str(config_path()),
+    )
+@
+
+The LaTeX reference command is plain text on purpose.  It should be easy to
+page through in a terminal while still naming the helper signatures and the
+config keys that influence authoring.
+
+<<functions>>=
+def _latex_reference() -> str:
+    config_lines = "\n".join(
+        textwrap.fill(
+            f"{key}: {description}",
+            width=76,
+            initial_indent="  ",
+            subsequent_indent="    ",
+        )
+        for key, description in CONFIG_KEY_HELP
+    )
+    return textwrap.dedent(
+        f"""\
+        Mentipy LaTeX reference
+
+        Use `mentipy.latex` from PythonTeX or another Python block.
+
+        Public helpers
+          from `mentipy.latex` import mc, open_text, question, scale
+
+          mc(text, options, *, multi=False, store=None, base_url=None,
+             qr_dir=None, qr_format=None, environment=None,
+             show_url=None, layout="slide")
+          open_text(text, *, max_chars=280, fence=None, store=None,
+             base_url=None, qr_dir=None, qr_format=None,
+             environment=None, show_url=None, layout="slide")
+          scale(text, *, low=1, high=5, low_label="", high_label="",
+             store=None, base_url=None, qr_dir=None, qr_format=None,
+             environment=None, show_url=None, layout="slide")
+          question(question_obj, *, ...) renders a prebuilt Question
+             object and is the lower-level helper behind them.
+
+        Shared keyword arguments
+          store: defaults to config key {STORE_CONFIG}
+          base_url: defaults to {BASE_URL_CONFIG}; if omitted, Mentipy
+            first reads that setting and only resolves the current LAN
+            address using {PORT_CONFIG} when it is unset, empty, or auto
+          qr_dir: defaults to {QR_DIR_CONFIG}
+          qr_format: defaults to {QR_FORMAT_CONFIG}
+          environment: defaults to {QUESTION_ENVIRONMENT_CONFIG};
+            MENTIPY_QUESTION_ENVIRONMENT overrides it
+          show_url: defaults to {SHOW_URL_CONFIG} and only affects QR-less
+            article output
+          layout: slide, article, article+qr, or auto
+
+        Workflow
+          1. Call a helper while compiling the document.
+          2. The helper registers the question and writes QR assets.
+          3. Run `mentipy serve` to publish the poll, or `mentipy url`
+             PREFIX to inspect one canonical respondent URL.
+          4. Recompile after URL changes so the PDF embeds refreshed QR codes.
+
+        Config keys
+        """
+    ).rstrip() + "\n" + config_lines
+@
+
 The render subcommands all expose the same layout, URL, QR, and store options.
 Collecting those keyword arguments in one helper keeps the individual command
 bodies focused on constructing the right question kind rather than duplicating
@@ -274,18 +345,11 @@ def _canonical_prefix(store: Store, prefix: str) -> str:
     return store.metadata(full_hash)["url_prefix"]
 @
 
-Terminal output needs small presentation helpers.  Values from configuration
-may be strings, numbers, booleans, or [[None]], so JSON is the safest fallback
-representation; question text is collapsed to a single line before truncation
-or wrapping so stored newlines do not break the table layout.
+Terminal output still needs small presentation helpers.  Question text is
+collapsed to a single line before truncation or wrapping so stored newlines do
+not break the table layout.
 
 <<functions>>=
-def _format_value(value) -> str:
-    if isinstance(value, str):
-        return value
-    return json.dumps(value, ensure_ascii=False)
-
-
 def _single_line_text(text: str) -> str:
     return " ".join(text.split())
 
@@ -1063,9 +1127,8 @@ Typer lets us keep the public CLI declaration close to the implementation.
 
 <<cli setup>>=
 cli = typer.Typer(help="Self-hosted classroom polling.")
-config_cli = typer.Typer(help=CONFIG_HELP)
 render_cli = typer.Typer(help="Render question LaTeX.")
-cli.add_typer(config_cli, name="config")
+_add_config_command(cli)
 cli.add_typer(render_cli, name="render")
 
 @
@@ -1101,7 +1164,11 @@ def serve(
     public: bool = PUBLIC_OPTION,
     results: bool = RESULTS_OPTION,
 ):
-    """Run the local polling server."""
+    """Run the local polling server.
+
+    Respondent URLs use config setting ``mentipy.base_url`` unless it is
+    unset, empty, or ``auto``.
+    """
 
     chosen_host = host or get_setting(HOST_CONFIG, DEFAULT_HOST)
     chosen_port = _configured_port(port)
@@ -1307,6 +1374,19 @@ def render_scale(
             ),
         )
     )
+@
+
+
+The dedicated [[latex]] command gives authors one place to rediscover the
+Python-side helper names, the shared keyword arguments, and the config keys
+that influence rendering and serving.
+
+<<cli setup>>=
+@cli.command()
+def latex():
+    """Print a LaTeX integration reference."""
+
+    typer.echo(_latex_reference())
 @
 
 
@@ -1619,43 +1699,12 @@ def url(
     typer.echo(_join_url(chosen_base, _canonical_prefix(active_store, prefix)))
 @
 
-\section{Configuration commands}
+\section{CLI entrypoint}
 
-Configuration commands are intentionally direct wrappers around the store
-helpers.  That keeps parsing rules, key normalisation, and environment-variable
-overrides in one module rather than teaching the CLI a second configuration
-model.
+The actual [[config]] command was already registered during command setup, so
+the only remaining top-level function is the console-script entrypoint.
 
 <<cli setup>>=
-@config_cli.command("get")
-def config_get(key: str):
-    """Read a mentipy configuration value."""
-
-    full_key = normalize_config_key(key)
-
-    try:
-        value = load_config().get(full_key)
-    except KeyError:
-        value = get_setting(full_key)
-
-    typer.echo(_format_value(value))
-
-
-@config_cli.command("set")
-def config_set(key: str, value: str):
-    """Store a mentipy configuration value."""
-
-    set_setting(key, parse_config_value(value))
-
-
-@config_cli.command("list")
-def config_list():
-    """List the built-in mentipy settings."""
-
-    for key, value in sorted(list_settings().items()):
-        typer.echo(f"{key} = {_format_value(value)}")
-
-
 def main():
     """Run the mentipy CLI."""
 
@@ -1722,55 +1771,64 @@ def test_tutorial_list_starts_with_using_tutorials(tmp_path, monkeypatch):
 
 \section{Configuration command contracts}
 
-Configuration command tests stay at the CLI boundary: they verify that values
-round-trip through the persistent configuration helpers and that nullable
-defaults remain visible rather than disappearing from [[config list]].
+Configuration tests now pin two contracts: the public interface is TyperConf's
+generic [[config [PATH] --set VALUE]] shape, and Mentipy registers that command
+against its own config path rather than an unrelated application namespace.
 
 <<test functions>>=
-def test_config_set_get_round_trip(tmp_path, monkeypatch):
-    runner = CliRunner()
-    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
-
-    result = runner.invoke(cli, ["config", "set", "port", "9000"])
-    assert result.exit_code == 0
-
-    result = runner.invoke(cli, ["config", "get", "port"])
-    assert result.exit_code == 0
-    assert result.stdout.strip() == "9000"
-
-
-def test_config_help_lists_the_built_in_settings():
+def test_config_help_uses_the_typerconf_interface():
     runner = CliRunner()
 
     result = runner.invoke(cli, ["config", "--help"])
 
     assert result.exit_code == 0
-    for key in (
-        "base_url",
-        "host",
-        "min_prefix",
-        "port",
-        "public_base_url",
-        "qr_dir",
-        "qr_format",
-        "question_environment",
-        "show_url",
-        "ssh_tunnel",
-        "store",
-    ):
-        assert key in result.output
+    assert "[PATH]" in result.output
+    assert "--set" in result.output
 
 
-def test_config_list_includes_nullable_defaults(tmp_path, monkeypatch):
+def test_config_round_trip_uses_typerconf_command_shape(tmp_path):
     runner = CliRunner()
-    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    app = typer.Typer()
 
-    result = runner.invoke(cli, ["config", "list"])
+    @app.command()
+    def noop():
+        return None
+
+    mentipy.cli._add_config_command(
+        app,
+        conf_path=str(tmp_path / "config.json"),
+    )
+
+    result = runner.invoke(app, ["config", PORT_CONFIG, "--set", "9000"])
+    assert result.exit_code == 0
+
+    result = runner.invoke(app, ["config", PORT_CONFIG])
 
     assert result.exit_code == 0
-    assert "base_url = null" in result.stdout
-    assert "public_base_url = null" in result.stdout
-    assert "ssh_tunnel = null" in result.stdout
+    assert result.stdout.strip() == f"{PORT_CONFIG} = 9000"
+@
+
+\section{LaTeX reference command contract}
+
+The LaTeX command is our replacement discovery surface for the config keys that
+used to be enumerated in Mentipy's hand-written [[config]] help.  It should
+therefore mention both the helper API and every built-in configuration key.
+
+<<test functions>>=
+def test_latex_command_prints_the_reference_and_all_config_keys():
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["latex"])
+
+    assert result.exit_code == 0
+    assert "from `mentipy.latex` import mc, open_text, question, scale" in result.output
+    assert "question(question_obj, *, ...)" in result.output
+    assert "when it is unset, empty, or auto" in result.output
+    assert "MENTIPY_QUESTION_ENVIRONMENT" in result.output
+    assert "mentipy serve" in result.output
+    assert "mentipy url`\n     PREFIX" in result.output
+    for key, _description in CONFIG_KEY_HELP:
+        assert key in result.output
 @
 
 \section{Serving command contracts}
@@ -1812,6 +1870,7 @@ def test_serve_help_mentions_the_relevant_config_keys():
 
     assert result.exit_code == 0
     for key in (
+        BASE_URL_CONFIG,
         HOST_CONFIG,
         PORT_CONFIG,
         STORE_CONFIG,

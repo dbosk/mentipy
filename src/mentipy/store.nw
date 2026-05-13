@@ -142,7 +142,30 @@ def load_config(*, writeback: bool = False) -> typerconf.Config:
 Reading a setting first normalises the key and then falls back to the built-in
 defaults.  That two-step lookup is what lets callers pass either [[port]] or
 [[mentipy.port]] while still preserving explicit defaults for keys whose value
-is normally [[None]].
+is normally [[None]].  The generic [[typerconf]] command stores scalar
+[[--set]] values as strings, so we also coerce the built-in non-string settings
+back to the types the rest of the package expects.
+
+<<functions>>=
+def _coerce_setting_value(full_key: str, value: Any) -> Any:
+    if isinstance(value, str):
+        parsed = parse_config_value(value)
+    else:
+        parsed = value
+
+    if full_key in (PORT_CONFIG, MIN_PREFIX_CONFIG):
+        if isinstance(parsed, int):
+            return parsed
+        return value
+
+    if full_key == SHOW_URL_CONFIG:
+        if isinstance(parsed, bool):
+            return parsed
+        if isinstance(parsed, int):
+            return bool(parsed)
+
+    return value
+@
 
 <<functions>>=
 def get_setting(key: str, default: Any = None) -> Any:
@@ -152,7 +175,7 @@ def get_setting(key: str, default: Any = None) -> Any:
     fallback = DEFAULT_SETTINGS.get(full_key, default)
 
     try:
-        return load_config().get(full_key)
+        return _coerce_setting_value(full_key, load_config().get(full_key))
     except KeyError:
         return fallback
 @
@@ -170,9 +193,10 @@ def set_setting(key: str, value: Any):
 @
 
 Listing settings reports the effective values rather than only the values
-present in the JSON file.  This makes [[mentipy config list]] useful before any
-configuration has been written, and it also gives tests one contract for the
-default table.
+present in the JSON file.  The CLI now relies on [[typerconf]]'s generic tree
+printer, but this helper still gives tests and internal callers one stable view
+of Mentipy's built-in defaults, including nullable settings that may not yet be
+present on disk.
 
 <<functions>>=
 def list_settings() -> dict[str, Any]:
@@ -184,9 +208,9 @@ def list_settings() -> dict[str, Any]:
     }
 @
 
-The CLI stores typed values by accepting JSON syntax first and falling back to
-text only when parsing fails.  This gives booleans, numbers, [[None]], and lists
-their natural JSON shapes without inventing a custom configuration language.
+When a config value arrives as text, we first try JSON decoding and only fall
+back to the original string when decoding fails.  That is enough to recover the
+typed built-in settings from [[typerconf]]'s generic [[--set]] interface.
 
 <<functions>>=
 def parse_config_value(raw: str) -> Any:
@@ -400,6 +424,43 @@ def test_question_rendering_settings_have_defaults_and_round_trip(
     assert get_setting(SHOW_URL_CONFIG) is False
     assert list_settings()["question_environment"] == "exercise"
     assert list_settings()["show_url"] is False
+@
+
+The direct [[typerconf]] command writes scalar [[--set]] values as strings.
+Mentipy therefore coerces only the built-in non-string settings back to the
+types their callers expect; nullable string settings keep their literal text.
+
+<<test functions>>=
+def test_get_setting_coerces_string_values_written_by_typerconf(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    config = load_config(writeback=True)
+
+    config.set(PORT_CONFIG, "9000")
+    config.set(MIN_PREFIX_CONFIG, "6")
+    config.set(SHOW_URL_CONFIG, "false")
+
+    assert get_setting(PORT_CONFIG) == 9000
+    assert get_setting(MIN_PREFIX_CONFIG) == 6
+    assert get_setting(SHOW_URL_CONFIG) is False
+
+
+def test_get_setting_keeps_nullable_string_settings_as_strings(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    config = load_config(writeback=True)
+
+    config.set(BASE_URL_CONFIG, "false")
+    config.set(PUBLIC_BASE_URL_CONFIG, "1234")
+    config.set(QUESTION_ENVIRONMENT_CONFIG, "null")
+    config.set(SSH_TUNNEL_CONFIG, "alice@example.test:2222")
+
+    assert get_setting(BASE_URL_CONFIG) == "false"
+    assert get_setting(PUBLIC_BASE_URL_CONFIG) == "1234"
+    assert get_setting(QUESTION_ENVIRONMENT_CONFIG) == "null"
+    assert get_setting(SSH_TUNNEL_CONFIG) == "alice@example.test:2222"
 @
 
 \section{Registration and prefix resolution}
