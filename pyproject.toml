@@ -1,6 +1,6 @@
 [project]
 name = "mentipy"
-version = "0.1"
+version = "0.2"
 description = "Lightweight classroom-polling library"
 authors = [
     {name = "Daniel Bosk", email = "dbosk@kth.se"}

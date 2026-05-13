@@ -36,7 +36,7 @@ The version constant keeps the generated package self-describing, while
 [[__all__]] documents the intended public API explicitly.
 
 <<constants>>=
-__version__ = "0.1"
+__version__ = "0.2"
 
 __all__ = [
     "MCQuestion",
