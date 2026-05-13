@@ -148,15 +148,10 @@ back to the types the rest of the package expects.
 
 <<functions>>=
 def _coerce_setting_value(full_key: str, value: Any) -> Any:
-    fallback = DEFAULT_SETTINGS.get(full_key)
-
     if isinstance(value, str):
         parsed = parse_config_value(value)
     else:
         parsed = value
-
-    if fallback is None:
-        return parsed
 
     if full_key in (PORT_CONFIG, MIN_PREFIX_CONFIG):
         if isinstance(parsed, int):
@@ -432,8 +427,8 @@ def test_question_rendering_settings_have_defaults_and_round_trip(
 @
 
 The direct [[typerconf]] command writes scalar [[--set]] values as strings.
-Mentipy therefore coerces the built-in non-string settings back to the types
-their callers expect.
+Mentipy therefore coerces only the built-in non-string settings back to the
+types their callers expect; nullable string settings keep their literal text.
 
 <<test functions>>=
 def test_get_setting_coerces_string_values_written_by_typerconf(
@@ -449,6 +444,23 @@ def test_get_setting_coerces_string_values_written_by_typerconf(
     assert get_setting(PORT_CONFIG) == 9000
     assert get_setting(MIN_PREFIX_CONFIG) == 6
     assert get_setting(SHOW_URL_CONFIG) is False
+
+
+def test_get_setting_keeps_nullable_string_settings_as_strings(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    config = load_config(writeback=True)
+
+    config.set(BASE_URL_CONFIG, "false")
+    config.set(PUBLIC_BASE_URL_CONFIG, "1234")
+    config.set(QUESTION_ENVIRONMENT_CONFIG, "null")
+    config.set(SSH_TUNNEL_CONFIG, "alice@example.test:2222")
+
+    assert get_setting(BASE_URL_CONFIG) == "false"
+    assert get_setting(PUBLIC_BASE_URL_CONFIG) == "1234"
+    assert get_setting(QUESTION_ENVIRONMENT_CONFIG) == "null"
+    assert get_setting(SSH_TUNNEL_CONFIG) == "alice@example.test:2222"
 @
 
 \section{Registration and prefix resolution}

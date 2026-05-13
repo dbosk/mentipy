@@ -252,7 +252,7 @@ def _latex_reference() -> str:
 
         Use `mentipy.latex` from PythonTeX or another Python block.
 
-        Typical helpers
+        Public helpers
           from `mentipy.latex` import mc, open_text, question, scale
 
           mc(text, options, *, multi=False, store=None, base_url=None,
@@ -264,12 +264,14 @@ def _latex_reference() -> str:
           scale(text, *, low=1, high=5, low_label="", high_label="",
              store=None, base_url=None, qr_dir=None, qr_format=None,
              environment=None, show_url=None, layout="slide")
-          question(prompt, *, ...) is the generic helper behind them.
+          question(question_obj, *, ...) renders a prebuilt Question
+             object and is the lower-level helper behind them.
 
         Shared keyword arguments
           store: defaults to config key {STORE_CONFIG}
           base_url: defaults to {BASE_URL_CONFIG}; if omitted, Mentipy
-            resolves the current LAN address using {PORT_CONFIG}
+            first reads that setting and only resolves the current LAN
+            address using {PORT_CONFIG} when it is unset, empty, or auto
           qr_dir: defaults to {QR_DIR_CONFIG}
           qr_format: defaults to {QR_FORMAT_CONFIG}
           environment: defaults to {QUESTION_ENVIRONMENT_CONFIG};
@@ -281,7 +283,8 @@ def _latex_reference() -> str:
         Workflow
           1. Call a helper while compiling the document.
           2. The helper registers the question and writes QR assets.
-          3. Run `mentipy serve` or `mentipy url` to publish URLs.
+          3. Run `mentipy serve` to publish the poll, or `mentipy url`
+             PREFIX to inspect one canonical respondent URL.
           4. Recompile after URL changes so the PDF embeds refreshed QR codes.
 
         Config keys
@@ -1161,7 +1164,11 @@ def serve(
     public: bool = PUBLIC_OPTION,
     results: bool = RESULTS_OPTION,
 ):
-    """Run the local polling server."""
+    """Run the local polling server.
+
+    Respondent URLs use config setting ``mentipy.base_url`` unless it is
+    unset, empty, or ``auto``.
+    """
 
     chosen_host = host or get_setting(HOST_CONFIG, DEFAULT_HOST)
     chosen_port = _configured_port(port)
@@ -1815,8 +1822,11 @@ def test_latex_command_prints_the_reference_and_all_config_keys():
 
     assert result.exit_code == 0
     assert "from `mentipy.latex` import mc, open_text, question, scale" in result.output
+    assert "question(question_obj, *, ...)" in result.output
+    assert "when it is unset, empty, or auto" in result.output
     assert "MENTIPY_QUESTION_ENVIRONMENT" in result.output
     assert "mentipy serve" in result.output
+    assert "mentipy url`\n     PREFIX" in result.output
     for key, _description in CONFIG_KEY_HELP:
         assert key in result.output
 @
@@ -1860,6 +1870,7 @@ def test_serve_help_mentions_the_relevant_config_keys():
 
     assert result.exit_code == 0
     for key in (
+        BASE_URL_CONFIG,
         HOST_CONFIG,
         PORT_CONFIG,
         STORE_CONFIG,
