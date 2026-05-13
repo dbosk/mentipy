@@ -141,6 +141,11 @@ QR_FORMAT_HELP = (
     f"QR image format. Defaults to config setting {QR_FORMAT_CONFIG}."
 )
 LAYOUT_HELP = "Question layout: slide, article, article+qr, or auto."
+ROOT_HELP_EPILOG = (
+    "Copyright (c) 2026 Daniel Bosk\n\n"
+    "License: MIT\n\n"
+    "GitHub: https://github.com/dbosk/mentipy"
+)
 
 HOST_OPTION = typer.Option(None, help=HOST_HELP)
 PORT_OPTION = typer.Option(None, help=PORT_HELP)
@@ -1126,7 +1131,10 @@ def _serve_publicly(
 Typer lets us keep the public CLI declaration close to the implementation.
 
 <<cli setup>>=
-cli = typer.Typer(help="Self-hosted classroom polling.")
+cli = typer.Typer(
+    help="Self-hosted classroom polling.",
+    epilog=ROOT_HELP_EPILOG,
+)
 render_cli = typer.Typer(help="Render question LaTeX.")
 _add_config_command(cli)
 cli.add_typer(render_cli, name="render")
@@ -1740,6 +1748,17 @@ def test_tutorial_help_lists_the_embedded_commands():
     assert result.exit_code == 0
     for command in ("list", "run", "review"):
         assert command in result.output
+
+
+def test_root_help_includes_project_metadata_epilog():
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["--help"])
+
+    assert result.exit_code == 0
+    assert "Copyright (c) 2026 Daniel Bosk" in result.output
+    assert "License: MIT" in result.output
+    assert "GitHub: https://github.com/dbosk/mentipy" in result.output
 
 
 def test_tutorial_list_starts_with_using_tutorials(tmp_path, monkeypatch):
