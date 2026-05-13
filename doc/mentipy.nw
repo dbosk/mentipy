@@ -429,7 +429,7 @@ Included in the document, that output compiles to:
 At serve time, the matching tunnel setup is:
 
 \begin{minted}{text}
-mentipy config set ssh_tunnel dbosk@faculty-shell.sys.kth.se:8080
+mentipy config mentipy.ssh_tunnel --set dbosk@faculty-shell.sys.kth.se:8080
 mentipy serve --public ssh
 \end{minted}
 
@@ -672,7 +672,7 @@ When respondents must reach the poll from outside the local network,
 The SSH mode needs one extra configuration value:
 
 \begin{minted}{text}
-mentipy config set ssh_tunnel danielb@server.tld:8080
+mentipy config mentipy.ssh_tunnel --set danielb@server.tld:8080
 mentipy serve --store ./mentipy.json --public ssh
 \end{minted}
 
