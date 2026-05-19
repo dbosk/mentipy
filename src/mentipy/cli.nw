@@ -155,7 +155,7 @@ ROOT_HELP_EPILOG = (
 HOST_OPTION = typer.Option(None, help=HOST_HELP)
 PORT_OPTION = typer.Option(None, help=PORT_HELP)
 STORE_OPTION = typer.Option(None, help=STORE_HELP)
-VENV_OPTION = typer.Option(None, "--venv", help=VENV_HELP)
+VENV_OPTION = typer.Option(None, help=VENV_HELP)
 PUBLIC_OPTION = typer.Option(False, "--public", help=PUBLIC_HELP)
 RESULTS_OPTION = typer.Option(False, "--results", help=RESULTS_HELP)
 ENVIRONMENT_OPTION = typer.Option(None, "--env", help=ENVIRONMENT_HELP)

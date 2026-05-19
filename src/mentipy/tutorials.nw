@@ -30,13 +30,16 @@ setup steps.
   [[pipx]] and making [[python3]] plus PythonTeX import [[mentipy]] from the
   same interpreter.
 
-  \textbf{Variation pattern}: Contrast followed by generalization.
+  \textbf{Variation pattern}: Contrast followed by generalization.  The
+  contrast is staged across two steps that hold the import command fixed and
+  vary only whether the activation snippet has been applied.
 
-  \textbf{What varies}: Whether the learner is inspecting help text, creating a
-  local environment, activating it, or reasoning about shell lifetime.
+  \textbf{What varies}: Whether plain [[python3]] can [[import mentipy]] ---
+  first without the activation snippet, then with it.
 
-  \textbf{What stays invariant}: The same project-local [[./.venv]] workflow
-  and the goal that [[python3]] should import [[mentipy]].
+  \textbf{What stays invariant}: The project-local [[./.venv]] directory, the
+  import command used to probe it, and the goal that [[python3]] should be
+  able to import [[mentipy]].
 }
 
 <<[[00-preparing-your-environment.md]]>>=
@@ -103,8 +106,37 @@ ls ./.venv/bin/python
 This is the interpreter that the next step will add to your shell's `PATH`.
 @
 
-Activation is the sharpest contrast: the environment already exists on disk, but
-the current shell still has to opt in before plain [[python3]] sees it.
+Before applying the activation snippet, we probe the system [[python3]] with
+the same import that the activated shell will run.  The failure is the
+\enquote{before} half of the contrast: it makes the activation step's effect
+visible rather than asserted.
+
+<<preparing your environment steps>>=
+# Probe python3 before activation
+
+```tutorial-step
+required_patterns:
+  - python3 -c 'import mentipy'
+  - ModuleNotFoundError
+  - mentipy
+hint: "Run the import probe first, even though it will fail. The next step
+  uses the same probe to show what activation changes."
+```
+
+Run the import probe against the system `python3`:
+
+```sh
+python3 -c 'import mentipy' || true
+```
+
+The virtualenv already exists on disk after `mentipy init`, but the system
+`python3` still cannot see it; `ModuleNotFoundError` is the expected
+outcome.  The trailing `|| true` keeps the tutorial running so the next
+step can show the same probe succeeding.
+@
+
+The next step keeps the import command identical and only adds the activation
+snippet.  That is the \enquote{after} half of the contrast.
 
 <<preparing your environment steps>>=
 # Activate the environment in the current shell

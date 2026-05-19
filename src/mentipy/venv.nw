@@ -117,6 +117,15 @@ and avoids assuming that users want the standard activation script's prompt
 customisation.  We emit absolute paths and POSIX shell quoting so the result is
 safe even when the virtual environment lives under a directory with spaces.
 
+The [[PATH]] update is guarded by a [[case]] check so that repeated
+activation in the same shell is a no-op rather than an accumulator.  The
+match pattern wraps both [[$PATH]] and the target directory in colons,
+which turns substring matching into whole-segment matching: without the
+colons, a bin directory named [[/foo]] would falsely match an existing
+[[/foobar]] entry.  Standard [[bin/activate]] scripts solve the same
+problem by saving the pre-activation [[PATH]]; the [[case]] form is the
+stateless equivalent that survives being printed and re-[[eval]]-ed.
+
 <<functions>>=
 def activation_script(venv_path: Path) -> str:
     """Return POSIX shell commands that activate ``venv_path``."""
@@ -125,7 +134,10 @@ def activation_script(venv_path: Path) -> str:
     return "\n".join(
         (
             f"export VIRTUAL_ENV={absolute}",
-            'export PATH="$VIRTUAL_ENV/bin:$PATH"',
+            'case ":$PATH:" in',
+            '    *":$VIRTUAL_ENV/bin:"*) ;;',
+            '    *) export PATH="$VIRTUAL_ENV/bin:$PATH" ;;',
+            "esac",
             "unset PYTHONHOME",
             "hash -r 2>/dev/null || true",
         )
@@ -133,7 +145,9 @@ def activation_script(venv_path: Path) -> str:
 @
 
 The activation helper should stay byte-for-byte predictable because the CLI
-prints it directly for shell evaluation.
+prints it directly for shell evaluation.  The test pins both the absolute
+quoted path and the guarded [[PATH]] prepend so the no-op-on-reactivation
+contract is part of the regression suite.
 
 <<test functions>>=
 def test_activation_script_uses_an_absolute_single_quoted_path(tmp_path):
@@ -142,7 +156,10 @@ def test_activation_script_uses_an_absolute_single_quoted_path(tmp_path):
     assert activation_script(path) == "\n".join(
         (
             f"export VIRTUAL_ENV='{path.resolve()}'",
-            'export PATH="$VIRTUAL_ENV/bin:$PATH"',
+            'case ":$PATH:" in',
+            '    *":$VIRTUAL_ENV/bin:"*) ;;',
+            '    *) export PATH="$VIRTUAL_ENV/bin:$PATH" ;;',
+            "esac",
             "unset PYTHONHOME",
             "hash -r 2>/dev/null || true",
         )
