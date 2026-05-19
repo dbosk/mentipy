@@ -22,6 +22,7 @@ stable polling contract.
 <<imports>>=
 import os
 from pathlib import Path
+from typing import Iterable
 
 from mentipy.network import resolve_base_url
 from mentipy.qr import make_qr
@@ -30,6 +31,7 @@ from mentipy.questions import (
     OpenQuestion,
     Question,
     ScaleQuestion,
+    WordCloudQuestion,
     question_hash,
 )
 from mentipy.store import (
@@ -167,6 +169,30 @@ def _render_scale(question: ScaleQuestion) -> str:
     return "\n".join(lines)
 @
 
+A word-cloud question's slide body needs to show respondents two things
+the open-question body does not: that the answer will be aggregated as
+a cloud, and (when split mode is on) the minimum word length that will
+make it into the visualisation.  Authors often print this on the slide
+so respondents understand why their two-letter answer never appears in
+the cloud.
+
+<<functions>>=
+def _render_word_cloud(question: WordCloudQuestion) -> str:
+    lines = [
+        "\\begin{description}",
+        "\\item[Type] Word-cloud (free-text)",
+        f"\\item[Limit] {question.max_chars} characters",
+    ]
+    if question.split_words:
+        lines.append(
+            f"\\item[Min word length] {question.min_word_length}"
+        )
+    else:
+        lines.append("\\item[Mode] Whole answer counts as one entry")
+    lines.append("\\end{description}")
+    return "\n".join(lines)
+@
+
 \subsection{Question content wrapper}
 
 The question-specific body stays the same across layouts.  Only the outer
@@ -189,6 +215,8 @@ def _render_body(question: Question) -> str:
         return _render_multiple_choice(question)
     if isinstance(question, OpenQuestion):
         return _render_open(question)
+    if isinstance(question, WordCloudQuestion):
+        return _render_word_cloud(question)
     return _render_scale(question)
 @
 
@@ -586,6 +614,60 @@ def scale(
     )
 @
 
+The word-cloud wrapper carries every presentation knob through to the
+underlying [[WordCloudQuestion]].  None of these knobs affect the
+canonical hash, so a lecturer who edits, say, the render mode and
+recompiles still sees the same QR code on the slide and the same
+answer pool on the results page --- only the visualisation changes.
+This is the call site where the principle \enquote{visualisation is
+not identity} actually shows up to the author.
+
+<<functions>>=
+def word_cloud(
+    text: str,
+    *,
+    max_chars: int = 280,
+    split_words: bool = True,
+    min_word_length: int = 3,
+    extra_stop_words: Iterable[str] = (),
+    use_default_stopwords: bool = True,
+    render: str = "svg",
+    store: Store | None = None,
+    base_url: str | None = None,
+    qr_dir: str | Path | None = None,
+    qr_format: str | None = None,
+    environment: str | None = None,
+    show_url: bool | None = None,
+    layout: str = DEFAULT_LAYOUT,
+) -> str:
+    """Return LaTeX for a word-cloud question.
+
+    Visualisation parameters (``split_words``, ``min_word_length``,
+    ``extra_stop_words``, ``use_default_stopwords``, ``render``) do not
+    enter the question's canonical hash, so editing them and
+    recompiling preserves any answers already collected.
+    """
+
+    return question(
+        WordCloudQuestion(
+            text=text,
+            max_chars=max_chars,
+            split_words=split_words,
+            min_word_length=min_word_length,
+            extra_stop_words=tuple(extra_stop_words),
+            use_default_stopwords=use_default_stopwords,
+            render=render,
+        ),
+        store=store,
+        base_url=base_url,
+        qr_dir=qr_dir,
+        qr_format=qr_format,
+        environment=environment,
+        show_url=show_url,
+        layout=layout,
+    )
+@
+
 \section{Rendering contracts}
 
 The default tests pin the existing slide contract: each helper must register the
@@ -669,6 +751,67 @@ def test_open_text_passes_the_optional_fence_into_the_question(
     question = store.question(entry["hash"])
 
     assert question.fence == "python"
+@
+
+The word-cloud wrapper meets the same registration contract as
+[[open_text]] --- a hash, a prefix, and a QR file on disk --- so the
+first test mirrors the open-text shape exactly.
+
+<<test functions>>=
+def test_word_cloud_registers_the_question_and_references_the_qr(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    rendered = word_cloud(
+        "Words?",
+        max_chars=140,
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir=DEFAULT_QR_DIR,
+    )
+
+    [entry] = store.all_questions()
+    prefix = entry["url_prefix"]
+
+    assert "Words?" in rendered
+    assert f"\\input{{{QR_SUBPATH}/Q-{prefix}.pdf_tex}}" in rendered
+    assert store.resolve(prefix) == entry["hash"]
+@
+
+The second test pins the visualisation parameters: they travel through
+the wrapper and reach the stored question, even though they do not
+enter the canonical hash.  Without this round-trip the [[render]]
+choice in the slide source would silently fail to take effect.
+
+<<test functions>>=
+def test_word_cloud_passes_visualisation_options_into_the_question(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    word_cloud(
+        "Words?",
+        render="table",
+        split_words=False,
+        min_word_length=5,
+        extra_stop_words=["foo"],
+        use_default_stopwords=False,
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir=DEFAULT_QR_DIR,
+    )
+
+    [entry] = store.all_questions()
+    question = store.question(entry["hash"])
+
+    assert question.render == "table"
+    assert question.split_words is False
+    assert question.min_word_length == 5
+    assert question.extra_stop_words == ("foo",)
+    assert question.use_default_stopwords is False
 @
 
 

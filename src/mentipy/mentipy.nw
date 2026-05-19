@@ -19,12 +19,13 @@ the small surface we expect PythonTeX users and CLI users to care about.
 @
 
 <<imports>>=
-from mentipy.latex import mc, open_text, question, scale
+from mentipy.latex import mc, open_text, question, scale, word_cloud
 from mentipy.questions import (
     MCQuestion,
     OpenQuestion,
     Question,
     ScaleQuestion,
+    WordCloudQuestion,
     question_from_dict,
     question_hash,
 )
@@ -48,6 +49,7 @@ __all__ = [
     "Question",
     "ScaleQuestion",
     "Store",
+    "WordCloudQuestion",
     "activation_script",
     "create_venv",
     "install_package",
@@ -58,6 +60,7 @@ __all__ = [
     "question_hash",
     "scale",
     "serve",
+    "word_cloud",
     "__version__",
 ]
 @
@@ -81,10 +84,12 @@ def test_package_facade_reexports_the_public_api():
     assert MCQuestion.__name__ == "MCQuestion"
     assert OpenQuestion.__name__ == "OpenQuestion"
     assert ScaleQuestion.__name__ == "ScaleQuestion"
+    assert WordCloudQuestion.__name__ == "WordCloudQuestion"
     assert callable(mc)
     assert callable(open_text)
     assert callable(question)
     assert callable(scale)
+    assert callable(word_cloud)
     assert callable(serve)
     assert callable(create_venv)
     assert callable(install_package)
