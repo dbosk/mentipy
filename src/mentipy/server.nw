@@ -1542,6 +1542,9 @@ words left-to-right and wrap onto a new line when they would overflow.
 Each word's bounding-box width is approximated as
 [[0.6 * font\_size * len(word)]], a heuristic that is accurate enough
 for Latin and mixed Latin-Cyrillic text to avoid most overlaps.
+Full-width scripts (CJK, fullwidth Latin) will underflow the estimate
+and may overlap; installing the optional [[wordcloud]] package
+switches to a glyph-aware packer that handles them correctly.
 
 We also leave a little more outer padding than the heuristic strictly
 needs.  Browser font metrics differ by a few pixels at the edge of the

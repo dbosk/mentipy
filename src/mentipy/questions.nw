@@ -527,7 +527,11 @@ which the renderers rely on to lay out a stable cloud.
 def frequencies(
     self, answers: Iterable[Mapping[str, Any]]
 ) -> list[tuple[str, int]]:
-    """Return ``(word, count)`` pairs sorted by descending frequency."""
+    """Return ``(word, count)`` pairs sorted by descending count.
+
+    Ties are broken alphabetically by word so that renderers
+    consuming the sequence lay out a deterministic cloud.
+    """
 
     counter: Counter[str] = Counter()
     stops = self._effective_stop_words()
