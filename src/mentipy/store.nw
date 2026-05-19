@@ -36,6 +36,7 @@ from mentipy.questions import (
     OpenQuestion,
     Question,
     ScaleQuestion,
+    WordCloudQuestion,
     question_from_dict,
     question_hash,
 )
@@ -480,10 +481,26 @@ def test_get_setting_keeps_nullable_string_settings_as_strings(
 
 \section{Registration and prefix resolution}
 
-Registration needs two properties.  It must be idempotent for the same content,
-and it must keep old printed URLs stable even when a later question shares the
-same beginning of the hash.  We achieve that by treating issued prefixes as
-exact reservations and extending only the newer question.
+Registration needs three properties.  It must be idempotent for the same
+content; it must keep old printed URLs stable when a later question shares
+the same beginning of the hash; and it must let a question evolve its
+presentation fields without losing answers, so that a lecturer who edits
+a word-cloud's render mode and recompiles sees the new visualisation on
+the very next results request.  We achieve all three by treating issued
+prefixes as exact reservations, extending only the newer question on
+collision, and updating the stored entry whenever the freshly serialised
+question differs from the one currently on disk.
+
+The split between identity and presentation matters here.  The hash --- the
+key into [[data["questions"]]] --- only sees identity fields, so a
+re-registration with new presentation hits the existing slot rather than
+allocating a fresh prefix.  We then merge the freshly serialised
+question over the existing entry: that way the presentation keys take
+their new values, the prefix and the answer log carry over unchanged,
+and any auxiliary keys the store kept beside the question (for example
+[[qr_targets]] from later [[remember_qr_target]] calls) survive the
+refresh untouched.  Merge-then-compare keeps the no-op case write-free,
+which the existing idempotence test continues to verify.
 
 <<store methods>>=
 def register(self, question: Question) -> str:
@@ -494,7 +511,13 @@ def register(self, question: Question) -> str:
         full_hash = question_hash(question)
 
         if full_hash in data["questions"]:
-            return data["questions"][full_hash]["url_prefix"]
+            existing = data["questions"][full_hash]
+            refreshed = {**existing, **question.to_dict()}
+            refreshed["url_prefix"] = existing["url_prefix"]
+            if refreshed != existing:
+                data["questions"][full_hash] = refreshed
+                self._write(data)
+            return existing["url_prefix"]
 
         prefix = self._allocate_prefix(full_hash, data["questions"])
         entry = question.to_dict()
@@ -537,6 +560,34 @@ def test_register_is_idempotent(tmp_path):
     second = store.register(question)
 
     assert first == second
+@
+
+The presentation-refresh test pins the word-cloud iteration loop.  When a
+lecturer changes the render mode in their slide source and recompiles,
+the same canonical hash is registered again with a different
+presentation payload.  The store must keep the existing prefix and answer
+log (otherwise iteration would invalidate live answers) but must update
+the stored entry so the next results request reflects the new
+visualisation.
+
+<<test functions>>=
+
+def test_register_refreshes_wordcloud_presentation(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    initial = WordCloudQuestion("Words?", render="svg")
+    prefix = store.register(initial)
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, "linear algebra")
+
+    revised = WordCloudQuestion("Words?", render="table")
+    refreshed_prefix = store.register(revised)
+
+    assert refreshed_prefix == prefix
+    rebuilt = store.question(full_hash)
+    assert isinstance(rebuilt, WordCloudQuestion)
+    assert rebuilt.render == "table"
+    answers = store.results(full_hash)["answers"]
+    assert [answer["value"] for answer in answers] == ["linear algebra"]
 @
 
 When no collision exists, registration should choose the configured minimum
@@ -788,9 +839,16 @@ the stored value already matches the registered question type, so
 
 The validation rules mirror the question types.  Single-choice and scale
 answers are bounded integers, multi-select answers are non-empty collections of
-unique indices, and open-text answers are strings within the configured limit.
-We normalise multi-select sequences to plain lists so the JSON shape on disk is
-stable no matter whether a caller passed a list or a tuple.
+unique indices, and open-text and word-cloud answers are strings within the
+configured limit.  We normalise multi-select sequences to plain lists so the
+JSON shape on disk is stable no matter whether a caller passed a list or a
+tuple.
+
+The dispatcher walks the question types in increasing surface area.  We make
+each string-typed arm explicit rather than letting one type fall through to
+the other, so the dispatcher reads as a list of contracts: a future fifth
+question type that also accepts a string would otherwise inherit one of these
+contracts by accident.
 
 <<functions>>=
 def _normalize_recorded_answer(question: Question, value: Any) -> Any:
@@ -803,7 +861,13 @@ def _normalize_recorded_answer(question: Question, value: Any) -> Any:
     if isinstance(question, ScaleQuestion):
         <<normalise scale answer>>
 
-    <<normalise open-text answer>>
+    if isinstance(question, OpenQuestion):
+        <<normalise open-text answer>>
+
+    if isinstance(question, WordCloudQuestion):
+        <<normalise wordcloud answer>>
+
+    raise TypeError(f"unsupported question type: {type(question).__name__}")
 @
 
 Multi-select answers arrive as a collection of indices, but JSON should store a
@@ -877,6 +941,21 @@ if not isinstance(value, str):
     raise TypeError("open-text answers must be stored as strings")
 if len(value) > question.max_chars:
     raise ValueError("open-text answer exceeds the question limit")
+return value
+@
+
+Word-cloud answers share the same wire shape as open-text answers --- a
+single string bounded by the question's character limit --- but they
+deliberately use their own arm rather than falling through to the
+open-text one.  The aggregation that happens later is different, so
+making the contract explicit here keeps the symmetry between input and
+output validation visible to a reader.
+
+<<normalise wordcloud answer>>=
+if not isinstance(value, str):
+    raise TypeError("word-cloud answers must be stored as strings")
+if len(value) > question.max_chars:
+    raise ValueError("word-cloud answer exceeds the question limit")
 return value
 @
 
@@ -1080,6 +1159,8 @@ def results(self, full_hash: str,
         <<add scale counts and stats>>
     elif isinstance(question, OpenQuestion):
         <<add open-text stats>>
+    elif isinstance(question, WordCloudQuestion):
+        <<add wordcloud frequencies>>
 
     return results
 @
@@ -1200,6 +1281,25 @@ lengths = [len(answer["value"]) for answer in answers]
 results["avg_length"] = (
     statistics.mean(lengths) if lengths else None
 )
+@
+
+For word-cloud answers, the summary every renderer consumes is the same
+descending list of (word, count) pairs.  We delegate the counting to
+the question itself --- the question already knows whether to split on
+whitespace, what minimum length applies, and which stop-word set is
+active --- and surface two scalar stats for the lecturer's overview:
+the total number of counted tokens (after filtering) and the number of
+distinct words.  Together they describe the cloud at a glance:
+[[total_tokens]] tells whether the cloud is busy or sparse,
+[[unique_words]] tells whether the answers were diverse or clustered.
+
+<<add wordcloud frequencies>>=
+frequencies = question.frequencies(answers)
+results["frequencies"] = [
+    [word, count] for word, count in frequencies
+]
+results["unique_words"] = len(frequencies)
+results["total_tokens"] = sum(count for _, count in frequencies)
 @
 
 The aggregation test keeps the counting contract explicit for the
@@ -1327,6 +1427,33 @@ def test_results_open_reports_average_length(tmp_path):
     summary = store.results(full_hash)
 
     assert summary["avg_length"] == pytest.approx(7.0)
+@
+
+For word-cloud answers, the aggregation test pins the contract every
+renderer relies on: the [[frequencies]] entry is a list of two-element
+[[[word, count]]] pairs sorted by descending count, with the two scalar
+stats matching the totals derived from that list.  The store test
+deliberately stays at the shape level --- the detailed filter behaviour
+already has its own tests on [[WordCloudQuestion.frequencies]] in
+[[questions.nw]].
+
+<<test functions>>=
+def test_results_aggregate_wordcloud_answers(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(WordCloudQuestion("Words?"))
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, "apple banana")
+    store.record(full_hash, "Apple cherry")
+
+    summary = store.results(full_hash)
+
+    assert summary["frequencies"] == [
+        ["apple", 2],
+        ["banana", 1],
+        ["cherry", 1],
+    ]
+    assert summary["unique_words"] == 3
+    assert summary["total_tokens"] == 4
 @
 
 When the window filter empties the answer log, every per-type statistic

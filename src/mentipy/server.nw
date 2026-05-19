@@ -21,6 +21,7 @@ from email.policy import default as default_policy
 from html import escape
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import importlib
 import json
 import logging
 import os
@@ -36,7 +37,12 @@ from pygments.formatters import HtmlFormatter as _HtmlFormatter
 from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
 
-from mentipy.questions import MCQuestion, OpenQuestion, ScaleQuestion
+from mentipy.questions import (
+    MCQuestion,
+    OpenQuestion,
+    ScaleQuestion,
+    WordCloudQuestion,
+)
 from mentipy.store import Store
 @
 
@@ -209,6 +215,38 @@ pre code.highlight {
   border-left: 3px solid #4a90d9;
   margin: 0.5rem 0 1rem;
   padding: 0.5rem 0.75rem;
+}
+
+.wordcloud-svg {
+  display: block;
+  margin: 0 0 1rem;
+  width: 100%;
+}
+
+.wordcloud-scaled {
+  line-height: 1.8;
+  margin: 0 0 1rem;
+}
+
+.wordcloud-table {
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+  margin: 0 0 1rem;
+  width: 100%;
+}
+
+.wordcloud-table th,
+.wordcloud-table td {
+  border-bottom: 1px solid #eee;
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+}
+
+.wordcloud-table th:nth-child(2),
+.wordcloud-table td:nth-child(2),
+.wordcloud-table th:last-child,
+.wordcloud-table td:last-child {
+  text-align: right;
 }
 
 .md-answer { margin: 0 0 0.5rem; }
@@ -396,17 +434,24 @@ def _fence_block(fence_lang: str | None, body: str) -> str:
     return f"{fence}{fence_lang}\n{body}\n{fence}"
 @
 
-The request-size cap has to cover two different shapes.  Ordinary multiple
-choice and scale posts are tiny, so we keep a [[64 * 1024]] floor that accepts
-them without looking at question-specific limits.  Open questions can carry
-larger text bodies, so we add a [[* 4]] multiplier for the UTF-8 worst case and
-leave a little multipart framing slack on top.
+The request-size cap has to cover three different shapes.  Ordinary
+multiple-choice and scale posts are tiny, so we keep a [[64 * 1024]]
+floor that accepts them without looking at question-specific limits.
+Open and word-cloud questions both carry text bodies bounded by
+[[max_chars]], so we add a [[* 4]] multiplier for the UTF-8 worst case
+and leave a little multipart framing slack on top.  The slack is
+unnecessary for word-cloud posts (they use plain URL encoding rather
+than multipart), but reusing the same headroom is cheaper than carving
+out a second formula for a few hundred bytes.
 
 <<functions>>=
 
 
 def _max_request_body(question) -> int:
-    max_chars = question.max_chars if isinstance(question, OpenQuestion) else 0
+    if isinstance(question, (OpenQuestion, WordCloudQuestion)):
+        max_chars = question.max_chars
+    else:
+        max_chars = 0
     return max(
         max_chars * 4 + MULTIPART_SLACK_BYTES,
         MIN_FORM_BODY_BYTES,
@@ -418,6 +463,14 @@ records.  For open questions, that means combining the textarea text and an
 optional uploaded file into one string.  We keep the uploaded basename but strip
 any path components so a browser or crafted client cannot smuggle [[../]] into
 the recorded label.
+
+Word-cloud questions deliberately use their own short arm rather than
+sharing the open-question branch.  A word cloud aggregates tokens from
+many short answers; piping a file body into that flow would either dump
+a hundred tokens from one respondent or treat the whole file body as a
+single token, neither of which matches what authors mean by a
+word-cloud poll.  The arm therefore reads only the textarea value,
+enforces [[max_chars]] directly, and returns the raw string.
 
 <<functions>>=
 
@@ -474,6 +527,12 @@ def _parse_answer(question, fields: dict[str, list[str]]) -> Any:
         if len(value) > question.max_chars:
             raise ValueError("text answer too long")
         return value
+
+    if isinstance(question, WordCloudQuestion):
+        text = fields.get("value", [""])[0]
+        if len(text) > question.max_chars:
+            raise ValueError("text answer too long")
+        return text
 
     value = int(fields.get("value", [str(question.low)])[0])
     if value < question.low or value > question.high:
@@ -801,6 +860,12 @@ plus an uploaded artifact.  The [[accept]] list is only a browser hint, but it
 nudges the picker toward the text-like formats that [[_parse_multipart()]] can
 actually decode and that the results page can show meaningfully.
 
+Word-cloud questions render only the textarea --- no file picker and no
+multipart encoding.  Pairing a free-text token with a file body would
+not produce sensible cloud entries (the file body is either one giant
+token or a fragmented mass of source-level identifiers), so the form
+matches what the parser actually accepts.
+
 <<functions>>=
 
 
@@ -829,6 +894,15 @@ def _render_form(store: Store, full_hash: str) -> str:
             f'<textarea name="value" maxlength="{question.max_chars}"></textarea>'
             '<input type="file" name="file" '
             'accept="text/*,.txt,.md,.tex,.py,.rst,.csv,.json">'
+            "<button type=\"submit\">Submit</button></form>"
+        )
+
+    if isinstance(question, WordCloudQuestion):
+        return (
+            f"<p>{escape(question.text)}</p>"
+            f'<form method="post" action="/{prefix}">'
+            f'<textarea name="value" '
+            f'maxlength="{question.max_chars}"></textarea>'
             "<button type=\"submit\">Submit</button></form>"
         )
 
@@ -872,6 +946,29 @@ def test_open_form_uses_multipart_and_renders_both_inputs(tmp_path):
     assert 'enctype="multipart/form-data"' in rendered
     assert 'name="value"' in rendered
     assert 'name="file"' in rendered
+@
+
+The word-cloud form test pins the opposite contract: no multipart, no
+file input.  The two complementary tests together protect the parser
+and form from drifting apart --- a future refactor that accidentally
+adds a file picker to word-cloud forms would fail here loudly.
+
+<<test functions>>=
+def test_wordcloud_form_uses_plain_encoding_and_renders_one_textarea(
+    tmp_path,
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(
+        WordCloudQuestion("Words?", max_chars=200)
+    )
+    full_hash = store.resolve(prefix)
+
+    rendered = server_module._render_form(store, full_hash)
+
+    assert "multipart/form-data" not in rendered
+    assert 'name="file"' not in rendered
+    assert 'name="value"' in rendered
+    assert 'maxlength="200"' in rendered
 @
 
 \section{Rendering results}
@@ -1253,6 +1350,299 @@ def _render_open_answers(answers: list[dict[str, Any]]) -> str:
     return f'<ol>{items}</ol>'
 @
 
+\subsection{Word-cloud results}
+
+A word-cloud results view has two halves: a one-line summary of how
+busy the cloud is, and a visualisation chosen by the author at slide
+time.  We keep the summary identical across visualisations so a
+lecturer comparing modes does not have to relearn what the numbers mean.
+
+The stats helper surfaces [[unique_words]] and [[total_tokens]] from the
+aggregated summary.  The two numbers together describe the shape of
+the answer set: a sparse, varied cloud has [[unique_words]] close to
+[[total_tokens]]; a clustered cloud has [[total_tokens]] much larger.
+
+<<functions>>=
+def _render_wordcloud_stats(summary: dict[str, Any]) -> str:
+    if not summary.get("total_tokens"):
+        return ""
+    return (
+        f'<p class="stats">'
+        f'<span class="stat-label">Words:</span> '
+        f'<strong>{summary["total_tokens"]}</strong> · '
+        f'<span class="stat-label">Distinct:</span> '
+        f'<strong>{summary["unique_words"]}</strong>'
+        f'</p>'
+    )
+@
+
+The dispatcher still chooses the visual form strictly by
+[[question.render]] because the question validates that field at
+construction time.  Only the [[svg]] arm needs an internal fallback:
+the public render value stays stable, but the implementation now
+prefers the optional [[wordcloud]] package when it is installed and
+otherwise keeps using Mentipy's built-in SVG layout.  The visual modes
+append the same frequency table as [[render="table"]], so the lecturer
+keeps exact counts while still seeing the overall shape.
+
+<<functions>>=
+def _render_wordcloud(
+    question: WordCloudQuestion,
+    frequencies: list[list[Any]],
+) -> str:
+    if not frequencies:
+        return "<p>No answers yet.</p>"
+    pairs = [(str(word), int(count)) for word, count in frequencies]
+    if question.render == "table":
+        return _render_wordcloud_table(pairs)
+    if question.render == "scaled":
+        visual = _render_wordcloud_scaled(pairs)
+    else:
+        visual = _render_wordcloud_svg(pairs)
+    return visual + _render_wordcloud_table(pairs)
+@
+
+\subsubsection{Font scaling}
+
+All three renderers share one helper that maps a frequency to a font
+size.  We use a linear scale rather than a logarithm because the
+classroom answer counts we expect (single-digit per word, double-digit
+totals) are too small for a log curve to add useful resolution --- the
+top word would dominate visually only marginally over the second, and
+the tail would all look the same size.  When every word has the same
+count we collapse to the middle of the range so the cloud reads as
+uniform rather than pegged to the maximum.
+
+<<functions>>=
+def _wordcloud_font_scale(
+    counts: list[int],
+    *,
+    min_size: float,
+    max_size: float,
+) -> list[float]:
+    low, high = min(counts), max(counts)
+    if low == high:
+        return [(min_size + max_size) / 2 for _ in counts]
+    span = high - low
+    return [
+        min_size + (count - low) / span * (max_size - min_size)
+        for count in counts
+    ]
+@
+
+\subsubsection{Table mode}
+
+The table view is the plainest renderer.  It is also the most useful
+when the answers are sparse or the lecturer wants a quick numerical
+overview rather than a visual one --- showing the leaderboard, the
+total count, and each word's share rather than the gestalt.
+
+<<functions>>=
+def _render_wordcloud_table(pairs: list[tuple[str, int]]) -> str:
+    total = sum(count for _, count in pairs)
+    rows = "".join(
+        f"<tr><td>{escape(word)}</td><td>{count}</td>"
+        f"<td>{count / total * 100:.1f}%</td></tr>"
+        for word, count in pairs
+    )
+    return (
+        '<table class="wordcloud-table">'
+        "<thead><tr><th>Word</th>"
+        f"<th>Count ({total})</th>"
+        "<th>Percentage</th></tr></thead>"
+        f"<tbody>{rows}</tbody>"
+        "</table>"
+    )
+@
+
+\subsubsection{Scaled inline list}
+
+The scaled inline list is a CSS-only cloud: each word becomes a span
+with [[font-size]] in [[em]] units proportional to its count.  We
+target inline rendering (a row of words that wraps naturally) because
+the alternative --- a CSS grid or a custom layout --- would add styling
+the project does not currently carry.
+
+<<functions>>=
+def _render_wordcloud_scaled(pairs: list[tuple[str, int]]) -> str:
+    counts = [count for _, count in pairs]
+    sizes = _wordcloud_font_scale(counts, min_size=0.9, max_size=2.6)
+    spans = "".join(
+        f'<span class="wordcloud-word" '
+        f'style="font-size: {size:.2f}em">{escape(word)}</span>'
+        for (word, _count), size in zip(pairs, sizes)
+    )
+    return f'<div class="wordcloud-scaled">{spans}</div>'
+@
+
+\subsubsection{SVG mode}
+
+The SVG view is the default because authors who think \enquote{word
+cloud} usually picture a single graphic they can copy into a slide.
+When the optional [[wordcloud]] package is installed, we let it do the
+placement because its packed layout is denser and more recognisably a
+word cloud than our small home-grown fallback.  The package stays
+optional because it brings in NumPy, Pillow, and Matplotlib; users who
+only need the built-in renderers should not pay that dependency cost.
+
+A live results page refreshes every two seconds, so the package-backed
+layout must be deterministic.  We fix its random seed, keep the words
+horizontal, and normalise the returned SVG fragment so the HTML
+contract stays the same: one inline [[<svg>]] with the
+[[wordcloud-svg]] CSS hook and an accessible label.
+
+<<functions>>=
+def _render_wordcloud_svg(pairs: list[tuple[str, int]]) -> str:
+    svg = _render_wordcloud_svg_with_package(pairs)
+    if svg is not None:
+        return svg
+    return _render_wordcloud_svg_fallback(pairs)
+@
+
+The optional-package path is an optimisation, not a requirement.  A
+missing dependency is normal, so [[ImportError]] simply returns
+[[None]] and lets the caller fall back to Mentipy's own SVG layout.
+
+<<functions>>=
+def _render_wordcloud_svg_with_package(
+    pairs: list[tuple[str, int]],
+) -> str | None:
+    try:
+        module = importlib.import_module("wordcloud")
+    except ImportError:
+        return None
+
+    cloud = module.WordCloud(
+        width=720,
+        height=480,
+        background_color=None,
+        mode="RGBA",
+        color_func=lambda *_args, **_kwargs: "#111",
+        prefer_horizontal=1.0,
+        random_state=0,
+    )
+    svg = cloud.generate_from_frequencies(dict(pairs)).to_svg().lstrip()
+    if svg.startswith("<?xml"):
+        _declaration, _separator, svg = svg.partition("?>")
+        svg = svg.lstrip()
+    return svg.replace(
+        "<svg",
+        (
+            '<svg class="wordcloud-svg" role="img" '
+            'aria-label="Word cloud"'
+        ),
+        1,
+    )
+@
+
+The built-in fallback still uses a flow layout.  A true spiral packer
+would require font-metric estimation that is wrong for diacritics and
+adds far more code than the rest of this renderer combined, so we place
+words left-to-right and wrap onto a new line when they would overflow.
+Each word's bounding-box width is approximated as
+[[0.6 * font\_size * len(word)]], a heuristic that is accurate enough
+for Latin and mixed Latin-Cyrillic text to avoid most overlaps.
+Full-width scripts (CJK, fullwidth Latin) will underflow the estimate
+and may overlap; installing the optional [[wordcloud]] package
+switches to a glyph-aware packer that handles them correctly.
+
+We also leave a little more outer padding than the heuristic strictly
+needs.  Browser font metrics differ by a few pixels at the edge of the
+[[viewBox]], and a slightly wider gutter is cheaper than clipping the
+last stroke of a tall or wide glyph.
+
+Every word passes through [[escape]] before reaching the [[<text>]]
+element because the words come from respondent input --- an unescaped
+[[<]] would terminate the SVG element and let a respondent inject
+arbitrary markup.
+
+<<functions>>=
+def _render_wordcloud_svg_fallback(
+    pairs: list[tuple[str, int]],
+) -> str:
+    counts = [count for _, count in pairs]
+    sizes = _wordcloud_font_scale(counts, min_size=14.0, max_size=48.0)
+    canvas_width = 720.0
+    padding = 16.0
+    line_gap = 1.25
+    elements: list[str] = []
+    cursor_x = padding
+    cursor_y = padding
+    line_height = 0.0
+    for (word, count), size in zip(pairs, sizes):
+        width = max(size * 0.6 * len(word), size)
+        if cursor_x + width > canvas_width - padding and elements:
+            cursor_x = padding
+            cursor_y += line_height * line_gap
+            line_height = 0.0
+        elements.append(
+            f'<text x="{cursor_x:.1f}" '
+            f'y="{cursor_y + size:.1f}" '
+            f'font-size="{size:.1f}" '
+            f'class="wordcloud-word">{escape(word)}</text>'
+        )
+        cursor_x += width + size * 0.4
+        line_height = max(line_height, size)
+    height = cursor_y + line_height + padding
+    return (
+        f'<svg class="wordcloud-svg" '
+        f'viewBox="0 0 {canvas_width:.0f} {height:.0f}" '
+        f'xmlns="http://www.w3.org/2000/svg" '
+        f'role="img" aria-label="Word cloud">'
+        + "".join(elements)
+        + "</svg>"
+    )
+@
+
+Let's verify both SVG branches directly before the end-to-end page
+tests.  The optional package path should preserve Mentipy's HTML hook,
+while the live results page still needs a deterministic fallback test
+that does not depend on the package being installed in the test
+environment.
+
+<<test functions>>=
+def test_render_wordcloud_svg_uses_optional_package_when_available(
+    monkeypatch,
+):
+    captured = {}
+
+    class FakeWordCloud:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+
+        def generate_from_frequencies(self, frequencies):
+            captured["frequencies"] = dict(frequencies)
+            return self
+
+        def to_svg(self):
+            return (
+                '<?xml version="1.0" encoding="UTF-8"?>\n'
+                '<svg xmlns="http://www.w3.org/2000/svg">'
+                '<text>packed</text></svg>'
+            )
+
+    class FakeModule:
+        WordCloud = FakeWordCloud
+
+    monkeypatch.setattr(
+        server_module.importlib,
+        "import_module",
+        lambda _name: FakeModule,
+    )
+
+    rendered = server_module._render_wordcloud_svg(
+        [("apple", 2), ("banana", 1)]
+    )
+
+    assert captured["frequencies"] == {"apple": 2, "banana": 1}
+    assert captured["kwargs"]["mode"] == "RGBA"
+    assert captured["kwargs"]["prefer_horizontal"] == 1.0
+    assert captured["kwargs"]["random_state"] == 0
+    assert rendered.startswith('<svg class="wordcloud-svg"')
+    assert 'role="img"' in rendered
+    assert '<?xml version="1.0"' not in rendered
+@
+
 \subsection{Dispatching by question type}
 
 The top-level renderer reads the window-filtered summary from the store
@@ -1298,6 +1688,9 @@ def _render_results(
     elif isinstance(question, OpenQuestion):
         parts.append(_render_open_stats(summary))
         parts.append(_render_open_answers(summary["answers"]))
+    elif isinstance(question, WordCloudQuestion):
+        parts.append(_render_wordcloud_stats(summary))
+        parts.append(_render_wordcloud(question, summary["frequencies"]))
 
     return "".join(parts)
 
@@ -2242,6 +2635,98 @@ def test_results_page_open_question_renders_md_without_timestamp(
     assert "<strong>important</strong>" in body
     answers = store.results(full_hash)["answers"]
     assert answers[0]["ts"] not in body
+@
+
+The word-cloud results page has three render modes selected by the
+author at slide time, so the tests run end-to-end for each mode.  The
+visual modes now append the same frequency table used by the pure-table
+mode, so the checks cover both the cloud markup and the exact-count
+fallback.  We also send a payload containing markup characters because
+the words flow straight into the HTML or SVG output --- a missing
+[[html.escape]] would let respondents inject arbitrary markup.
+
+<<test functions>>=
+def test_results_page_wordcloud_svg_escapes_words_and_shows_frequencies(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(
+        server_module.importlib,
+        "import_module",
+        lambda _name: (_ for _ in ()).throw(ImportError()),
+    )
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(WordCloudQuestion("Words?", render="svg"))
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, "<script>")
+    store.record(full_hash, "linear")
+
+    with _running_server(store) as port:
+        _, body = _request(port, "GET", f"/{prefix}/results")
+
+    assert "<svg" in body
+    assert 'class="wordcloud-table"' in body
+    assert "<th>Count (2)</th>" in body
+    assert "<th>Percentage</th>" in body
+    assert "50.0%" in body
+    assert "&lt;script&gt;" in body
+    assert "<script>" not in body
+@
+
+<<test functions>>=
+def test_results_page_wordcloud_scaled_uses_sized_spans_and_shows_frequencies(
+    tmp_path,
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(
+        WordCloudQuestion("Words?", render="scaled")
+    )
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, "apple apple banana")
+
+    with _running_server(store) as port:
+        _, body = _request(port, "GET", f"/{prefix}/results")
+
+    assert 'class="wordcloud-scaled"' in body
+    assert "font-size:" in body
+    assert 'class="wordcloud-table"' in body
+    assert "<th>Count (3)</th>" in body
+    assert "<th>Percentage</th>" in body
+    assert "66.7%" in body
+@
+
+<<test functions>>=
+def test_results_page_wordcloud_table_emits_counts_and_percentages(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(
+        WordCloudQuestion("Words?", render="table")
+    )
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, "apple banana apple")
+
+    with _running_server(store) as port:
+        _, body = _request(port, "GET", f"/{prefix}/results")
+
+    assert "wordcloud-table" in body
+    assert "<th>Word</th>" in body
+    assert "<th>Count (3)</th>" in body
+    assert "<th>Percentage</th>" in body
+    assert "66.7%" in body
+    assert "33.3%" in body
+    assert "apple" in body and "banana" in body
+@
+
+The parser's word-cloud arm must refuse oversize bodies just like the
+open-text arm does --- otherwise a respondent could bypass the form's
+[[maxlength]] attribute with a hand-crafted POST.
+
+<<test functions>>=
+def test_parse_answer_rejects_wordcloud_value_that_exceeds_max_chars():
+    question = WordCloudQuestion("Words?", max_chars=10)
+
+    with pytest.raises(ValueError, match="too long"):
+        server_module._parse_answer(
+            question, {"value": ["a" * 11]}
+        )
 @
 
 The JSON endpoint is the lossless export path: it keeps raw Markdown and

@@ -11,19 +11,26 @@ from __future__ import annotations
 
 <<imports>>
 
+<<constants>>
+
 <<classes>>
 
 <<functions>>
 @
 
-We only need a handful of standard-library modules: dataclasses for the frozen
-question objects, and JSON plus SHA-256 for the canonical hash.
+We need a handful of standard-library modules.  Dataclasses give us the frozen
+question objects.  JSON plus SHA-256 build the canonical hash.  The word-cloud
+aggregator pulls in [[Counter]] for tallying and [[unicodedata]] for
+locale-aware punctuation stripping --- both are wanted at module load so the
+class definitions can refer to them directly.
 
 <<imports>>=
+from collections import Counter
 from dataclasses import dataclass
 import hashlib
 import json
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
+import unicodedata
 @
 
 \section{Multiple Choice}
@@ -240,6 +247,449 @@ def test_scale_question_requires_ordered_bounds():
         ScaleQuestion("Pace?", low=5, high=5)
 @
 
+\section{Word Clouds}
+
+A word-cloud question looks like an open question on the way in: respondents
+type free text into a single field.  The way out is different.  Instead of
+listing the answers verbatim, the results page aggregates them into a
+frequency map that a renderer turns into a cloud, a sized list, or a plain
+table.
+
+That asymmetry shapes the data model.  We split a word-cloud's fields into
+two layers.  The \emph{identity} layer is the prompt and the character
+limit --- the parts that shape the input contract a respondent sees.
+Everything else --- splitting mode, minimum word length, stop-word
+configuration, render mode --- is \emph{presentation}.  Only the identity
+layer enters the canonical hash, so a lecturer can switch between an SVG
+cloud and a frequency table without inventing a new question identifier
+and orphaning the answers already collected.  This is a stronger guarantee
+than the open question's optional fence, which still alters the hash when
+set: for a word cloud, the visualisation never changes the identity.
+
+<<classes>>=
+@dataclass(frozen=True)
+class WordCloudQuestion:
+    """A free-text question whose results aggregate into a word cloud.
+
+    The visualisation fields (``split_words``, ``min_word_length``,
+    ``extra_stop_words``, ``use_default_stopwords``, ``render``) are
+    presentation hints: they do not affect the question's canonical
+    identity, so editing them and recompiling preserves the existing
+    answer pool.
+    """
+
+    text: str
+    max_chars: int = 280
+    split_words: bool = True
+    min_word_length: int = 3
+    extra_stop_words: tuple[str, ...] = ()
+    use_default_stopwords: bool = True
+    render: str = "svg"
+    kind: str = "wordcloud"
+
+    <<wordcloud question methods>>
+@
+
+\subsection{Validation}
+
+Each presentation field has its own invariant.  Checking them at
+construction means a misconfigured slide source fails when the document is
+compiled, not when the first respondent reaches the results page.
+
+<<wordcloud question methods>>=
+def __post_init__(self):
+    <<validate wordcloud limit>>
+    <<validate wordcloud min length>>
+    <<validate wordcloud render mode>>
+@
+
+The character limit is the only field shared with [[OpenQuestion]], and it
+carries the same input-contract meaning: the HTTP form and the answer
+recorder both treat it as a real upper bound, so a non-positive value
+would let the storage layer accept an answer the form refuses.
+
+<<validate wordcloud limit>>=
+if self.max_chars <= 0:
+    raise ValueError(
+        "word-cloud questions need a positive character limit"
+    )
+@
+
+The minimum word length defaults to three, which is large enough to drop
+single-character pronouns and the two-letter copulas that dominate an
+English cloud without revealing anything (\enquote{is}, \enquote{do},
+\enquote{it}).  Zero is a legitimate value (\enquote{keep every token}),
+so the bound only rejects negative thresholds.
+
+<<validate wordcloud min length>>=
+if self.min_word_length < 0:
+    raise ValueError(
+        "word-cloud minimum word length must be non-negative"
+    )
+@
+
+The render mode names one of three rendering paths that the server and
+CLI implement.  Validating it eagerly catches typos in the slide source
+at compile time; otherwise an invalid value would only fail when the
+first respondent loads the results page.
+
+<<validate wordcloud render mode>>=
+if self.render not in ("svg", "scaled", "table"):
+    raise ValueError(
+        "word-cloud render must be one of "
+        "'svg', 'scaled', or 'table'; "
+        f"got {self.render!r}"
+    )
+@
+
+The character-limit check is the same invariant the open question
+relies on, so we pin it explicitly to keep the two question types in
+agreement about what a valid input contract looks like.
+
+<<test functions>>=
+def test_word_cloud_question_requires_positive_limit():
+    with pytest.raises(ValueError):
+        WordCloudQuestion("Topic?", max_chars=0)
+@
+
+A zero minimum length is intentionally permitted (\enquote{keep every
+token}); the negative case is the one that has no sensible meaning, so
+we make sure it fails loudly.
+
+<<test functions>>=
+
+def test_word_cloud_question_requires_non_negative_min_length():
+    with pytest.raises(ValueError):
+        WordCloudQuestion("Topic?", min_word_length=-1)
+@
+
+The render-mode check is the cheapest layer of defence against a typo
+in the slide source.  Without it, an invalid value would survive
+through the store and only surface at the first results request --- by
+which time the lecturer has already printed the QR code.
+
+<<test functions>>=
+
+def test_word_cloud_question_rejects_invalid_render_mode():
+    with pytest.raises(ValueError, match="render"):
+        WordCloudQuestion("Topic?", render="tbale")
+@
+
+\subsection{Serialisation}
+
+A word-cloud serialises into two different dictionaries depending on what
+the caller needs.  [[to_dict]] returns the full persistence shape: it is
+what the store writes to disk so a future render can recover the same
+configuration.  [[canonical_dict]] returns identity only --- prompt and
+character limit --- so two visualisations of the same prompt hash to the
+same identifier and share the same answer pool.
+
+<<wordcloud question methods>>=
+def to_dict(self) -> dict[str, Any]:
+    """Return the full persistence shape of the question."""
+
+    return {
+        "kind": self.kind,
+        "text": self.text,
+        "max_chars": self.max_chars,
+        "split_words": self.split_words,
+        "min_word_length": self.min_word_length,
+        "extra_stop_words": list(self.extra_stop_words),
+        "use_default_stopwords": self.use_default_stopwords,
+        "render": self.render,
+    }
+
+def canonical_dict(self) -> dict[str, Any]:
+    """Return the identity-only shape used by ``question_hash``."""
+
+    return {
+        "kind": self.kind,
+        "text": self.text,
+        "max_chars": self.max_chars,
+    }
+@
+
+The persistence round-trip pins that every configuration knob survives a
+trip through JSON.  We list the stop words as a sequence because JSON has
+no tuple, then check that the rebuilt question still hashes to a tuple
+internally --- the frozen dataclass would otherwise refuse to compare
+equal after reload.
+
+<<test functions>>=
+
+def test_word_cloud_to_dict_includes_all_fields():
+    question = WordCloudQuestion(
+        "Words?",
+        max_chars=140,
+        split_words=False,
+        min_word_length=4,
+        extra_stop_words=("foo", "bar"),
+        use_default_stopwords=False,
+        render="table",
+    )
+
+    assert question.to_dict() == {
+        "kind": "wordcloud",
+        "text": "Words?",
+        "max_chars": 140,
+        "split_words": False,
+        "min_word_length": 4,
+        "extra_stop_words": ["foo", "bar"],
+        "use_default_stopwords": False,
+        "render": "table",
+    }
+@
+
+The canonical dictionary is the central guarantee of this question type:
+no matter how the presentation evolves, two word clouds with the same
+prompt and character limit share an identity.
+
+<<test functions>>=
+
+def test_word_cloud_canonical_dict_excludes_presentation_fields():
+    question = WordCloudQuestion(
+        "Words?",
+        max_chars=140,
+        render="table",
+        min_word_length=5,
+        extra_stop_words=("foo",),
+        use_default_stopwords=False,
+    )
+
+    assert question.canonical_dict() == {
+        "kind": "wordcloud",
+        "text": "Words?",
+        "max_chars": 140,
+    }
+@
+
+\subsection{Default stop words}
+
+The default stop-word set focuses on short, structural words that
+otherwise dominate a cloud without revealing anything about the topic ---
+English copulas, articles, and prepositions, plus their Swedish
+counterparts.  We deliberately keep the lists short: pulling the next
+hundred entries from an NLP corpus would silently filter content a
+lecturer might want to see.  Authors who need a longer list can extend it
+per question through [[extra_stop_words]].
+
+<<constants>>=
+DEFAULT_STOP_WORDS_EN: frozenset[str] = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "do",
+    "for", "from", "had", "has", "have", "he", "her", "his", "i",
+    "if", "in", "is", "it", "its", "me", "my", "no", "not", "of",
+    "on", "or", "our", "she", "so", "than", "that", "the", "their",
+    "them", "they", "this", "to", "too", "was", "we", "were", "what",
+    "when", "which", "who", "why", "will", "with", "would", "you",
+    "your",
+})
+
+DEFAULT_STOP_WORDS_SV: frozenset[str] = frozenset({
+    "att", "av", "de", "den", "det", "du", "ej", "eller", "en", "ett",
+    "för", "från", "har", "i", "in", "inte", "jag", "med", "men",
+    "mig", "min", "mitt", "och", "om", "på", "så", "ska", "som",
+    "till", "var", "vi", "vid", "är", "över",
+})
+
+DEFAULT_STOP_WORDS: frozenset[str] = (
+    DEFAULT_STOP_WORDS_EN | DEFAULT_STOP_WORDS_SV
+)
+@
+
+\subsection{Counting tokens}
+
+The frequency method is the contract between the question and its
+renderers.  Each of the three render modes (SVG, scaled list, table)
+consumes the same descending-by-count sequence of (word, count) pairs,
+so the filter behaviour lives on the question rather than being
+duplicated in every renderer.
+
+Splitting walks each answer once.  In split mode we first replace every
+Unicode punctuation character with a space, then casefold and split on
+whitespace.  Replacing rather than stripping is what lets
+\enquote{café—café} count as two cafés and \enquote{don't} count as
+\enquote{don} --- if we stripped instead, the em-dash variant would
+collapse into a single \enquote{cafécafé} token that no one wrote.  We
+use [[unicodedata.category]] rather than [[string.punctuation]] because
+the latter is ASCII-only and would miss the en-dash and the curly
+apostrophes Swedish answers tend to contain.  Tokens that fall below
+the minimum length or that match the active stop-word set are
+discarded; the rest accumulate into a frequency counter.  In
+whole-answer mode each non-empty stripped answer counts as one
+token --- useful when the prompt asks for a single phrase rather than
+free prose.
+
+The final sort is descending by count, then ascending by word.  The
+secondary key makes the output deterministic when several words tie ---
+which the renderers rely on to lay out a stable cloud.
+
+<<wordcloud question methods>>=
+def frequencies(
+    self, answers: Iterable[Mapping[str, Any]]
+) -> list[tuple[str, int]]:
+    """Return ``(word, count)`` pairs sorted by descending count.
+
+    Ties are broken alphabetically by word so that renderers
+    consuming the sequence lay out a deterministic cloud.
+    """
+
+    counter: Counter[str] = Counter()
+    stops = self._effective_stop_words()
+    for answer in answers:
+        text = str(answer.get("value", ""))
+        if self.split_words:
+            normalized = _punctuation_to_space(text).casefold()
+            for word in normalized.split():
+                if (
+                    len(word) >= self.min_word_length
+                    and word not in stops
+                ):
+                    counter[word] += 1
+        else:
+            token = text.strip()
+            if token:
+                counter[token] += 1
+    return sorted(
+        counter.items(), key=lambda pair: (-pair[1], pair[0])
+    )
+
+def _effective_stop_words(self) -> frozenset[str]:
+    extra = frozenset(word.casefold() for word in self.extra_stop_words)
+    if self.use_default_stopwords:
+        return DEFAULT_STOP_WORDS | extra
+    return extra
+@
+
+The punctuation replacer lives at module scope because the splitter is
+the only caller that needs it and the operation is purely textual ---
+keeping it off the dataclass keeps the question API focused on what
+authors actually configure.  We map punctuation to a single space
+rather than the empty string so that, when an en-dash separates two
+words, the splitter sees two tokens rather than a concatenation of
+them.
+
+<<functions>>=
+def _punctuation_to_space(text: str) -> str:
+    return "".join(
+        " " if unicodedata.category(char).startswith("P") else char
+        for char in text
+    )
+@
+
+The split-mode happy path doubles as the contract test: lowercase,
+short-token, and stop-word filters all apply, and ties break by ascending
+word.
+
+<<test functions>>=
+
+def test_word_cloud_frequencies_splits_lowercases_and_filters():
+    question = WordCloudQuestion("Topic?")
+    answers = [
+        {"value": "Apple apple BANANA"},
+        {"value": "banana orange"},
+        {"value": "is do I"},  # all filtered: short or stop-word
+    ]
+
+    assert question.frequencies(answers) == [
+        ("apple", 2),
+        ("banana", 2),
+        ("orange", 1),
+    ]
+@
+
+Whole-answer mode skips the splitter entirely and counts each non-empty
+stripped response.  Authors use it when the prompt is a single-word poll
+(\enquote{Pick one word that describes today}).
+
+<<test functions>>=
+
+def test_word_cloud_frequencies_whole_answer_mode():
+    question = WordCloudQuestion("Topic?", split_words=False)
+    answers = [
+        {"value": "Linear algebra"},
+        {"value": "linear algebra"},
+        {"value": "  Linear algebra  "},
+        {"value": ""},
+    ]
+
+    counts = dict(question.frequencies(answers))
+
+    assert counts["Linear algebra"] == 2
+    assert counts["linear algebra"] == 1
+@
+
+Unicode punctuation needs an explicit test because [[string.punctuation]]
+would miss the very characters that hurt Swedish answers --- the
+en-dash and the curly apostrophe.  Replacing punctuation with a space
+also means an apostrophe in \enquote{don't} splits the token; the
+residual \enquote{t} is then dropped for being shorter than the
+minimum length, leaving the meaningful stem in the cloud.
+
+<<test functions>>=
+
+def test_word_cloud_frequencies_strips_unicode_punctuation():
+    question = WordCloudQuestion("Topic?")
+    answers = [
+        {"value": "café—café"},      # em-dash between words
+        {"value": "don’t can’t"},  # curly apostrophes
+    ]
+
+    counts = dict(question.frequencies(answers))
+
+    assert counts["café"] == 2
+    assert counts["don"] == 1
+    assert counts["can"] == 1
+@
+
+Extra stop words extend the built-in list when [[use_default_stopwords]]
+is true, and replace it entirely when false.  Both behaviours matter ---
+the union covers the common case, the replacement covers a course that
+wants the cloud to keep \enquote{the} and \enquote{is}.
+
+The first scenario covers the common case: a course-specific stop-word
+list extends the built-ins.  An answer of \enquote{python python ruby}
+should reduce to a single \enquote{ruby} count once the author tells
+the question to ignore \enquote{python}.
+
+<<test functions>>=
+
+def test_word_cloud_frequencies_applies_extra_stop_words():
+    question = WordCloudQuestion(
+        "Topic?", extra_stop_words=("python",)
+    )
+
+    counts = dict(question.frequencies(
+        [{"value": "python python ruby"}]
+    ))
+
+    assert "python" not in counts
+    assert counts["ruby"] == 1
+@
+
+The second scenario covers the rarer but legitimate case where a
+lecturer wants to keep what we would normally filter out --- for
+example, a linguistics class studying article usage in student writing.
+Turning the defaults off must let \enquote{the} resurface, so we drop
+the minimum length to one and check that the built-in entry is gone
+from the active set.
+
+<<test functions>>=
+
+def test_word_cloud_frequencies_disables_default_stopwords():
+    question = WordCloudQuestion(
+        "Topic?",
+        use_default_stopwords=False,
+        min_word_length=1,
+    )
+
+    counts = dict(question.frequencies(
+        [{"value": "the the cat"}]
+    ))
+
+    assert counts["the"] == 2
+    assert counts["cat"] == 1
+@
+
 \section{Canonicalisation}
 
 The rest of the system works on a question union.  The helper that rebuilds a
@@ -247,7 +697,7 @@ question from stored JSON is the bridge between the typed model and the JSON
 registry.
 
 <<classes>>=
-Question = MCQuestion | OpenQuestion | ScaleQuestion
+Question = MCQuestion | OpenQuestion | ScaleQuestion | WordCloudQuestion
 @
 
 \subsection{Rebuilding stored questions}
@@ -265,6 +715,7 @@ def question_from_dict(data: Mapping[str, Any]) -> Question:
     <<rebuild stored multiple-choice question>>
     <<rebuild stored open question>>
     <<rebuild stored scale question>>
+    <<rebuild stored wordcloud question>>
 
     raise ValueError(f"unknown question kind: {kind}")
 @
@@ -306,6 +757,27 @@ if kind == "scale":
         high=int(data.get("high", 5)),
         low_label=str(data.get("low_label", "")),
         high_label=str(data.get("high_label", "")),
+    )
+@
+
+Word-cloud reconstruction coerces [[extra_stop_words]] back to a tuple
+because JSON only knows lists --- a list would break the frozen
+dataclass's hashability the next time the question takes part in a set
+or dictionary key.  Every presentation field also falls back to its
+class-level default if a hand-edited or older store file omits it.
+
+<<rebuild stored wordcloud question>>=
+if kind == "wordcloud":
+    return WordCloudQuestion(
+        text=str(data["text"]),
+        max_chars=int(data.get("max_chars", 280)),
+        split_words=bool(data.get("split_words", True)),
+        min_word_length=int(data.get("min_word_length", 3)),
+        extra_stop_words=tuple(data.get("extra_stop_words", ())),
+        use_default_stopwords=bool(
+            data.get("use_default_stopwords", True)
+        ),
+        render=str(data.get("render", "svg")),
     )
 @
 
@@ -382,17 +854,56 @@ def test_scale_question_round_trip():
     assert question.to_dict() == payload
 @
 
+The word-cloud round trip checks two properties at once: every
+presentation field survives the JSON detour, and the
+[[extra_stop_words]] list is rebuilt as a tuple --- without the
+coercion, the frozen dataclass would refuse to hash and any later
+use in a set or dictionary would fail.
+
+<<test functions>>=
+def test_word_cloud_round_trip_preserves_extra_stop_words_as_tuple():
+    payload = {
+        "kind": "wordcloud",
+        "text": "What did you learn?",
+        "max_chars": 140,
+        "split_words": True,
+        "min_word_length": 4,
+        "extra_stop_words": ["foo", "bar"],
+        "use_default_stopwords": False,
+        "render": "table",
+    }
+
+    question = question_from_dict(payload)
+
+    assert isinstance(question, WordCloudQuestion)
+    assert question.extra_stop_words == ("foo", "bar")
+    assert question.to_dict() == payload
+@
+
 \subsection{Hashing canonical JSON}
 
 The canonical hash uses sorted JSON keys so that it depends on the meaning of
 the question, not on the incidental order in which Python produced a mapping.
 
+The choice of source dictionary depends on whether the question separates
+identity from presentation.  Multiple-choice, open, and scale questions
+have no such separation --- every stored field is part of the input
+contract --- so the hash uses [[to_dict()]] verbatim and the existing
+digests remain byte-stable.  Word clouds keep visualisation fields
+outside the hash through [[canonical_dict()]], so the same prompt and
+limit hash to the same identifier regardless of how a lecturer chooses
+to render the result.
+
 <<functions>>=
 def question_hash(question: Question) -> str:
     """Return the full SHA-256 digest for ``question``."""
 
+    if isinstance(question, WordCloudQuestion):
+        canonical_payload = question.canonical_dict()
+    else:
+        canonical_payload = question.to_dict()
     payload = json.dumps(
-        question.to_dict(),
+        canonical_payload,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
@@ -424,6 +935,51 @@ def test_question_hash_changes_when_option_order_changes():
     second = MCQuestion("Pick one", ("B", "A", "C"))
 
     assert question_hash(first) != question_hash(second)
+@
+
+The word-cloud invariance test pins the central guarantee of the new
+question type.  A lecturer who iterates on visualisation must not lose
+the answers already collected, which only holds if presentation choices
+never change the hash.  We deliberately vary several presentation
+fields at once: any one of them slipping into the canonical payload
+would break this assertion.
+
+<<test functions>>=
+
+def test_question_hash_invariant_to_word_cloud_presentation_changes():
+    base = WordCloudQuestion("Words?", max_chars=200)
+    variants = [
+        WordCloudQuestion("Words?", max_chars=200, render="table"),
+        WordCloudQuestion("Words?", max_chars=200, split_words=False),
+        WordCloudQuestion("Words?", max_chars=200, min_word_length=5),
+        WordCloudQuestion(
+            "Words?", max_chars=200, extra_stop_words=("foo",)
+        ),
+        WordCloudQuestion(
+            "Words?", max_chars=200, use_default_stopwords=False
+        ),
+    ]
+
+    digest = question_hash(base)
+    for variant in variants:
+        assert question_hash(variant) == digest
+@
+
+Conversely, changing the identity fields must still change the digest
+--- otherwise two genuinely different prompts would collide on the same
+URL prefix.
+
+<<test functions>>=
+
+def test_question_hash_changes_when_word_cloud_identity_changes():
+    base = WordCloudQuestion("Words?", max_chars=200)
+
+    assert question_hash(base) != question_hash(
+        WordCloudQuestion("Other words?", max_chars=200)
+    )
+    assert question_hash(base) != question_hash(
+        WordCloudQuestion("Words?", max_chars=140)
+    )
 @
 
 The test root is intentionally small: the interesting details live next to the
