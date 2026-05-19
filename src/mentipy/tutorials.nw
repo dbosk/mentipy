@@ -11,6 +11,178 @@ when it scans a directory.  Numbered filenames therefore keep the mentipy
 lessons in the intended progression even if someone later points [[pytorial]] at
 the directory directly.
 
+\section{Preparing Your Environment}
+
+Before learners can render or serve polls, they need one Python environment that
+both the CLI and PythonTeX can import from.  This tutorial therefore fixes the
+question-authoring workflow for later lessons and varies only the environment
+setup steps.
+
+\ltnote{%
+  \textbf{Object of learning}: Why and how to prepare a project-local virtual
+  environment for [[mentipy]].
+
+  \textbf{Learning outcomes}: Explain why a local virtual environment is needed,
+  create it with [[mentipy init]], activate it for the current shell, and
+  recognise that activation is temporary unless a shell tool repeats it.
+
+  \textbf{Critical aspects}: The difference between installing a CLI with
+  [[pipx]] and making [[python3]] plus PythonTeX import [[mentipy]] from the
+  same interpreter.
+
+  \textbf{Variation pattern}: Contrast followed by generalization.  The
+  contrast is staged across two steps that hold the import command fixed and
+  vary only whether the activation snippet has been applied.
+
+  \textbf{What varies}: Whether plain [[python3]] can [[import mentipy]] ---
+  first without the activation snippet, then with it.
+
+  \textbf{What stays invariant}: The project-local [[./.venv]] directory, the
+  import command used to probe it, and the goal that [[python3]] should be
+  able to import [[mentipy]].
+}
+
+<<[[00-preparing-your-environment.md]]>>=
+<<preparing your environment front matter>>
+<<preparing your environment steps>>
+@
+
+<<preparing your environment front matter>>=
+---
+id: preparing-your-environment
+title: Preparing Your Environment
+summary: Create and activate a project-local virtual environment so both
+  PythonTeX and your shell import mentipy from the same interpreter.
+---
+@
+
+We begin with the help text because the workflow only makes sense once the
+learner sees the distinction between system Python, [[pipx]], and PythonTeX.
+
+<<preparing your environment steps>>=
+# Learn why the virtual environment matters
+
+```tutorial-step
+required_patterns:
+  - mentipy init --help
+  - PEP 668
+  - pipx
+  - PythonTeX
+hint: "Read the built-in help first so the motivation for the later shell
+  commands is concrete."
+```
+
+Inspect the setup command's help text:
+
+```sh
+mentipy init --help
+```
+
+The key idea is that `pipx` is good for the standalone CLI, but PythonTeX still
+imports from the `python3` running your document build.
+@
+
+The next step turns that explanation into a concrete filesystem effect.
+
+<<preparing your environment steps>>=
+# Create the local virtual environment
+
+```tutorial-step
+required_patterns:
+  - mentipy init
+  - ./.venv/bin/python
+  - ls ./.venv/bin/python
+hint: "Create the environment in the current project and then prove that the
+  virtualenv interpreter exists."
+```
+
+Create the project-local environment and verify that it exists:
+
+```sh
+mentipy init
+ls ./.venv/bin/python
+```
+
+This is the interpreter that the next step will add to your shell's `PATH`.
+@
+
+Before applying the activation snippet, we probe the system [[python3]] with
+the same import that the activated shell will run.  The failure is the
+\enquote{before} half of the contrast: it makes the activation step's effect
+visible rather than asserted.
+
+<<preparing your environment steps>>=
+# Probe python3 before activation
+
+```tutorial-step
+required_patterns:
+  - python3 -c 'import mentipy'
+  - ModuleNotFoundError
+  - mentipy
+hint: "Run the import probe first, even though it will fail. The next step
+  uses the same probe to show what activation changes."
+```
+
+Run the import probe against the system `python3`:
+
+```sh
+python3 -c 'import mentipy' || true
+```
+
+The virtualenv already exists on disk after `mentipy init`, but the system
+`python3` still cannot see it; `ModuleNotFoundError` is the expected
+outcome.  The trailing `|| true` keeps the tutorial running so the next
+step can show the same probe succeeding.
+@
+
+The next step keeps the import command identical and only adds the activation
+snippet.  That is the \enquote{after} half of the contrast.
+
+<<preparing your environment steps>>=
+# Activate the environment in the current shell
+
+```tutorial-step
+required_patterns:
+  - eval $(mentipy activate)
+  - python3 -c 'import mentipy'
+  - python3 -c 'import mentipy; print(mentipy.__version__)'
+hint: "Evaluate the activation snippet in your current shell and then make
+  python3 import mentipy directly."
+```
+
+Activate the environment and prove that `python3` now imports `mentipy`:
+
+```sh
+eval $(mentipy activate)
+python3 -c 'import mentipy; print(mentipy.__version__)'
+```
+
+The activation command only prints shell code.  `eval` is what makes the current
+shell use it.
+@
+
+The last step generalises from the one shell session to the learner's day-to-day
+workflow.
+
+<<preparing your environment steps>>=
+# Check what activation does and does not persist
+
+```tutorial-step
+kind: multi_select
+options:
+  - The activation lasts only for the shell where you ran eval $(mentipy activate).
+  - Opening a new shell means you need to activate again unless another tool does it for you.
+  - A Makefile target or direnv can automate repeated activation for a project.
+  - mentipy activate permanently modifies every future shell on the machine.
+answers:
+  - The activation lasts only for the shell where you ran eval $(mentipy activate).
+  - Opening a new shell means you need to activate again unless another tool does it for you.
+  - A Makefile target or direnv can automate repeated activation for a project.
+```
+
+Select every statement that should now feel true.
+@
+
 \section{Choosing an Authoring Path}
 
 This tutorial reuses the same poll while contrasting the two authoring paths.

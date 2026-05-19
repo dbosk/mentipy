@@ -20,7 +20,10 @@ MODULES+= \
 	server.tex \
 	store.py \
 	store.tex \
+	venv.py \
+	venv.tex \
 	tutorials.tex \
+	tutorials/00-preparing-your-environment.md \
 	tutorials/01-authoring-paths.md \
 	tutorials/02-question-kinds.md \
 	tutorials/03-layout-and-environment.md \

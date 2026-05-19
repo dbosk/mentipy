@@ -30,10 +30,14 @@ from mentipy.questions import (
 )
 from mentipy.server import serve
 from mentipy.store import Store
+from mentipy.venv import activation_script, create_venv, install_package
 @
 
 The version constant keeps the generated package self-describing, while
-[[__all__]] documents the intended public API explicitly.
+[[__all__]] documents the intended public API explicitly.  The environment
+helpers live here too because the CLI and PythonTeX workflows both benefit from
+one obvious import surface when a course repository needs a local virtual
+environment.
 
 <<constants>>=
 __version__ = "0.2"
@@ -44,6 +48,9 @@ __all__ = [
     "Question",
     "ScaleQuestion",
     "Store",
+    "activation_script",
+    "create_venv",
+    "install_package",
     "mc",
     "open_text",
     "question",
@@ -79,6 +86,9 @@ def test_package_facade_reexports_the_public_api():
     assert callable(question)
     assert callable(scale)
     assert callable(serve)
+    assert callable(create_venv)
+    assert callable(install_package)
+    assert callable(activation_script)
     assert Store.__name__ == "Store"
-    assert __version__ == "0.1"
+    assert __version__ == "0.2"
 @

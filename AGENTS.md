@@ -22,6 +22,7 @@
 - `src/mentipy/mentipy.nw`: package facade; re-exports the public API from the smaller modules.
 - `src/mentipy/questions.nw`: frozen question models and canonical hashing input.
 - `src/mentipy/store.nw`: config loading, persistent JSON store, stable prefix resolution.
+- `src/mentipy/venv.nw`: local virtualenv creation, package installation, and activation snippets.
 - `src/mentipy/latex.nw`: PythonTeX-facing LaTeX helpers; handles registration and QR generation side effects.
 - `src/mentipy/server.nw`: standard-library threaded HTTP server and HTML results/forms.
 - `src/mentipy/cli.nw`: Typer CLI; thin wrapper over store/server/LaTeX helpers.
