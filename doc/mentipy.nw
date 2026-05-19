@@ -722,6 +722,7 @@ replaced by new compile-time placeholders.
 \input{../src/mentipy/questions.tex}
 \input{../src/mentipy/qr.tex}
 \input{../src/mentipy/store.tex}
+\input{../src/mentipy/venv.tex}
 \input{../src/mentipy/network.tex}
 \input{../src/mentipy/latex.tex}
 \input{../src/mentipy/server.tex}

@@ -1,0 +1,158 @@
+\chapter{Virtual Environments}
+
+Recent Python distributions increasingly follow PEP~668 and reject direct
+[[pip install]] commands into the system interpreter.  That is usually the
+right default, but [[mentipy]] has one extra constraint: PythonTeX imports the
+package from the same [[python3]] that builds the document.  A small helper
+module therefore keeps the environment-preparation workflow explicit and
+scriptable from both the CLI and user code.
+
+<<[[venv.py]]>>=
+from __future__ import annotations
+
+<<imports>>
+
+<<functions>>
+@
+
+<<imports>>=
+from pathlib import Path
+import shlex
+import subprocess
+import venv
+@
+
+\section{Creating the environment}
+
+Environment creation is intentionally idempotent.  Once [[path/bin/python]]
+exists, callers already have a usable virtual environment and should keep any
+packages currently installed inside it.  That makes [[mentipy init]] safe to
+rerun: the command can detect whether it is provisioning or merely refreshing
+the package installation.
+
+<<functions>>=
+def create_venv(path: Path) -> bool:
+    """Create a virtual environment at ``path`` if needed.
+
+    Return ``True`` when a new environment was created, else ``False``.
+    """
+
+    if (path / "bin" / "python").exists():
+        return False
+
+    venv.EnvBuilder(with_pip=True).create(path)
+    return True
+@
+
+The creation test uses a real virtual environment because the contract is about
+filesystem side effects and idempotence, not just about calling into
+[[venv.EnvBuilder]].
+
+<<test functions>>=
+def test_create_venv_creates_once_and_then_stays_idempotent(tmp_path):
+    path = tmp_path / ".venv"
+
+    assert create_venv(path) is True
+    assert (path / "bin" / "python").exists()
+    assert create_venv(path) is False
+@
+
+\section{Installing mentipy into the environment}
+
+Package installation goes through the environment's own interpreter rather than
+through a separate [[pip]] executable.  That keeps the target interpreter
+unambiguous and works even when shell activation has not happened yet.
+
+<<functions>>=
+def install_package(venv_path: Path, package: str = "mentipy") -> None:
+    """Install or upgrade ``package`` inside ``venv_path``."""
+
+    subprocess.run(
+        [
+            str(venv_path / "bin" / "python"),
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            package,
+        ],
+        check=True,
+    )
+@
+
+The installation helper is a thin subprocess wrapper, so the regression test
+only needs to pin the exact command shape and the [[check=True]] contract.
+
+<<test functions>>=
+def test_install_package_uses_the_venv_python(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(command, check):
+        calls.append((command, check))
+
+    monkeypatch.setattr("mentipy.venv.subprocess.run", fake_run)
+
+    install_package(tmp_path / ".venv", package="mentipy")
+
+    assert calls == [
+        (
+            [
+                str(tmp_path / ".venv" / "bin" / "python"),
+                "-m",
+                "pip",
+                "install",
+                "--upgrade",
+                "mentipy",
+            ],
+            True,
+        )
+    ]
+@
+
+\section{Generating activation commands}
+
+The activation output is a shell snippet rather than a shell script file.  That
+keeps [[mentipy activate]] easy to compose with [[eval $(mentipy activate)]]
+and avoids assuming that users want the standard activation script's prompt
+customisation.  We emit absolute paths and POSIX shell quoting so the result is
+safe even when the virtual environment lives under a directory with spaces.
+
+<<functions>>=
+def activation_script(venv_path: Path) -> str:
+    """Return POSIX shell commands that activate ``venv_path``."""
+
+    absolute = shlex.quote(str(venv_path.resolve()))
+    return "\n".join(
+        (
+            f"export VIRTUAL_ENV={absolute}",
+            'export PATH="$VIRTUAL_ENV/bin:$PATH"',
+            "unset PYTHONHOME",
+            "hash -r 2>/dev/null || true",
+        )
+    )
+@
+
+The activation helper should stay byte-for-byte predictable because the CLI
+prints it directly for shell evaluation.
+
+<<test functions>>=
+def test_activation_script_uses_an_absolute_single_quoted_path(tmp_path):
+    path = tmp_path / "course env"
+
+    assert activation_script(path) == "\n".join(
+        (
+            f"export VIRTUAL_ENV='{path.resolve()}'",
+            'export PATH="$VIRTUAL_ENV/bin:$PATH"',
+            "unset PYTHONHOME",
+            "hash -r 2>/dev/null || true",
+        )
+    )
+@
+
+<<test [[venv.py]]>>=
+import pytest
+
+from mentipy.venv import *
+
+<<test functions>>
+@

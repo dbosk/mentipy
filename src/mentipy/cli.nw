@@ -56,6 +56,7 @@ from mentipy.store import (
     DEFAULT_HOST,
     DEFAULT_PORT,
     DEFAULT_STORE_PATH,
+    DEFAULT_VENV_PATH,
     HOST_CONFIG,
     MIN_PREFIX_CONFIG,
     PUBLIC_BASE_URL_CONFIG,
@@ -67,10 +68,12 @@ from mentipy.store import (
     SSH_TUNNEL_CONFIG,
     STORE_CONFIG,
     Store,
+    VENV_CONFIG,
     format_timestamp,
     get_setting,
     set_setting,
 )
+from mentipy.venv import activation_script, create_venv, install_package
 @
 
 \section{Shared options and constants}
@@ -106,6 +109,7 @@ CONFIG_KEY_HELP = (
     (SHOW_URL_CONFIG, "Default URL visibility for QR-less article layouts."),
     (SSH_TUNNEL_CONFIG, "SSH endpoint for mentipy serve --public ssh."),
     (STORE_CONFIG, "Default path to mentipy.json."),
+    (VENV_CONFIG, "Default virtualenv path used by mentipy init/activate."),
 )
 @
 
@@ -117,6 +121,7 @@ terminal help double as a compact map from command flags to persistent settings.
 HOST_HELP = f"Bind address. Defaults to config setting {HOST_CONFIG}."
 PORT_HELP = f"Bind port. Defaults to config setting {PORT_CONFIG}."
 STORE_HELP = f"Path to mentipy.json. Defaults to config setting {STORE_CONFIG}."
+VENV_HELP = f"Virtualenv path. Defaults to config setting {VENV_CONFIG}."
 PUBLIC_HELP = (
     "Expose the server publicly. Bare --public defaults to upnp. SSH mode "
     f"reads {SSH_TUNNEL_CONFIG}, and QR regeneration prefers "
@@ -150,6 +155,7 @@ ROOT_HELP_EPILOG = (
 HOST_OPTION = typer.Option(None, help=HOST_HELP)
 PORT_OPTION = typer.Option(None, help=PORT_HELP)
 STORE_OPTION = typer.Option(None, help=STORE_HELP)
+VENV_OPTION = typer.Option(None, "--venv", help=VENV_HELP)
 PUBLIC_OPTION = typer.Option(False, "--public", help=PUBLIC_HELP)
 RESULTS_OPTION = typer.Option(False, "--results", help=RESULTS_HELP)
 ENVIRONMENT_OPTION = typer.Option(None, "--env", help=ENVIRONMENT_HELP)
@@ -216,6 +222,10 @@ def _configured_store(path: str | None) -> Store:
 
 def _configured_port(port: int | None) -> int:
     return int(port or get_setting(PORT_CONFIG, DEFAULT_PORT))
+
+
+def _configured_venv(path: str | None) -> Path:
+    return Path(path or get_setting(VENV_CONFIG, DEFAULT_VENV_PATH))
 
 
 def _configured_base(base: str | None) -> str | None:
@@ -1071,6 +1081,7 @@ to scan the directory.
 <<constants>>=
 TUTORIAL_NAMESPACE = "mentipy"
 TUTORIAL_FILENAMES = (
+    "00-preparing-your-environment.md",
     "01-authoring-paths.md",
     "02-question-kinds.md",
     "03-layout-and-environment.md",
@@ -1153,6 +1164,59 @@ add_typer_subcommand(
     namespace=TUTORIAL_NAMESPACE,
     tutorial_paths=_tutorial_paths(),
 )
+@
+
+\section{Environment commands}
+
+The environment commands make the Python interpreter choice explicit.  [[pipx]]
+remains a fine way to install the standalone CLI, but PythonTeX imports through
+the document build's [[python3]].  These commands therefore prepare and expose a
+project-local virtual environment that both workflows can share.
+
+<<cli setup>>=
+@cli.command()
+def init(
+    venv: Optional[str] = VENV_OPTION,
+):
+    """Create or refresh Mentipy's local virtual environment.
+
+    Recent Python distributions follow PEP 668 and discourage installing into
+    the system interpreter. `pipx` solves the CLI side, but PythonTeX still
+    imports Mentipy from the `python3` that builds your document. This command
+    creates a project-local virtualenv and upgrades `mentipy` inside it.
+    """
+
+    venv_path = _configured_venv(venv)
+    created = create_venv(venv_path)
+    install_package(venv_path)
+
+    if created:
+        typer.echo(f"Created virtual environment at {venv_path}")
+    else:
+        typer.echo(f"Reusing virtual environment at {venv_path}")
+    typer.echo("Installed or upgraded mentipy inside the virtual environment.")
+
+
+@cli.command()
+def activate(
+    venv: Optional[str] = VENV_OPTION,
+):
+    """Print shell code that activates Mentipy's local virtual environment.
+
+    Use it from your current shell with `eval $(mentipy activate)`. The printed
+    commands affect only that shell session, which is exactly what makes them
+    safe to embed in a Makefile, shell alias, or direnv rule.
+    """
+
+    venv_path = _configured_venv(venv)
+    if not (venv_path / "bin" / "python").exists():
+        typer.echo(
+            f"Virtual environment not found at {venv_path}. Run `mentipy init` first.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    typer.echo(activation_script(venv_path), nl=False)
 @
 
 \section{Serving commands}
@@ -1778,8 +1842,9 @@ def test_tutorial_list_starts_with_using_tutorials(tmp_path, monkeypatch):
         for line in result.stdout.splitlines()
         if line.strip()
     ]
-    assert tutorial_ids[:6] == [
+    assert tutorial_ids[:7] == [
         "using-tutorials",
+        "preparing-your-environment",
         "authoring-paths",
         "question-kinds",
         "layout-and-environment",
@@ -1825,6 +1890,109 @@ def test_config_round_trip_uses_typerconf_command_shape(tmp_path):
 
     assert result.exit_code == 0
     assert result.stdout.strip() == f"{PORT_CONFIG} = 9000"
+@
+
+The environment commands document a concrete workflow, so their help text should
+name the reasons for the extra step and the shell form that activation expects.
+
+<<test functions>>=
+def test_environment_command_help_mentions_the_virtualenv_workflow():
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["init", "--help"])
+
+    assert result.exit_code == 0
+    assert "PEP 668" in result.output
+    assert "pipx" in result.output
+    assert "PythonTeX" in result.output
+    assert VENV_CONFIG in result.output
+
+    result = runner.invoke(cli, ["activate", "--help"])
+
+    assert result.exit_code == 0
+    assert "eval $(mentipy activate)" in result.output
+    assert VENV_CONFIG in result.output
+@
+
+The behaviour tests stay at the CLI boundary: no real virtual environment or
+[[pip install]] should run when we only want to verify command wiring.
+
+<<test functions>>=
+def test_init_command_creates_or_reuses_the_configured_venv(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("venv", str(tmp_path / "course-venv"))
+    calls = []
+
+    def fake_create(path):
+        calls.append(("create", path))
+        return True
+
+    def fake_install(path):
+        calls.append(("install", path))
+
+    monkeypatch.setattr("mentipy.cli.create_venv", fake_create)
+    monkeypatch.setattr("mentipy.cli.install_package", fake_install)
+
+    result = runner.invoke(cli, ["init"])
+
+    assert result.exit_code == 0
+    assert calls == [
+        ("create", tmp_path / "course-venv"),
+        ("install", tmp_path / "course-venv"),
+    ]
+    assert "Created virtual environment" in result.stdout
+
+
+def test_init_command_accepts_an_explicit_venv_path(tmp_path, monkeypatch):
+    runner = CliRunner()
+    calls = []
+
+    def fake_create(path):
+        calls.append(("create", path))
+        return False
+
+    def fake_install(path):
+        calls.append(("install", path))
+
+    monkeypatch.setattr("mentipy.cli.create_venv", fake_create)
+    monkeypatch.setattr("mentipy.cli.install_package", fake_install)
+
+    result = runner.invoke(cli, ["init", "--venv", str(tmp_path / "alt-venv")])
+
+    assert result.exit_code == 0
+    assert calls == [
+        ("create", tmp_path / "alt-venv"),
+        ("install", tmp_path / "alt-venv"),
+    ]
+    assert "Reusing virtual environment" in result.stdout
+
+
+def test_activate_command_prints_only_the_activation_script(tmp_path, monkeypatch):
+    runner = CliRunner()
+    venv_path = tmp_path / ".venv"
+    (venv_path / "bin").mkdir(parents=True)
+    (venv_path / "bin" / "python").write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        "mentipy.cli.activation_script",
+        lambda path: f"export VIRTUAL_ENV='{path.resolve()}'",
+    )
+
+    result = runner.invoke(cli, ["activate", "--venv", str(venv_path)])
+
+    assert result.exit_code == 0
+    assert result.stdout == f"export VIRTUAL_ENV='{venv_path.resolve()}'"
+    assert result.stderr == ""
+
+
+def test_activate_command_errors_cleanly_when_the_venv_is_missing(tmp_path):
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["activate", "--venv", str(tmp_path / ".venv")])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "Run `mentipy init` first." in result.stderr
 @
 
 \section{LaTeX reference command contract}
