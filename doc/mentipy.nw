@@ -468,8 +468,10 @@ instead of printing a dead URL.
 A word-cloud poll takes the same free-text input as an open-text poll, but
 the results page aggregates the answers into a word cloud rather than
 listing them verbatim.  The lecturer chooses the visualisation up front
-by passing [[render="svg"]] (the flow-layout cloud, used here),
-[[render="scaled"]] (a CSS-sized inline list of words), or
+by passing [[render="svg"]] (the default; it prefers the optional
+[[wordcloud]] package when installed and otherwise falls back to
+Mentipy's built-in SVG layout, used here), [[render="scaled"]] (a
+CSS-sized inline list of words), or
 [[render="table"]] (a frequency table).
 
 \begin{pyblock}

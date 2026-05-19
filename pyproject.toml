@@ -24,6 +24,7 @@ mentipy = "mentipy.cli:main"
 
 [project.optional-dependencies]
 public = ["miniupnpc (>=2.2.5,<3.0.0)"]
+wordcloud = ["wordcloud (>=1.9.6,<2.0.0)"]
 
 
 [tool.poetry]

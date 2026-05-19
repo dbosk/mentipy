@@ -779,7 +779,9 @@ formatted as a Rich [[Table]] for readability.  We cap the table to a
 sensible top--N so a long-tail cloud does not flood a small terminal.
 The total counts come first because they describe the cloud at a
 glance (how busy and how diverse), the same role that [[Avg length]]
-plays for open-text answers.
+plays for open-text answers.  The table mirrors the HTML results page:
+exact counts stay visible, and percentages make the long tail easier to
+scan at a glance.
 
 <<constants>>=
 TERMINAL_WORDCLOUD_TOP_N = 25
@@ -792,17 +794,27 @@ def _render_terminal_wordcloud(results: dict, *, console: Console):
         console.print("No answers yet.")
         return
 
+    total_tokens = int(results.get("total_tokens") or 0)
+    if not total_tokens:
+        total_tokens = sum(int(entry[1]) for entry in frequencies)
+    denominator = total_tokens or 1
+
     console.print(_stats_line([
-        ("Words", str(results.get("total_tokens", 0))),
+        ("Words", str(total_tokens)),
         ("Distinct", str(results.get("unique_words", 0))),
     ]))
 
     table = Table(show_header=True, header_style="bold")
     table.add_column("Word")
-    table.add_column("Count", justify="right")
+    table.add_column(f"Count ({total_tokens})", justify="right")
+    table.add_column("Percentage", justify="right")
     for entry in frequencies[:TERMINAL_WORDCLOUD_TOP_N]:
         word, count = entry[0], entry[1]
-        table.add_row(str(word), str(count))
+        table.add_row(
+            str(word),
+            str(count),
+            f"{int(count) / denominator * 100:.1f}%",
+        )
     console.print(table)
 
     remaining = len(frequencies) - TERMINAL_WORDCLOUD_TOP_N
@@ -815,7 +827,7 @@ def _render_terminal_wordcloud(results: dict, *, console: Console):
 
 The frequency-table test mirrors the open-stats one: render into a
 silent Rich console and check that the descending order, the totals
-line, and the [[Count]] header all appear.
+line, the dynamic count header, and the percentage column all appear.
 
 <<test functions>>=
 def test_terminal_wordcloud_shows_frequency_table():
@@ -841,7 +853,10 @@ def test_terminal_wordcloud_shows_frequency_table():
     assert "Distinct: 2" in output
     assert "apple" in output
     assert "banana" in output
-    assert "Count" in output
+    assert "Count (3)" in output
+    assert "Percentage" in output
+    assert "66.7%" in output
+    assert "33.3%" in output
 @
 
 The full result renderer is shared by [[view]] and the first frame of

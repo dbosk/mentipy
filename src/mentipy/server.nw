@@ -21,6 +21,7 @@ from email.policy import default as default_policy
 from html import escape
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import importlib
 import json
 import logging
 import os
@@ -214,6 +215,38 @@ pre code.highlight {
   border-left: 3px solid #4a90d9;
   margin: 0.5rem 0 1rem;
   padding: 0.5rem 0.75rem;
+}
+
+.wordcloud-svg {
+  display: block;
+  margin: 0 0 1rem;
+  width: 100%;
+}
+
+.wordcloud-scaled {
+  line-height: 1.8;
+  margin: 0 0 1rem;
+}
+
+.wordcloud-table {
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+  margin: 0 0 1rem;
+  width: 100%;
+}
+
+.wordcloud-table th,
+.wordcloud-table td {
+  border-bottom: 1px solid #eee;
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+}
+
+.wordcloud-table th:nth-child(2),
+.wordcloud-table td:nth-child(2),
+.wordcloud-table th:last-child,
+.wordcloud-table td:last-child {
+  text-align: right;
 }
 
 .md-answer { margin: 0 0 0.5rem; }
@@ -1343,9 +1376,14 @@ def _render_wordcloud_stats(summary: dict[str, Any]) -> str:
     )
 @
 
-The dispatcher chooses the visualisation strictly by [[question.render]]
-because the question validates that field at construction time.  No
-fallback is needed --- an invalid value cannot reach this point.
+The dispatcher still chooses the visual form strictly by
+[[question.render]] because the question validates that field at
+construction time.  Only the [[svg]] arm needs an internal fallback:
+the public render value stays stable, but the implementation now
+prefers the optional [[wordcloud]] package when it is installed and
+otherwise keeps using Mentipy's built-in SVG layout.  The visual modes
+append the same frequency table as [[render="table"]], so the lecturer
+keeps exact counts while still seeing the overall shape.
 
 <<functions>>=
 def _render_wordcloud(
@@ -1358,8 +1396,10 @@ def _render_wordcloud(
     if question.render == "table":
         return _render_wordcloud_table(pairs)
     if question.render == "scaled":
-        return _render_wordcloud_scaled(pairs)
-    return _render_wordcloud_svg(pairs)
+        visual = _render_wordcloud_scaled(pairs)
+    else:
+        visual = _render_wordcloud_svg(pairs)
+    return visual + _render_wordcloud_table(pairs)
 @
 
 \subsubsection{Font scaling}
@@ -1394,18 +1434,22 @@ def _wordcloud_font_scale(
 
 The table view is the plainest renderer.  It is also the most useful
 when the answers are sparse or the lecturer wants a quick numerical
-overview rather than a visual one --- showing the leaderboard rather
-than the gestalt.
+overview rather than a visual one --- showing the leaderboard, the
+total count, and each word's share rather than the gestalt.
 
 <<functions>>=
 def _render_wordcloud_table(pairs: list[tuple[str, int]]) -> str:
+    total = sum(count for _, count in pairs)
     rows = "".join(
-        f"<tr><td>{escape(word)}</td><td>{count}</td></tr>"
+        f"<tr><td>{escape(word)}</td><td>{count}</td>"
+        f"<td>{count / total * 100:.1f}%</td></tr>"
         for word, count in pairs
     )
     return (
         '<table class="wordcloud-table">'
-        "<thead><tr><th>Word</th><th>Count</th></tr></thead>"
+        "<thead><tr><th>Word</th>"
+        f"<th>Count ({total})</th>"
+        "<th>Percentage</th></tr></thead>"
         f"<tbody>{rows}</tbody>"
         "</table>"
     )
@@ -1431,17 +1475,78 @@ def _render_wordcloud_scaled(pairs: list[tuple[str, int]]) -> str:
     return f'<div class="wordcloud-scaled">{spans}</div>'
 @
 
-\subsubsection{SVG flow layout}
+\subsubsection{SVG mode}
 
 The SVG view is the default because authors who think \enquote{word
-cloud} usually picture a single graphic they can copy into a slide.  A
-true spiral packer would require font-metric estimation that is wrong
-for diacritics and adds far more code than the rest of this renderer
-combined, so we use a flow layout instead: words are placed
-left-to-right and wrap onto a new line when they would overflow.  Each
-word's bounding-box width is approximated as
+cloud} usually picture a single graphic they can copy into a slide.
+When the optional [[wordcloud]] package is installed, we let it do the
+placement because its packed layout is denser and more recognisably a
+word cloud than our small home-grown fallback.  The package stays
+optional because it brings in NumPy, Pillow, and Matplotlib; users who
+only need the built-in renderers should not pay that dependency cost.
+
+A live results page refreshes every two seconds, so the package-backed
+layout must be deterministic.  We fix its random seed, keep the words
+horizontal, and normalise the returned SVG fragment so the HTML
+contract stays the same: one inline [[<svg>]] with the
+[[wordcloud-svg]] CSS hook and an accessible label.
+
+<<functions>>=
+def _render_wordcloud_svg(pairs: list[tuple[str, int]]) -> str:
+    svg = _render_wordcloud_svg_with_package(pairs)
+    if svg is not None:
+        return svg
+    return _render_wordcloud_svg_fallback(pairs)
+@
+
+The optional-package path is an optimisation, not a requirement.  A
+missing dependency is normal, so [[ImportError]] simply returns
+[[None]] and lets the caller fall back to Mentipy's own SVG layout.
+
+<<functions>>=
+def _render_wordcloud_svg_with_package(
+    pairs: list[tuple[str, int]],
+) -> str | None:
+    try:
+        module = importlib.import_module("wordcloud")
+    except ImportError:
+        return None
+
+    cloud = module.WordCloud(
+        width=720,
+        height=480,
+        background_color=None,
+        mode="RGBA",
+        color_func=lambda *_args, **_kwargs: "#111",
+        prefer_horizontal=1.0,
+        random_state=0,
+    )
+    svg = cloud.generate_from_frequencies(dict(pairs)).to_svg().lstrip()
+    if svg.startswith("<?xml"):
+        _declaration, _separator, svg = svg.partition("?>")
+        svg = svg.lstrip()
+    return svg.replace(
+        "<svg",
+        (
+            '<svg class="wordcloud-svg" role="img" '
+            'aria-label="Word cloud"'
+        ),
+        1,
+    )
+@
+
+The built-in fallback still uses a flow layout.  A true spiral packer
+would require font-metric estimation that is wrong for diacritics and
+adds far more code than the rest of this renderer combined, so we place
+words left-to-right and wrap onto a new line when they would overflow.
+Each word's bounding-box width is approximated as
 [[0.6 * font\_size * len(word)]], a heuristic that is accurate enough
 for Latin and mixed Latin-Cyrillic text to avoid most overlaps.
+
+We also leave a little more outer padding than the heuristic strictly
+needs.  Browser font metrics differ by a few pixels at the edge of the
+[[viewBox]], and a slightly wider gutter is cheaper than clipping the
+last stroke of a tall or wide glyph.
 
 Every word passes through [[escape]] before reaching the [[<text>]]
 element because the words come from respondent input --- an unescaped
@@ -1449,11 +1554,13 @@ element because the words come from respondent input --- an unescaped
 arbitrary markup.
 
 <<functions>>=
-def _render_wordcloud_svg(pairs: list[tuple[str, int]]) -> str:
+def _render_wordcloud_svg_fallback(
+    pairs: list[tuple[str, int]],
+) -> str:
     counts = [count for _, count in pairs]
     sizes = _wordcloud_font_scale(counts, min_size=14.0, max_size=48.0)
     canvas_width = 720.0
-    padding = 8.0
+    padding = 16.0
     line_gap = 1.25
     elements: list[str] = []
     cursor_x = padding
@@ -1482,6 +1589,55 @@ def _render_wordcloud_svg(pairs: list[tuple[str, int]]) -> str:
         + "".join(elements)
         + "</svg>"
     )
+@
+
+Let's verify both SVG branches directly before the end-to-end page
+tests.  The optional package path should preserve Mentipy's HTML hook,
+while the live results page still needs a deterministic fallback test
+that does not depend on the package being installed in the test
+environment.
+
+<<test functions>>=
+def test_render_wordcloud_svg_uses_optional_package_when_available(
+    monkeypatch,
+):
+    captured = {}
+
+    class FakeWordCloud:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+
+        def generate_from_frequencies(self, frequencies):
+            captured["frequencies"] = dict(frequencies)
+            return self
+
+        def to_svg(self):
+            return (
+                '<?xml version="1.0" encoding="UTF-8"?>\n'
+                '<svg xmlns="http://www.w3.org/2000/svg">'
+                '<text>packed</text></svg>'
+            )
+
+    class FakeModule:
+        WordCloud = FakeWordCloud
+
+    monkeypatch.setattr(
+        server_module.importlib,
+        "import_module",
+        lambda _name: FakeModule,
+    )
+
+    rendered = server_module._render_wordcloud_svg(
+        [("apple", 2), ("banana", 1)]
+    )
+
+    assert captured["frequencies"] == {"apple": 2, "banana": 1}
+    assert captured["kwargs"]["mode"] == "RGBA"
+    assert captured["kwargs"]["prefer_horizontal"] == 1.0
+    assert captured["kwargs"]["random_state"] == 0
+    assert rendered.startswith('<svg class="wordcloud-svg"')
+    assert 'role="img"' in rendered
+    assert '<?xml version="1.0"' not in rendered
 @
 
 \subsection{Dispatching by question type}
@@ -2479,13 +2635,22 @@ def test_results_page_open_question_renders_md_without_timestamp(
 @
 
 The word-cloud results page has three render modes selected by the
-author at slide time, so the tests run end-to-end for each mode.  We
-also send a payload containing markup characters because the words
-flow straight into the HTML or SVG output --- a missing
+author at slide time, so the tests run end-to-end for each mode.  The
+visual modes now append the same frequency table used by the pure-table
+mode, so the checks cover both the cloud markup and the exact-count
+fallback.  We also send a payload containing markup characters because
+the words flow straight into the HTML or SVG output --- a missing
 [[html.escape]] would let respondents inject arbitrary markup.
 
 <<test functions>>=
-def test_results_page_wordcloud_svg_escapes_words(tmp_path):
+def test_results_page_wordcloud_svg_escapes_words_and_shows_frequencies(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(
+        server_module.importlib,
+        "import_module",
+        lambda _name: (_ for _ in ()).throw(ImportError()),
+    )
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(WordCloudQuestion("Words?", render="svg"))
     full_hash = store.resolve(prefix)
@@ -2496,12 +2661,18 @@ def test_results_page_wordcloud_svg_escapes_words(tmp_path):
         _, body = _request(port, "GET", f"/{prefix}/results")
 
     assert "<svg" in body
+    assert 'class="wordcloud-table"' in body
+    assert "<th>Count (2)</th>" in body
+    assert "<th>Percentage</th>" in body
+    assert "50.0%" in body
     assert "&lt;script&gt;" in body
     assert "<script>" not in body
 @
 
 <<test functions>>=
-def test_results_page_wordcloud_scaled_uses_sized_spans(tmp_path):
+def test_results_page_wordcloud_scaled_uses_sized_spans_and_shows_frequencies(
+    tmp_path,
+):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(
         WordCloudQuestion("Words?", render="scaled")
@@ -2514,10 +2685,14 @@ def test_results_page_wordcloud_scaled_uses_sized_spans(tmp_path):
 
     assert 'class="wordcloud-scaled"' in body
     assert "font-size:" in body
+    assert 'class="wordcloud-table"' in body
+    assert "<th>Count (3)</th>" in body
+    assert "<th>Percentage</th>" in body
+    assert "66.7%" in body
 @
 
 <<test functions>>=
-def test_results_page_wordcloud_table_emits_two_columns(tmp_path):
+def test_results_page_wordcloud_table_emits_counts_and_percentages(tmp_path):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(
         WordCloudQuestion("Words?", render="table")
@@ -2530,7 +2705,10 @@ def test_results_page_wordcloud_table_emits_two_columns(tmp_path):
 
     assert "wordcloud-table" in body
     assert "<th>Word</th>" in body
-    assert "<th>Count</th>" in body
+    assert "<th>Count (3)</th>" in body
+    assert "<th>Percentage</th>" in body
+    assert "66.7%" in body
+    assert "33.3%" in body
     assert "apple" in body and "banana" in body
 @
 

@@ -69,10 +69,15 @@ Use the question kind that matches the response shape you want to collect.
 | Several listed options | `mc(text, options, multi=True)` | `mentipy render mc --multi TEXT OPTION...` |
 | Free text | `open_text(text)` | `mentipy render open TEXT` |
 | Numeric scale | `scale(text, low=1, high=5)` | `mentipy render scale TEXT --low 1 --high 5` |
+| Word cloud | `word_cloud(text)` | `mentipy render word-cloud TEXT` |
 
 Open-text questions can also collect uploaded files. Pass `fence="python"` or
 `--fence python` when uploaded code should be rendered as a language-tagged
 Markdown code block on the results page.
+
+Word-cloud questions default to `render="svg"`. Installing
+`mentipy[wordcloud]` lets that mode use the optional `wordcloud` layout engine;
+without it, `mentipy` falls back to its built-in SVG renderer.
 
 ## Layout and LaTeX Integration
 

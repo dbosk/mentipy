@@ -59,6 +59,7 @@ A new question type or top-level helper has to land in several places beyond its
 - The console entrypoint is `mentipy = "mentipy.cli:main"`.
 - Defaults and config keys live in `src/mentipy/store.nw`; both CLI and LaTeX helpers read settings from there.
 - Optional public exposure support is packaged as `mentipy[public]`, which installs `miniupnpc` for the UPnP mode; SSH mode stays stdlib-only.
+- Optional denser word-cloud SVG rendering is packaged as `mentipy[wordcloud]`; `render="svg"` falls back to the built-in SVG layout when that extra is not installed.
 - `MENTIPY_CONFIG` overrides the config file location for tests and local runs.
 
 ## Commit hygiene for this repo
