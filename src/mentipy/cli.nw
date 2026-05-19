@@ -46,6 +46,7 @@ from mentipy.latex import (
     open_text as render_open_question,
     regenerate_qrs,
     scale as render_scale_question,
+    word_cloud as render_word_cloud_question,
 )
 from mentipy.network import resolve_base_url
 from mentipy.public import PublicExposureError, PublicMode, expose
@@ -268,7 +269,8 @@ def _latex_reference() -> str:
         Use `mentipy.latex` from PythonTeX or another Python block.
 
         Public helpers
-          from `mentipy.latex` import mc, open_text, question, scale
+          from `mentipy.latex` import (mc, open_text, question, scale,
+                                       word_cloud)
 
           mc(text, options, *, multi=False, store=None, base_url=None,
              qr_dir=None, qr_format=None, environment=None,
@@ -277,6 +279,11 @@ def _latex_reference() -> str:
              base_url=None, qr_dir=None, qr_format=None,
              environment=None, show_url=None, layout="slide")
           scale(text, *, low=1, high=5, low_label="", high_label="",
+             store=None, base_url=None, qr_dir=None, qr_format=None,
+             environment=None, show_url=None, layout="slide")
+          word_cloud(text, *, max_chars=280, split_words=True,
+             min_word_length=3, extra_stop_words=(),
+             use_default_stopwords=True, render="svg",
              store=None, base_url=None, qr_dir=None, qr_format=None,
              environment=None, show_url=None, layout="slide")
           question(question_obj, *, ...) renders a prebuilt Question
@@ -1527,6 +1534,134 @@ def render_scale(
 @
 
 
+Word-cloud rendering is the longest render subcommand only because it
+exposes the most presentation knobs.  The CLI flag names mirror the
+Python helper's keyword arguments one-for-one, so the slide author can
+move a question from one path to the other without re-learning the
+options.  [[--extra-stop-word]] is given as a repeated flag because
+Typer maps a [[list[str]]] option to one [[--flag value]] pair per
+entry, which is exactly how authors will write it on a shell line.
+
+<<cli setup>>=
+@render_cli.command("word-cloud")
+def render_word_cloud(
+    text: str,
+    max_chars: int = typer.Option(
+        280, "--max-chars", help="Maximum answer length."
+    ),
+    split_words: bool = typer.Option(
+        True,
+        "--split-words/--whole-answer",
+        help=(
+            "Split each answer into words for counting, or count "
+            "the whole answer as a single token."
+        ),
+    ),
+    min_word_length: int = typer.Option(
+        3,
+        "--min-word-length",
+        help="Drop tokens shorter than this when splitting.",
+    ),
+    extra_stop_words: Optional[list[str]] = typer.Option(
+        None,
+        "--extra-stop-word",
+        help=(
+            "Additional stop word to drop from the cloud; pass "
+            "the flag once per word."
+        ),
+    ),
+    use_default_stopwords: bool = typer.Option(
+        True,
+        "--default-stopwords/--no-default-stopwords",
+        help=(
+            "Apply the built-in English+Swedish stop-word list "
+            "alongside any extras."
+        ),
+    ),
+    render: str = typer.Option(
+        "svg",
+        "--render",
+        help="Render mode: svg, scaled, or table.",
+    ),
+    environment: Optional[str] = ENVIRONMENT_OPTION,
+    layout: str = LAYOUT_OPTION,
+    url: Optional[bool] = URL_VISIBILITY_OPTION,
+    base_url: Optional[str] = RENDER_BASE_URL_OPTION,
+    qr_dir: Optional[str] = QR_DIR_OPTION,
+    qr_format: Optional[str] = QR_FORMAT_OPTION,
+    store: Optional[str] = STORE_OPTION,
+):
+    """Render a word-cloud question as LaTeX."""
+
+    typer.echo(
+        render_word_cloud_question(
+            text,
+            max_chars=max_chars,
+            split_words=split_words,
+            min_word_length=min_word_length,
+            extra_stop_words=tuple(extra_stop_words or ()),
+            use_default_stopwords=use_default_stopwords,
+            render=render,
+            **_render_common_kwargs(
+                store=store,
+                environment=environment,
+                show_url=url,
+                base_url=base_url,
+                qr_dir=qr_dir,
+                qr_format=qr_format,
+                layout=layout,
+            ),
+        )
+    )
+@
+
+The render contract for the word-cloud subcommand only needs to verify
+that the presentation flags reach the underlying [[WordCloudQuestion]]
+--- exactly as the [[--fence]] test does for [[open]].  Identity-level
+behaviour (hash stability, store registration) is already covered by
+[[questions.nw]] and [[latex.nw]] tests, so we keep this thin.
+
+<<test functions>>=
+def test_render_word_cloud_threads_presentation_options(tmp_path):
+    runner = CliRunner()
+    store_path = tmp_path / "mentipy.json"
+
+    result = runner.invoke(
+        cli,
+        [
+            "render",
+            "word-cloud",
+            "Words?",
+            "--render",
+            "table",
+            "--whole-answer",
+            "--min-word-length",
+            "4",
+            "--extra-stop-word",
+            "foo",
+            "--extra-stop-word",
+            "bar",
+            "--no-default-stopwords",
+            "--store",
+            str(store_path),
+            "--base-url",
+            "http://example.test:8080",
+            "--qr-dir",
+            str(tmp_path / DEFAULT_QR_DIR),
+        ],
+    )
+
+    assert result.exit_code == 0
+    [entry] = Store(store_path).all_questions()
+    question = Store(store_path).question(entry["hash"])
+    assert question.render == "table"
+    assert question.split_words is False
+    assert question.min_word_length == 4
+    assert question.extra_stop_words == ("foo", "bar")
+    assert question.use_default_stopwords is False
+@
+
+
 The dedicated [[latex]] command gives authors one place to rediscover the
 Python-side helper names, the shared keyword arguments, and the config keys
 that influence rendering and serving.
@@ -2086,7 +2221,9 @@ def test_latex_command_prints_the_reference_and_all_config_keys():
     result = runner.invoke(cli, ["latex"])
 
     assert result.exit_code == 0
-    assert "from `mentipy.latex` import mc, open_text, question, scale" in result.output
+    assert "from `mentipy.latex` import (mc, open_text, question, scale" in result.output
+    assert "word_cloud)" in result.output
+    assert "word_cloud(text, *, max_chars=280, split_words=True," in result.output
     assert "question(question_obj, *, ...)" in result.output
     assert "when it is unset, empty, or auto" in result.output
     assert "MENTIPY_QUESTION_ENVIRONMENT" in result.output

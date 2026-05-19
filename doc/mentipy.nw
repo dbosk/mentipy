@@ -114,6 +114,8 @@ def render_help_excerpt():
             lines.append(line)
         if line.startswith("  scale"):
             lines.append(line)
+        if line.startswith("  word-cloud"):
+            lines.append(line)
     return "\n".join(lines)
 
 
@@ -127,6 +129,8 @@ def latex_pydoc_excerpt():
         if stripped.startswith("open_text("):
             lines.append(line)
         if stripped.startswith("scale("):
+            lines.append(line)
+        if stripped.startswith("word_cloud("):
             lines.append(line)
     return "\n".join(lines)
 \end{pycode}
@@ -457,6 +461,97 @@ instead of printing a dead URL.
   body in a fenced Markdown block tagged with the fence language, so the
   results page renders the upload as a language-tagged code block rather than
   as raw prose.
+}
+
+\subsection{A Word-Cloud Poll}
+
+A word-cloud poll takes the same free-text input as an open-text poll, but
+the results page aggregates the answers into a word cloud rather than
+listing them verbatim.  The lecturer chooses the visualisation up front
+by passing [[render="svg"]] (the flow-layout cloud, used here),
+[[render="scaled"]] (a CSS-sized inline list of words), or
+[[render="table"]] (a frequency table).
+
+\begin{pyblock}
+from mentipy.latex import word_cloud
+
+print(
+    word_cloud(
+        "One word that describes this lecture?",
+        max_chars=60,
+        base_url="http://localhost:8080",
+        qr_dir="mentipy-obj",
+        layout="article+qr",
+    )
+)
+\end{pyblock}
+
+Rendered in the document, that call becomes:
+\begin{center}\printpythontex\end{center}
+
+The CLI mirrors the helper, with one shell flag per visualisation knob.
+The kebab-cased subcommand keeps the option grammar readable on a long
+line:
+
+\begin{minted}{text}
+mentipy render word-cloud "One word that describes this lecture?" \
+  --max-chars 60 \
+  --base-url http://localhost:8080 --qr-dir mentipy-obj --layout article+qr
+\end{minted}
+
+\begin{pycode}
+print(
+    render_cli(
+        [
+            "render",
+            "word-cloud",
+            "One word that describes this lecture?",
+            "--max-chars",
+            "60",
+            "--base-url",
+            "http://localhost:8080",
+            "--qr-dir",
+            "mentipy-obj",
+            "--layout",
+            "article+qr",
+        ]
+    )
+)
+\end{pycode}
+\saveprintpythontex{cli-wordcloud}
+
+The command prints the following LaTeX:
+\useprintpythontex[verbatim]{cli-wordcloud}
+
+Included in the document, that output compiles to:
+\begin{center}\useprintpythontex{cli-wordcloud}\end{center}
+
+The presentation knobs ([[render]], [[split_words]],
+[[min_word_length]], [[extra_stop_words]], [[use_default_stopwords]])
+deliberately stay out of the canonical hash.  Editing the slide source
+to switch from one visualisation to another and recompiling therefore
+keeps the same QR code and the same answer pool: the question's
+identity is the prompt and the character limit, not how the resulting
+cloud is drawn.
+
+\ltnote{%
+  \textbf{Variation pattern}: Generalization
+
+  \textbf{What varies}: The question kind, now a word cloud.  Its
+  presentation knobs ([[render]], [[split_words]], [[min_word_length]],
+  [[extra_stop_words]], [[use_default_stopwords]]) extend the shared
+  authoring surface without touching identity.
+
+  \textbf{What stays invariant}: The PythonTeX-to-CLI parallel between
+  [[word_cloud]] and [[word-cloud]], the prompt, the base URL, the QR
+  directory, and the layout.  The canonical hash also stays invariant
+  when only the visualisation changes: a re-render with a different
+  [[render]] mode keeps the same QR and the same answer pool.
+
+  \textbf{What this reveals}: The same authoring-path correspondence
+  established for [[mc]], [[scale]], and [[open_text]] generalises to a
+  question kind whose visualisation is a first-class authoring choice
+  rather than a fixed output shape.
 }
 
 \subsection{Discovering the Public Names}
