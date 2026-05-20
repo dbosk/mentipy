@@ -28,6 +28,7 @@ import io
 import json
 from pathlib import Path
 import shutil
+import sys
 import textwrap
 import time
 from typing import Optional
@@ -185,7 +186,7 @@ EXPORT_FORMAT_OPTION = typer.Option(
 LIST_FULL_OPTION = typer.Option(
     False,
     "--full",
-    help="Show the full question text in a wrapped table.",
+    help="Show the full question text without truncation.",
 )
 @
 
@@ -195,7 +196,6 @@ print the same risk statement whenever they make an unauthenticated endpoint
 reachable from outside the local machine.
 
 <<constants>>=
-LIST_PREVIEW_WIDTH = 30
 LIST_COLUMN_GAP = 2
 LIST_FALLBACK_WIDTH = 80
 LIST_MIN_TEXT_WIDTH = 20
@@ -376,15 +376,23 @@ def _single_line_text(text: str) -> str:
     return " ".join(text.split())
 
 
-def _question_summary(text: str) -> str:
+def _question_summary(text: str, max_width: Optional[int]) -> str:
     text = _single_line_text(text)
-    if len(text) <= LIST_PREVIEW_WIDTH:
+    if max_width is None or len(text) <= max_width:
         return text
-    return text[: LIST_PREVIEW_WIDTH - 3] + "..."
+    if max_width <= 3:
+        return text[:max_width]
+    return text[: max_width - 3] + "..."
 
 
 def _terminal_width() -> int:
     return shutil.get_terminal_size((LIST_FALLBACK_WIDTH, 24)).columns
+
+
+def _listing_text_width() -> Optional[int]:
+    if not sys.stdout.isatty():
+        return None
+    return _terminal_width()
 @
 
 Open answers often use Markdown for emphasis, lists, and fenced code blocks.
@@ -397,45 +405,42 @@ def _result_console() -> Console:
     return Console(width=_terminal_width())
 @
 
-The default listing optimises for scanning: prefix first, short preview second.
-The [[--full]] variant spends the available terminal width on wrapped question
-text while preserving a fixed prefix column, so long questions remain readable
-without hiding the URL token lecturers need.
+The default listing optimises for scanning: prefix first, then a summary that
+fits the remaining terminal width.  When stdout is not a TTY (piped or
+redirected), the summary skips truncation entirely so downstream tools see one
+full record per line.  The [[--full]] variant is the explicit "give me the
+whole question" form: it always prints the full single-line text, letting the
+terminal soft-wrap if it must.  With piping doing the right thing
+automatically, the difference between the two modes is just whether mentipy
+itself is willing to truncate.
 
 <<functions>>=
 def _question_listing(entries: list[dict[str, object]], *, full: bool) -> str:
     if not entries:
         return "No questions registered yet."
 
-    if not full:
+    prefix_width = max(len(str(entry["url_prefix"])) for entry in entries)
+    gap = " " * LIST_COLUMN_GAP
+
+    if full:
         return "\n".join(
-            f'{entry["url_prefix"]}  {_question_summary(str(entry["text"]))}'
+            f"{str(entry['url_prefix']):<{prefix_width}}{gap}"
+            f"{_single_line_text(str(entry['text']))}"
             for entry in entries
         )
 
-    prefix_width = max(len(str(entry["url_prefix"])) for entry in entries)
-    text_width = max(
-        LIST_MIN_TEXT_WIDTH,
-        _terminal_width() - prefix_width - LIST_COLUMN_GAP,
+    total = _listing_text_width()
+    text_width = (
+        None
+        if total is None
+        else max(1, total - prefix_width - LIST_COLUMN_GAP)
     )
-    lines = []
 
-    for entry in entries:
-        prefix = str(entry["url_prefix"])
-        wrapped = textwrap.wrap(
-            _single_line_text(str(entry["text"])),
-            width=text_width,
-            break_long_words=False,
-            break_on_hyphens=False,
-        ) or [""]
-        lines.append(
-            f"{prefix:<{prefix_width}}{' ' * LIST_COLUMN_GAP}{wrapped[0]}"
-        )
-        indent = " " * (prefix_width + LIST_COLUMN_GAP)
-        for line in wrapped[1:]:
-            lines.append(f"{indent}{line}")
-
-    return "\n".join(lines)
+    return "\n".join(
+        f"{str(entry['url_prefix']):<{prefix_width}}{gap}"
+        f"{_question_summary(str(entry['text']), text_width)}"
+        for entry in entries
+    )
 @
 
 The terminal bar chart is the same visualisation as the HTML results page: one
@@ -1693,8 +1698,9 @@ def latex():
 \section{Listing, watching, and exporting}
 
 The list command gives a quick view of the registered questions.  The default
-format stays compact enough for scanning, while [[--full]] spends the terminal
-width on wrapped question text.
+format shortens each question to fit the terminal width and stays verbatim
+when stdout is piped, while [[--full]] always prints the entire question text
+on one line per entry.
 
 <<cli setup>>=
 @cli.command("list")
@@ -2856,9 +2862,10 @@ def test_render_help_mentions_the_relevant_config_keys():
 
 \section{Listing, watching, and export contracts}
 
-The listing tests exercise both display modes.  The compact form must not leak
-full hashes, while [[--full]] should wrap long text under a stable prefix
-column.
+The listing tests exercise both display modes.  The default form must shorten
+to the terminal width on a TTY and stay verbatim when stdout is piped, and
+[[--full]] must always print the entire single-line question text alongside
+the URL prefix.  No assertion should leak a full hash.
 
 <<test functions>>=
 def test_list_command_reports_empty_store(tmp_path):
@@ -2873,7 +2880,7 @@ def test_list_command_reports_empty_store(tmp_path):
     assert result.stdout.strip() == "No questions registered yet."
 
 
-def test_list_command_shows_prefix_and_short_summary(tmp_path):
+def test_list_command_shows_full_text_when_not_a_tty(tmp_path):
     runner = CliRunner()
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     text = "abcdefghijklmnopqrstuvwxyz1234567890"
@@ -2883,11 +2890,49 @@ def test_list_command_shows_prefix_and_short_summary(tmp_path):
     result = runner.invoke(cli, ["list", "--store", str(store.path)])
 
     assert result.exit_code == 0
-    assert result.stdout.strip() == f"{prefix}  abcdefghijklmnopqrstuvwxyz1..."
+    assert result.stdout.strip() == f"{prefix}  {text}"
+    assert "..." not in result.stdout
     assert full_hash not in result.stdout
 
 
-def test_list_command_full_wraps_question_text(tmp_path, monkeypatch):
+def test_list_command_shortens_to_terminal_width_when_tty(tmp_path, monkeypatch):
+    runner = CliRunner()
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    text = "abcdefghijklmnopqrstuvwxyz1234567890"
+    prefix = store.register(OpenQuestion(text))
+    full_hash = store.resolve(prefix)
+    monkeypatch.setattr("mentipy.cli._listing_text_width", lambda: 40)
+
+    result = runner.invoke(cli, ["list", "--store", str(store.path)])
+
+    text_width = 40 - len(prefix) - LIST_COLUMN_GAP
+    expected_summary = text[: text_width - 3] + "..."
+    assert result.exit_code == 0
+    assert result.stdout.strip() == f"{prefix}  {expected_summary}"
+    assert full_hash not in result.stdout
+
+
+def test_list_command_uses_remaining_width_for_longer_prefixes(
+    tmp_path, monkeypatch
+):
+    runner = CliRunner()
+    store = Store(tmp_path / "mentipy.json", min_prefix=12)
+    text = "abcdefghijklmnopqrstuvwxyz1234567890"
+    prefix = store.register(OpenQuestion(text))
+    full_hash = store.resolve(prefix)
+    monkeypatch.setattr(
+        "mentipy.cli._listing_text_width",
+        lambda: len(prefix) + LIST_COLUMN_GAP + 5,
+    )
+
+    result = runner.invoke(cli, ["list", "--store", str(store.path)])
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == f"{prefix}  {text[:2]}..."
+    assert full_hash not in result.stdout
+
+
+def test_list_command_full_emits_full_single_line_text(tmp_path, monkeypatch):
     runner = CliRunner()
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     text = "one two three four five six seven"
@@ -2900,10 +2945,7 @@ def test_list_command_full_wraps_question_text(tmp_path, monkeypatch):
     )
 
     assert result.exit_code == 0
-    assert result.stdout.strip() == (
-        f"{prefix}  one two three four\n"
-        f"{' ' * (len(prefix) + LIST_COLUMN_GAP)}five six seven"
-    )
+    assert result.stdout.strip() == f"{prefix}  {text}"
 @
 
 Export commands should be deterministic wrappers around the stored data.  JSON
