@@ -433,7 +433,7 @@ def _question_listing(entries: list[dict[str, object]], *, full: bool) -> str:
     text_width = (
         None
         if total is None
-        else max(LIST_MIN_TEXT_WIDTH, total - prefix_width - LIST_COLUMN_GAP)
+        else max(1, total - prefix_width - LIST_COLUMN_GAP)
     )
 
     return "\n".join(
@@ -2909,6 +2909,26 @@ def test_list_command_shortens_to_terminal_width_when_tty(tmp_path, monkeypatch)
     expected_summary = text[: text_width - 3] + "..."
     assert result.exit_code == 0
     assert result.stdout.strip() == f"{prefix}  {expected_summary}"
+    assert full_hash not in result.stdout
+
+
+def test_list_command_uses_remaining_width_for_longer_prefixes(
+    tmp_path, monkeypatch
+):
+    runner = CliRunner()
+    store = Store(tmp_path / "mentipy.json", min_prefix=12)
+    text = "abcdefghijklmnopqrstuvwxyz1234567890"
+    prefix = store.register(OpenQuestion(text))
+    full_hash = store.resolve(prefix)
+    monkeypatch.setattr(
+        "mentipy.cli._listing_text_width",
+        lambda: len(prefix) + LIST_COLUMN_GAP + 5,
+    )
+
+    result = runner.invoke(cli, ["list", "--store", str(store.path)])
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == f"{prefix}  {text[:2]}..."
     assert full_hash not in result.stdout
 
 
