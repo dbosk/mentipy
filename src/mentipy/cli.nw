@@ -139,6 +139,11 @@ URL_VISIBILITY_HELP = (
     "layouts keep the caption embedded in the QR sidecar. Defaults to config "
     f"setting {SHOW_URL_CONFIG}."
 )
+NEXT_HELP = (
+    "Render a 'Next →' link on the post-submit and results pages so "
+    "respondents can step to the question that follows this one in the "
+    "deck. Use --no-next on the final question of the lecture."
+)
 BASE_URL_HELP = (
     "Override the configured base URL from config setting "
     f"{BASE_URL_CONFIG}. Use 'auto' to resolve the current LAN address."
@@ -166,6 +171,11 @@ URL_VISIBILITY_OPTION = typer.Option(
     None,
     "--url/--no-url",
     help=URL_VISIBILITY_HELP,
+)
+NEXT_OPTION = typer.Option(
+    True,
+    "--next/--no-next",
+    help=NEXT_HELP,
 )
 RENDER_BASE_URL_OPTION = typer.Option(
     None,
@@ -272,22 +282,29 @@ def _latex_reference() -> str:
           from `mentipy.latex` import (mc, open_text, question, scale,
                                        word_cloud)
 
-          mc(text, options, *, multi=False, store=None, base_url=None,
-             qr_dir=None, qr_format=None, environment=None,
-             show_url=None, layout="slide")
-          open_text(text, *, max_chars=280, fence=None, store=None,
+          mc(text, options, *, multi=False, next=True, store=None,
              base_url=None, qr_dir=None, qr_format=None,
              environment=None, show_url=None, layout="slide")
-          scale(text, *, low=1, high=5, low_label="", high_label="",
+          open_text(text, *, max_chars=280, fence=None, next=True,
              store=None, base_url=None, qr_dir=None, qr_format=None,
              environment=None, show_url=None, layout="slide")
+          scale(text, *, low=1, high=5, low_label="", high_label="",
+             next=True, store=None, base_url=None, qr_dir=None,
+             qr_format=None, environment=None, show_url=None,
+             layout="slide")
           word_cloud(text, *, max_chars=280, split_words=True,
              min_word_length=3, extra_stop_words=(),
-             use_default_stopwords=True, render="svg",
+             use_default_stopwords=True, render="svg", next=True,
              store=None, base_url=None, qr_dir=None, qr_format=None,
              environment=None, show_url=None, layout="slide")
           question(question_obj, *, ...) renders a prebuilt Question
              object and is the lower-level helper behind them.
+
+        Per-question keyword arguments
+          next: render a 'Next →' link on the post-submit and results
+            pages.  True by default; pass next=False on the final
+            question of a lecture.  Presentation-only; does not affect
+            the question's canonical hash.
 
         Shared keyword arguments
           store: defaults to config key {STORE_CONFIG}
@@ -1394,6 +1411,7 @@ def render_mc(
     text: str,
     options: list[str],
     multi: bool = typer.Option(False, "--multi", help="Allow multiple answers."),
+    next: bool = NEXT_OPTION,
     environment: Optional[str] = ENVIRONMENT_OPTION,
     layout: str = LAYOUT_OPTION,
     url: Optional[bool] = URL_VISIBILITY_OPTION,
@@ -1409,6 +1427,7 @@ def render_mc(
             text,
             options,
             multi=multi,
+            next=next,
             **_render_common_kwargs(
                 store=store,
                 environment=environment,
@@ -1437,6 +1456,7 @@ def render_open(
         "--fence",
         help="Fence language for uploaded file bodies, e.g. python.",
     ),
+    next: bool = NEXT_OPTION,
     environment: Optional[str] = ENVIRONMENT_OPTION,
     layout: str = LAYOUT_OPTION,
     url: Optional[bool] = URL_VISIBILITY_OPTION,
@@ -1452,6 +1472,7 @@ def render_open(
             text,
             max_chars=max_chars,
             fence=fence,
+            next=next,
             **_render_common_kwargs(
                 store=store,
                 environment=environment,
@@ -1523,6 +1544,7 @@ def render_scale(
     high: int = typer.Option(5, "--high", help="Highest scale value."),
     low_label: str = typer.Option("", "--low-label", help="Label for the low endpoint."),
     high_label: str = typer.Option("", "--high-label", help="Label for the high endpoint."),
+    next: bool = NEXT_OPTION,
     environment: Optional[str] = ENVIRONMENT_OPTION,
     layout: str = LAYOUT_OPTION,
     url: Optional[bool] = URL_VISIBILITY_OPTION,
@@ -1540,6 +1562,7 @@ def render_scale(
             high=high,
             low_label=low_label,
             high_label=high_label,
+            next=next,
             **_render_common_kwargs(
                 store=store,
                 environment=environment,
@@ -1603,6 +1626,7 @@ def render_word_cloud(
         "--render",
         help="Render mode: svg, scaled, or table.",
     ),
+    next: bool = NEXT_OPTION,
     environment: Optional[str] = ENVIRONMENT_OPTION,
     layout: str = LAYOUT_OPTION,
     url: Optional[bool] = URL_VISIBILITY_OPTION,
@@ -1622,6 +1646,7 @@ def render_word_cloud(
             extra_stop_words=tuple(extra_stop_words or ()),
             use_default_stopwords=use_default_stopwords,
             render=render,
+            next=next,
             **_render_common_kwargs(
                 store=store,
                 environment=environment,
@@ -1679,6 +1704,61 @@ def test_render_word_cloud_threads_presentation_options(tmp_path):
     assert question.min_word_length == 4
     assert question.extra_stop_words == ("foo", "bar")
     assert question.use_default_stopwords is False
+@
+
+The [[--no-next]] flag is the lecturer's way to suppress the
+\enquote{Next $\rightarrow$} link on the final question of a lecture.  We
+parametrize the test across every render subcommand because the flag has to
+land on the dataclass the same way regardless of which question kind the
+command builds; a future refactor that drops the parameter from one wrapper
+would otherwise be silent at the CLI surface.
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param(
+            ["render", "mc", "Pick one", "A", "B"],
+            id="mc",
+        ),
+        pytest.param(
+            ["render", "open", "Comment?"],
+            id="open",
+        ),
+        pytest.param(
+            ["render", "scale", "Pace?"],
+            id="scale",
+        ),
+        pytest.param(
+            ["render", "word-cloud", "Topic?"],
+            id="word_cloud",
+        ),
+    ],
+)
+def test_render_commands_thread_no_next_into_the_stored_question(
+    tmp_path, argv
+):
+    runner = CliRunner()
+    store_path = tmp_path / "mentipy.json"
+
+    result = runner.invoke(
+        cli,
+        [
+            *argv,
+            "--no-next",
+            "--store",
+            str(store_path),
+            "--base-url",
+            "http://example.test:8080",
+            "--qr-dir",
+            str(tmp_path / DEFAULT_QR_DIR),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    [entry] = Store(store_path).all_questions()
+    question = Store(store_path).question(entry["hash"])
+    assert question.next is False
 @
 
 
@@ -2250,6 +2330,8 @@ def test_latex_command_prints_the_reference_and_all_config_keys():
     assert "MENTIPY_QUESTION_ENVIRONMENT" in result.output
     assert "mentipy serve" in result.output
     assert "mentipy url`\n     PREFIX" in result.output
+    assert "next=True" in result.output
+    assert "Per-question keyword arguments" in result.output
     for key, _description in CONFIG_KEY_HELP:
         assert key in result.output
 @

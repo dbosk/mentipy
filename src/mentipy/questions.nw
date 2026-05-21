@@ -38,7 +38,12 @@ import unicodedata
 Multiple-choice questions carry the prompt, the offered options, and whether
 the form should use radio buttons or checkboxes.  We require at least one
 option so the later rendering and counting logic can rely on the list being
-non-empty.
+non-empty.  The [[next]] flag is the sequence-navigation toggle that every
+question type shares: when it is true (the default), the server renders a
+\enquote{Next $\rightarrow$} link after the question so respondents can move on
+without scanning another QR code.  It is purely presentation, so
+[[canonical_dict]] drops it before the hash is computed and editing the value
+between rebuilds never orphans the recorded answers.
 
 <<classes>>=
 @dataclass(frozen=True)
@@ -48,6 +53,7 @@ class MCQuestion:
     text: str
     options: tuple[str, ...]
     multi: bool = False
+    next: bool = True
     kind: str = "mc"
 
     def __post_init__(self):
@@ -57,12 +63,22 @@ class MCQuestion:
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly representation of the question."""
 
-        return {
+        result = {
             "kind": self.kind,
             "text": self.text,
             "options": list(self.options),
             "multi": self.multi,
         }
+        if not self.next:
+            result["next"] = False
+        return result
+
+    def canonical_dict(self) -> dict[str, Any]:
+        """Return the identity-only shape used by ``question_hash``."""
+
+        result = self.to_dict()
+        result.pop("next", None)
+        return result
 @
 
 Let's verify that the constructor rejects the degenerate case with no options:
@@ -73,6 +89,27 @@ def test_mc_question_requires_options():
         MCQuestion("Which one?", ())
 @
 
+The default-true [[next]] flag is hidden from the persistence shape so that
+pre-existing multiple-choice JSON stays byte-for-byte the same.  A
+[[next=False]] question opts out, and that opt-out has to be visible to the
+store --- otherwise the server could not honour it across restarts.
+
+<<test functions>>=
+
+def test_mc_question_to_dict_omits_a_default_next_flag():
+    assert MCQuestion("Pick one", ("A", "B")).to_dict() == {
+        "kind": "mc",
+        "text": "Pick one",
+        "options": ["A", "B"],
+        "multi": False,
+    }
+
+
+def test_mc_question_to_dict_includes_an_opt_out_next_flag():
+    payload = MCQuestion("Pick one", ("A", "B"), next=False).to_dict()
+    assert payload["next"] is False
+@
+
 \section{Open Questions}
 
 Open questions need the prompt and a character limit, and they can optionally
@@ -81,7 +118,10 @@ the question data because it affects both the HTTP form and the canonical hash.
 The fence hint also belongs here, but it has to be a single CommonMark info word:
 whitespace or backticks would change the structure of the generated fence rather
 than just its language tag.  We omit the hint from the canonical JSON when it is
-unset so existing open-question hashes stay byte-for-byte stable.
+unset so existing open-question hashes stay byte-for-byte stable.  The shared
+[[next]] flag enables the \enquote{Next $\rightarrow$} link on the post-submit
+page; like every presentation field it is stripped by [[canonical_dict]] before
+hashing, so flipping it does not orphan the recorded answers.
 
 <<classes>>=
 @dataclass(frozen=True)
@@ -95,6 +135,7 @@ class OpenQuestion:
     text: str
     max_chars: int = 280
     fence: str | None = None
+    next: bool = True
     kind: str = "open"
 
     <<open question methods>>
@@ -139,7 +180,9 @@ if self.fence is not None and (
 
 Serialisation omits the fence when it is unset.  That keeps the canonical JSON
 for existing open questions byte-for-byte unchanged while still recording the
-new rendering hint when authors choose one.
+new rendering hint when authors choose one.  We use the same omit-when-default
+treatment for the [[next]] flag: a default-true value is implied by absence, so
+default open questions still serialise to the historical three-key dictionary.
 
 <<open question methods>>=
 def to_dict(self) -> dict[str, Any]:
@@ -152,6 +195,15 @@ def to_dict(self) -> dict[str, Any]:
     }
     if self.fence is not None:
         result["fence"] = self.fence
+    if not self.next:
+        result["next"] = False
+    return result
+
+def canonical_dict(self) -> dict[str, Any]:
+    """Return the identity-only shape used by ``question_hash``."""
+
+    result = self.to_dict()
+    result.pop("next", None)
     return result
 @
 
@@ -203,11 +255,25 @@ def test_open_question_to_dict_includes_a_configured_fence():
     }
 @
 
+A [[next=False]] open question must surface the opt-out in [[to_dict]] so it
+persists across server restarts, while still leaving the canonical identity
+payload untouched.
+
+<<test functions>>=
+
+def test_open_question_to_dict_records_an_opt_out_next_flag():
+    payload = OpenQuestion("Q", next=False).to_dict()
+    assert payload["next"] is False
+    assert "next" not in OpenQuestion("Q").canonical_dict()
+@
+
 \section{Numeric Scales}
 
-Scale questions represent the common 
+Scale questions represent the common
 \enquote{rate this from one to five} style
-interaction.  The labels are optional, but the range must be sensible.
+interaction.  The labels are optional, but the range must be sensible.  As with
+the other question types, the shared [[next]] flag toggles the
+\enquote{Next $\rightarrow$} link and never enters the hash.
 
 <<classes>>=
 @dataclass(frozen=True)
@@ -219,6 +285,7 @@ class ScaleQuestion:
     high: int = 5
     low_label: str = ""
     high_label: str = ""
+    next: bool = True
     kind: str = "scale"
 
     def __post_init__(self):
@@ -228,7 +295,7 @@ class ScaleQuestion:
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly representation of the question."""
 
-        return {
+        result = {
             "kind": self.kind,
             "text": self.text,
             "low": self.low,
@@ -236,6 +303,16 @@ class ScaleQuestion:
             "low_label": self.low_label,
             "high_label": self.high_label,
         }
+        if not self.next:
+            result["next"] = False
+        return result
+
+    def canonical_dict(self) -> dict[str, Any]:
+        """Return the identity-only shape used by ``question_hash``."""
+
+        result = self.to_dict()
+        result.pop("next", None)
+        return result
 @
 
 Again, the validation matters because every later component assumes a proper
@@ -245,6 +322,19 @@ closed interval:
 def test_scale_question_requires_ordered_bounds():
     with pytest.raises(ValueError):
         ScaleQuestion("Pace?", low=5, high=5)
+@
+
+The opt-out [[next]] flag travels through serialisation alongside the labels:
+its presence in [[to_dict]] tells the store and server to suppress the
+\enquote{Next $\rightarrow$} link, while [[canonical_dict]] keeps it out of the
+identity payload.
+
+<<test functions>>=
+
+def test_scale_question_to_dict_records_an_opt_out_next_flag():
+    payload = ScaleQuestion("Pace?", next=False).to_dict()
+    assert payload["next"] is False
+    assert "next" not in ScaleQuestion("Pace?").canonical_dict()
 @
 
 \section{Word Clouds}
@@ -275,7 +365,8 @@ class WordCloudQuestion:
     ``extra_stop_words``, ``use_default_stopwords``, ``render``) are
     presentation hints: they do not affect the question's canonical
     identity, so editing them and recompiling preserves the existing
-    answer pool.
+    answer pool.  The shared ``next`` flag is presentation in the
+    same sense---it only controls the post-submit navigation link.
     """
 
     text: str
@@ -285,6 +376,7 @@ class WordCloudQuestion:
     extra_stop_words: tuple[str, ...] = ()
     use_default_stopwords: bool = True
     render: str = "svg"
+    next: bool = True
     kind: str = "wordcloud"
 
     <<wordcloud question methods>>
@@ -388,7 +480,7 @@ same identifier and share the same answer pool.
 def to_dict(self) -> dict[str, Any]:
     """Return the full persistence shape of the question."""
 
-    return {
+    result = {
         "kind": self.kind,
         "text": self.text,
         "max_chars": self.max_chars,
@@ -398,6 +490,9 @@ def to_dict(self) -> dict[str, Any]:
         "use_default_stopwords": self.use_default_stopwords,
         "render": self.render,
     }
+    if not self.next:
+        result["next"] = False
+    return result
 
 def canonical_dict(self) -> dict[str, Any]:
     """Return the identity-only shape used by ``question_hash``."""
@@ -442,7 +537,9 @@ def test_word_cloud_to_dict_includes_all_fields():
 
 The canonical dictionary is the central guarantee of this question type:
 no matter how the presentation evolves, two word clouds with the same
-prompt and character limit share an identity.
+prompt and character limit share an identity.  We deliberately vary every
+presentation field at once, including the new [[next]] flag, so any one of
+them slipping into the canonical payload would break this assertion.
 
 <<test functions>>=
 
@@ -454,6 +551,7 @@ def test_word_cloud_canonical_dict_excludes_presentation_fields():
         min_word_length=5,
         extra_stop_words=("foo",),
         use_default_stopwords=False,
+        next=False,
     )
 
     assert question.canonical_dict() == {
@@ -729,6 +827,7 @@ if kind == "mc":
         text=str(data["text"]),
         options=tuple(data["options"]),
         multi=bool(data.get("multi", False)),
+        next=bool(data.get("next", True)),
     )
 @
 
@@ -743,6 +842,7 @@ if kind == "open":
         text=str(data["text"]),
         max_chars=int(data.get("max_chars", 280)),
         fence=None if data.get("fence") is None else str(data["fence"]),
+        next=bool(data.get("next", True)),
     )
 @
 
@@ -757,6 +857,7 @@ if kind == "scale":
         high=int(data.get("high", 5)),
         low_label=str(data.get("low_label", "")),
         high_label=str(data.get("high_label", "")),
+        next=bool(data.get("next", True)),
     )
 @
 
@@ -778,6 +879,7 @@ if kind == "wordcloud":
             data.get("use_default_stopwords", True)
         ),
         render=str(data.get("render", "svg")),
+        next=bool(data.get("next", True)),
     )
 @
 
@@ -880,28 +982,46 @@ def test_word_cloud_round_trip_preserves_extra_stop_words_as_tuple():
     assert question.to_dict() == payload
 @
 
+The [[next]] flag has to survive the store's JSON detour for every question
+type, otherwise a lecturer opting a slide out of the navigation chain would
+silently get the default behaviour back after a server restart.
+
+<<test functions>>=
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        MCQuestion("Pick one", ("A", "B"), next=False),
+        OpenQuestion("Feedback?", next=False),
+        ScaleQuestion("Pace?", next=False),
+        WordCloudQuestion("Topic?", next=False),
+    ],
+)
+def test_question_from_dict_round_trips_an_opt_out_next_flag(question):
+    rebuilt = question_from_dict(question.to_dict())
+    assert rebuilt.next is False
+    assert rebuilt.to_dict() == question.to_dict()
+@
+
 \subsection{Hashing canonical JSON}
 
 The canonical hash uses sorted JSON keys so that it depends on the meaning of
 the question, not on the incidental order in which Python produced a mapping.
 
-The choice of source dictionary depends on whether the question separates
-identity from presentation.  Multiple-choice, open, and scale questions
-have no such separation --- every stored field is part of the input
-contract --- so the hash uses [[to_dict()]] verbatim and the existing
-digests remain byte-stable.  Word clouds keep visualisation fields
-outside the hash through [[canonical_dict()]], so the same prompt and
-limit hash to the same identifier regardless of how a lecturer chooses
-to render the result.
+Every question type now exposes a [[canonical_dict]] method that returns the
+identity-only payload.  For multiple-choice, open, and scale questions the
+identity is the whole persistence shape minus the [[next]] flag --- the only
+presentation field they carry.  Word clouds additionally strip their
+visualisation fields.  Because [[to_dict]] omits a default-true [[next]],
+identity payloads for pre-existing questions are byte-for-byte the same as
+before this field was introduced, and existing answer logs keep resolving to
+the same URL prefix.
 
 <<functions>>=
 def question_hash(question: Question) -> str:
     """Return the full SHA-256 digest for ``question``."""
 
-    if isinstance(question, WordCloudQuestion):
-        canonical_payload = question.canonical_dict()
-    else:
-        canonical_payload = question.to_dict()
+    canonical_payload = question.canonical_dict()
     payload = json.dumps(
         canonical_payload,
         ensure_ascii=False,
@@ -980,6 +1100,37 @@ def test_question_hash_changes_when_word_cloud_identity_changes():
     assert question_hash(base) != question_hash(
         WordCloudQuestion("Words?", max_chars=140)
     )
+@
+
+The [[next]] flag is presentation across every question type, so toggling it
+must never change the digest.  Without this guarantee, a lecturer flipping a
+single slide from \enquote{Next $\rightarrow$} to \enquote{last slide} would
+orphan every answer already collected for that question --- the URL prefix
+would shift to a fresh hash, and the old QR codes would resolve to nothing.
+
+<<test functions>>=
+
+def test_question_hash_invariant_to_next_flag_across_question_types():
+    pairs = [
+        (
+            MCQuestion("Pick one", ("A", "B")),
+            MCQuestion("Pick one", ("A", "B"), next=False),
+        ),
+        (
+            OpenQuestion("Feedback?"),
+            OpenQuestion("Feedback?", next=False),
+        ),
+        (
+            ScaleQuestion("Pace?"),
+            ScaleQuestion("Pace?", next=False),
+        ),
+        (
+            WordCloudQuestion("Topic?"),
+            WordCloudQuestion("Topic?", next=False),
+        ),
+    ]
+    for default, opted_out in pairs:
+        assert question_hash(default) == question_hash(opted_out)
 @
 
 The test root is intentionally small: the interesting details live next to the

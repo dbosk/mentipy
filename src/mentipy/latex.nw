@@ -513,6 +513,10 @@ def question(
 The multiple-choice wrapper exists for author convenience: slide sources should
 look like the question being asked, not like dataclass construction.  It still
 delegates immediately so no rendering rule can drift from the generic path.
+Every wrapper carries the same [[next]] toggle through to the stored question:
+[[next=True]] (the default) tells the server to render a
+\enquote{Next $\rightarrow$} link on the post-submit page, and the lecturer
+opts out for the last slide by passing [[next=False]].
 
 <<functions>>=
 def mc(
@@ -520,6 +524,7 @@ def mc(
     options: list[str] | tuple[str, ...],
     *,
     multi: bool = False,
+    next: bool = True,
     store: Store | None = None,
     base_url: str | None = None,
     qr_dir: str | Path | None = None,
@@ -531,7 +536,9 @@ def mc(
     """Return LaTeX for a multiple-choice question."""
 
     return question(
-        MCQuestion(text=text, options=tuple(options), multi=multi),
+        MCQuestion(
+            text=text, options=tuple(options), multi=multi, next=next
+        ),
         store=store,
         base_url=base_url,
         qr_dir=qr_dir,
@@ -552,6 +559,7 @@ def open_text(
     *,
     max_chars: int = 280,
     fence: str | None = None,
+    next: bool = True,
     store: Store | None = None,
     base_url: str | None = None,
     qr_dir: str | Path | None = None,
@@ -563,7 +571,9 @@ def open_text(
     """Return LaTeX for an open free-text question."""
 
     return question(
-        OpenQuestion(text=text, max_chars=max_chars, fence=fence),
+        OpenQuestion(
+            text=text, max_chars=max_chars, fence=fence, next=next
+        ),
         store=store,
         base_url=base_url,
         qr_dir=qr_dir,
@@ -586,6 +596,7 @@ def scale(
     high: int = 5,
     low_label: str = "",
     high_label: str = "",
+    next: bool = True,
     store: Store | None = None,
     base_url: str | None = None,
     qr_dir: str | Path | None = None,
@@ -603,6 +614,7 @@ def scale(
             high=high,
             low_label=low_label,
             high_label=high_label,
+            next=next,
         ),
         store=store,
         base_url=base_url,
@@ -632,6 +644,7 @@ def word_cloud(
     extra_stop_words: Iterable[str] = (),
     use_default_stopwords: bool = True,
     render: str = "svg",
+    next: bool = True,
     store: Store | None = None,
     base_url: str | None = None,
     qr_dir: str | Path | None = None,
@@ -645,7 +658,9 @@ def word_cloud(
     Visualisation parameters (``split_words``, ``min_word_length``,
     ``extra_stop_words``, ``use_default_stopwords``, ``render``) do not
     enter the question's canonical hash, so editing them and
-    recompiling preserves any answers already collected.
+    recompiling preserves any answers already collected.  The ``next``
+    flag is presentation in the same sense---it only controls whether
+    the server renders a \"Next →\" link after submission.
     """
 
     return question(
@@ -657,6 +672,7 @@ def word_cloud(
             extra_stop_words=tuple(extra_stop_words),
             use_default_stopwords=use_default_stopwords,
             render=render,
+            next=next,
         ),
         store=store,
         base_url=base_url,
@@ -751,6 +767,50 @@ def test_open_text_passes_the_optional_fence_into_the_question(
     question = store.question(entry["hash"])
 
     assert question.fence == "python"
+@
+
+The [[next]] flag follows the same contract as [[fence]]: it is invisible in
+the returned LaTeX, but the stored question carries it to the server so the
+post-submit and results pages can decide whether to render a
+\enquote{Next $\rightarrow$} link.  Pinning this for every helper at once
+makes sure no wrapper silently drops the parameter when its signature is
+rearranged later.
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    "factory",
+    [
+        pytest.param(
+            lambda **kw: mc("Pick one", ("A", "B"), **kw), id="mc"
+        ),
+        pytest.param(
+            lambda **kw: open_text("A prompt", **kw), id="open_text"
+        ),
+        pytest.param(
+            lambda **kw: scale("Pace?", **kw), id="scale"
+        ),
+        pytest.param(
+            lambda **kw: word_cloud("Topic?", **kw), id="word_cloud"
+        ),
+    ],
+)
+def test_helpers_thread_next_false_into_the_stored_question(
+    tmp_path, monkeypatch, factory
+):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    factory(
+        next=False,
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir=DEFAULT_QR_DIR,
+    )
+
+    [entry] = store.all_questions()
+    question = store.question(entry["hash"])
+
+    assert question.next is False
 @
 
 The word-cloud wrapper meets the same registration contract as
@@ -1334,6 +1394,8 @@ def test_regenerate_qrs_reuses_all_remembered_qr_targets(tmp_path, monkeypatch):
 @
 
 <<test [[latex.py]]>>=
+import pytest
+
 from mentipy.latex import *
 from mentipy.store import *
 from pathlib import Path

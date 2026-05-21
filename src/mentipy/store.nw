@@ -331,7 +331,12 @@ def _data(self) -> dict[str, Any]:
 
 Writes go through a sibling temporary file and then [[os.replace]].  The
 temporary file may be incomplete if the process dies mid-write, but it never
-becomes the real store unless the final replace succeeds.
+becomes the real store unless the final replace succeeds.  We dump without
+[[sort_keys]] because the order of the [[questions]] dict is now load-bearing:
+it encodes the sequence in which questions were last registered, which the
+\enquote{Next $\rightarrow$} navigation walks.  Sorting on disk would erase that
+information.  Python's JSON library preserves dict insertion order on dump and
+recovers it on load, so the round-trip carries the sequence faithfully.
 
 <<store methods>>=
 def _write(self, data: dict[str, Any]):
@@ -339,7 +344,7 @@ def _write(self, data: dict[str, Any]):
     temp_path = self.path.with_name(f"{self.path.name}.tmp")
 
     with temp_path.open("w", encoding="utf-8") as handle:
-        json.dump(data, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        json.dump(data, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
 
     os.replace(temp_path, self.path)
@@ -481,26 +486,37 @@ def test_get_setting_keeps_nullable_string_settings_as_strings(
 
 \section{Registration and prefix resolution}
 
-Registration needs three properties.  It must be idempotent for the same
-content; it must keep old printed URLs stable when a later question shares
-the same beginning of the hash; and it must let a question evolve its
-presentation fields without losing answers, so that a lecturer who edits
-a word-cloud's render mode and recompiles sees the new visualisation on
-the very next results request.  We achieve all three by treating issued
-prefixes as exact reservations, extending only the newer question on
-collision, and updating the stored entry whenever the freshly serialised
-question differs from the one currently on disk.
+Registration needs four properties.  It must keep old printed URLs stable when
+a later question shares the same beginning of the hash; it must let a question
+evolve its presentation fields without losing answers, so that a lecturer who
+edits a word-cloud's render mode and recompiles sees the new visualisation on
+the very next results request; it must produce the same prefix every time the
+same content is registered, so old QR codes keep resolving; and it must
+preserve the document order of the source slides in the on-disk dict, so the
+server can build the \enquote{Next $\rightarrow$} chain from PythonTeX's
+natural execution order.
 
-The split between identity and presentation matters here.  The hash --- the
-key into [[data["questions"]]] --- only sees identity fields, so a
+The first three properties came together once we treated issued prefixes as
+exact reservations, extended only the newer question on collision, and merged
+the freshly serialised question over the existing entry.  The fourth property
+is what changes here.  Rather than carrying an explicit sequence number, we
+piggyback on Python's guaranteed dict insertion order: every [[register]] call
+pops the entry (if any) before re-inserting it, so the question lands at the
+end of [[data["questions"]]] regardless of where it sat before.  A full
+PythonTeX rebuild therefore reorders the file to match the current slide
+sequence; questions dropped from the source remain pinned at the front as
+orphans, leaving the live sequence behind them in correct document order.
+
+The split between identity and presentation still matters here.  The hash ---
+the key into [[data["questions"]]] --- only sees identity fields, so a
 re-registration with new presentation hits the existing slot rather than
-allocating a fresh prefix.  We then merge the freshly serialised
-question over the existing entry: that way the presentation keys take
-their new values, the prefix and the answer log carry over unchanged,
-and any auxiliary keys the store kept beside the question (for example
-[[qr_targets]] from later [[remember_qr_target]] calls) survive the
-refresh untouched.  Merge-then-compare keeps the no-op case write-free,
-which the existing idempotence test continues to verify.
+allocating a fresh prefix.  Merging the freshly serialised question over the
+existing entry refreshes presentation keys to their new values, while
+[[url_prefix]] is taken from the existing entry so the prefix and answer log
+carry over unchanged.  Any auxiliary keys the store kept beside the question
+(for example [[qr_targets]] from later [[remember_qr_target]] calls) survive
+the refresh because the dictionary spread keeps every key the existing entry
+already had.
 
 <<store methods>>=
 def register(self, question: Question) -> str:
@@ -511,12 +527,11 @@ def register(self, question: Question) -> str:
         full_hash = question_hash(question)
 
         if full_hash in data["questions"]:
-            existing = data["questions"][full_hash]
+            existing = data["questions"].pop(full_hash)
             refreshed = {**existing, **question.to_dict()}
             refreshed["url_prefix"] = existing["url_prefix"]
-            if refreshed != existing:
-                data["questions"][full_hash] = refreshed
-                self._write(data)
+            data["questions"][full_hash] = refreshed
+            self._write(data)
             return existing["url_prefix"]
 
         prefix = self._allocate_prefix(full_hash, data["questions"])
@@ -637,6 +652,88 @@ def test_register_extends_only_the_newer_prefix(tmp_path, monkeypatch):
     assert second == "abcd2"
 @
 
+The pop-then-reinsert protocol shows up most clearly when the lecturer
+re-registers a middle question during a fresh build: it should land at the end
+of the iteration order, not stay in place.  Without this rule, inserting a new
+slide between two existing questions and rebuilding would leave the
+\enquote{Next $\rightarrow$} link skipping over the new slide on the next
+results page.
+
+<<test functions>>=
+
+def test_register_reinserts_questions_in_document_order(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first = OpenQuestion("Warm-up?")
+    middle = OpenQuestion("Main point?")
+    last = OpenQuestion("Wrap-up?")
+
+    store.register(first)
+    store.register(middle)
+    store.register(last)
+    store.register(middle)
+
+    hashes = [entry["hash"] for entry in store.all_questions()]
+
+    assert hashes == [
+        question_hash(first),
+        question_hash(last),
+        question_hash(middle),
+    ]
+@
+
+When a lecturer drops a question from the slide deck and rebuilds, the dropped
+question is the only one whose [[register]] is no longer called.  Every other
+question gets popped and re-appended in source order, leaving the orphan
+pinned at the front --- a self-quarantining position where it cannot pollute
+the live sequence behind it, while its old QR codes still resolve for
+past-answer forensics.
+
+<<test functions>>=
+
+def test_register_keeps_dropped_question_as_orphan_at_front(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    questions = [OpenQuestion(f"Q{i}") for i in range(1, 6)]
+    for question in questions:
+        store.register(question)
+
+    for index, question in enumerate(questions):
+        if index == 2:
+            continue
+        store.register(question)
+
+    hashes = [entry["hash"] for entry in store.all_questions()]
+
+    assert hashes == [
+        question_hash(questions[2]),
+        question_hash(questions[0]),
+        question_hash(questions[1]),
+        question_hash(questions[3]),
+        question_hash(questions[4]),
+    ]
+@
+
+Re-registration must keep the auxiliary [[qr_targets]] list that
+[[remember_qr_target]] writes after the original registration --- otherwise
+every PythonTeX rebuild would lose the lecturer's record of which printed
+QR codes the question owns, and stale handouts would no longer be
+regeneratable.  The dictionary spread inside [[register]] preserves any key
+the existing entry already had, but we still pin the behaviour here in case
+a future refactor restructures the merge.
+
+<<test functions>>=
+
+def test_register_refresh_preserves_remembered_qr_targets(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(WordCloudQuestion("Words?", render="svg"))
+    full_hash = store.resolve(prefix)
+    target = tmp_path / "qr.pdf"
+    store.remember_qr_target(full_hash, target)
+
+    store.register(WordCloudQuestion("Words?", render="table"))
+
+    assert store.qr_targets(full_hash) == [target.resolve()]
+@
+
 Resolution prefers an exact issued prefix, because that is what keeps an old QR
 code valid after a newer question collides on the same early hash characters.
 When there is no such exact reservation, we fall back to Git-style unique full
@@ -733,25 +830,104 @@ def question(self, full_hash: str) -> Question:
     return question_from_dict(self.metadata(full_hash))
 @
 
-The question listing is sorted by issued prefix rather than insertion order so
-index pages and CLI output stay stable as the JSON object is rewritten.
+The question listing follows the dict's natural iteration order, which after
+[[register]]'s pop-then-reinsert is the document order of the last full
+build.  Index pages and the CLI listing therefore mirror what a lecturer sees
+in their slide deck, and the same order seeds the sequence the
+\enquote{Next $\rightarrow$} link walks.
 
 <<store methods>>=
 def all_questions(self) -> list[dict[str, Any]]:
-    """Return all registered questions, ordered by issued prefix."""
+    """Return all registered questions in registration order."""
 
     data = self._data()
     rows = []
 
-    for full_hash, meta in sorted(
-        data["questions"].items(),
-        key=lambda item: item[1]["url_prefix"],
-    ):
+    for full_hash, meta in data["questions"].items():
         row = _public_question_metadata(meta)
         row["hash"] = full_hash
         rows.append(row)
 
     return rows
+@
+
+The sequence-navigation helper is the read counterpart of [[register]]'s
+pop-then-reinsert: it returns the hash of the next question after [[full_hash]]
+in registration order, or [[None]] when [[full_hash]] is the last entry.  The
+server uses it to render the \enquote{Next $\rightarrow$} link on the
+post-submit and results pages without having to know how the order is
+maintained.  Questions whose hash is not registered at all return [[None]] too,
+so a stale URL can never wedge the link computation.
+
+<<store methods>>=
+def next_question(self, full_hash: str) -> str | None:
+    """Return the next question's hash in registration order, or ``None``."""
+
+    hashes = list(self._data()["questions"].keys())
+    try:
+        index = hashes.index(full_hash)
+    except ValueError:
+        return None
+    return hashes[index + 1] if index + 1 < len(hashes) else None
+@
+
+The walking test pins both ends of the contract at once: every non-final
+question points to its successor, and the final question terminates the chain
+with [[None]].  Without the [[None]] terminal, the server would loop the
+\enquote{Next $\rightarrow$} link back to the first question and confuse a
+respondent who reached the wrap-up slide.
+
+<<test functions>>=
+
+def test_next_question_walks_registration_order(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first = OpenQuestion("Q1")
+    second = OpenQuestion("Q2")
+    third = OpenQuestion("Q3")
+
+    store.register(first)
+    store.register(second)
+    store.register(third)
+
+    assert store.next_question(question_hash(first)) == question_hash(second)
+    assert store.next_question(question_hash(second)) == question_hash(third)
+    assert store.next_question(question_hash(third)) is None
+@
+
+An unknown hash is treated like \enquote{last in the sequence}: returning
+[[None]] keeps the server's link-rendering code branch-free.  A stale URL
+should never wedge the navigation logic, no matter how it got into the request.
+
+<<test functions>>=
+
+def test_next_question_returns_none_for_unknown_hash(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    store.register(OpenQuestion("Q1"))
+
+    assert store.next_question("0" * 64) is None
+@
+
+When a lecturer drops a question from the slide deck, the orphan keeps its
+position at the front of the dict.  Its [[next]] still resolves to a live
+question --- specifically the new first question after the rebuild --- so
+visiting an old QR code's results page links forward into the current
+sequence rather than into a dead end.
+
+<<test functions>>=
+
+def test_next_question_for_orphan_returns_new_first_live(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    questions = [OpenQuestion(f"Q{i}") for i in range(1, 4)]
+    for question in questions:
+        store.register(question)
+
+    store.register(questions[1])
+    store.register(questions[2])
+
+    orphan = question_hash(questions[0])
+    new_first_live = question_hash(questions[1])
+
+    assert store.next_question(orphan) == new_first_live
 @
 
 Prefix iteration is a small helper for server startup checks.  It takes a
