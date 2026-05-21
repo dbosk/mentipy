@@ -68,9 +68,8 @@ class MCQuestion:
             "text": self.text,
             "options": list(self.options),
             "multi": self.multi,
+            "next": self.next,
         }
-        if not self.next:
-            result["next"] = False
         return result
 
     def canonical_dict(self) -> dict[str, Any]:
@@ -89,19 +88,19 @@ def test_mc_question_requires_options():
         MCQuestion("Which one?", ())
 @
 
-The default-true [[next]] flag is hidden from the persistence shape so that
-pre-existing multiple-choice JSON stays byte-for-byte the same.  A
-[[next=False]] question opts out, and that opt-out has to be visible to the
-store --- otherwise the server could not honour it across restarts.
+The persistence shape keeps [[next]] explicit even at its default value.  That
+lets the store refresh question data without guessing whether an absent key
+belongs to the question or to store-owned metadata.
 
 <<test functions>>=
 
-def test_mc_question_to_dict_omits_a_default_next_flag():
+def test_mc_question_to_dict_includes_a_default_next_flag():
     assert MCQuestion("Pick one", ("A", "B")).to_dict() == {
         "kind": "mc",
         "text": "Pick one",
         "options": ["A", "B"],
         "multi": False,
+        "next": True,
     }
 
 
@@ -115,13 +114,14 @@ def test_mc_question_to_dict_includes_an_opt_out_next_flag():
 Open questions need the prompt and a character limit, and they can optionally
 carry a markdown fence language for uploaded file bodies.  The limit belongs to
 the question data because it affects both the HTTP form and the canonical hash.
-The fence hint also belongs here, but it has to be a single CommonMark info word:
-whitespace or backticks would change the structure of the generated fence rather
-than just its language tag.  We omit the hint from the canonical JSON when it is
-unset so existing open-question hashes stay byte-for-byte stable.  The shared
-[[next]] flag enables the \enquote{Next $\rightarrow$} link on the post-submit
-page; like every presentation field it is stripped by [[canonical_dict]] before
-hashing, so flipping it does not orphan the recorded answers.
+The fence hint also belongs here, but it has to be a single CommonMark info
+word: whitespace or backticks would change the structure of the generated fence
+rather than just its language tag.  We omit the hint from the canonical JSON
+when it is unset so existing open-question hashes stay byte-for-byte stable.
+The shared [[next]] flag enables the \enquote{Next $\rightarrow$} link in the
+response flow; like every presentation field it is stripped by
+[[canonical_dict]] before hashing, so flipping it does not orphan the recorded
+answers.
 
 <<classes>>=
 @dataclass(frozen=True)
@@ -178,11 +178,11 @@ if self.fence is not None and (
 
 \subsection{Serialisation}
 
-Serialisation omits the fence when it is unset.  That keeps the canonical JSON
-for existing open questions byte-for-byte unchanged while still recording the
-new rendering hint when authors choose one.  We use the same omit-when-default
-treatment for the [[next]] flag: a default-true value is implied by absence, so
-default open questions still serialise to the historical three-key dictionary.
+The persistence shape records every question-owned field explicitly.  That lets
+the store treat any extra stored key as store-owned metadata during refresh.
+[[canonical_dict]] still strips the presentation-only [[next]] flag and omits
+an unset [[fence]] so the hash of historical open questions stays byte-for-byte
+stable.
 
 <<open question methods>>=
 def to_dict(self) -> dict[str, Any]:
@@ -192,11 +192,9 @@ def to_dict(self) -> dict[str, Any]:
         "kind": self.kind,
         "text": self.text,
         "max_chars": self.max_chars,
+        "fence": self.fence,
+        "next": self.next,
     }
-    if self.fence is not None:
-        result["fence"] = self.fence
-    if not self.next:
-        result["next"] = False
     return result
 
 def canonical_dict(self) -> dict[str, Any]:
@@ -204,6 +202,8 @@ def canonical_dict(self) -> dict[str, Any]:
 
     result = self.to_dict()
     result.pop("next", None)
+    if result["fence"] is None:
+        result.pop("fence")
     return result
 @
 
@@ -228,16 +228,18 @@ def test_open_question_rejects_malformed_fence_languages(fence):
         OpenQuestion("Q", fence=fence)
 @
 
-The unset-fence serialisation test preserves the old canonical form of open
-questions that do not opt into upload highlighting.
+The default persistence shape keeps both optional fields explicit, even when the
+question sticks to the historical no-fence path.
 
 <<test functions>>=
 
-def test_open_question_to_dict_omits_an_unset_fence():
+def test_open_question_to_dict_includes_default_fields():
     assert OpenQuestion("Q").to_dict() == {
         "kind": "open",
         "text": "Q",
         "max_chars": 280,
+        "fence": None,
+        "next": True,
     }
 @
 
@@ -252,19 +254,22 @@ def test_open_question_to_dict_includes_a_configured_fence():
         "text": "Q",
         "max_chars": 280,
         "fence": "python",
+        "next": True,
     }
 @
 
 A [[next=False]] open question must surface the opt-out in [[to_dict]] so it
-persists across server restarts, while still leaving the canonical identity
-payload untouched.
+persists across server restarts, while [[canonical_dict]] still hides both the
+presentation-only [[next]] flag and an unset [[fence]].
 
 <<test functions>>=
 
 def test_open_question_to_dict_records_an_opt_out_next_flag():
     payload = OpenQuestion("Q", next=False).to_dict()
     assert payload["next"] is False
-    assert "next" not in OpenQuestion("Q").canonical_dict()
+    canonical = OpenQuestion("Q").canonical_dict()
+    assert "next" not in canonical
+    assert "fence" not in canonical
 @
 
 \section{Numeric Scales}
@@ -302,9 +307,8 @@ class ScaleQuestion:
             "high": self.high,
             "low_label": self.low_label,
             "high_label": self.high_label,
+            "next": self.next,
         }
-        if not self.next:
-            result["next"] = False
         return result
 
     def canonical_dict(self) -> dict[str, Any]:
@@ -489,9 +493,8 @@ def to_dict(self) -> dict[str, Any]:
         "extra_stop_words": list(self.extra_stop_words),
         "use_default_stopwords": self.use_default_stopwords,
         "render": self.render,
+        "next": self.next,
     }
-    if not self.next:
-        result["next"] = False
     return result
 
 def canonical_dict(self) -> dict[str, Any]:
@@ -532,6 +535,7 @@ def test_word_cloud_to_dict_includes_all_fields():
         "extra_stop_words": ["foo", "bar"],
         "use_default_stopwords": False,
         "render": "table",
+        "next": True,
     }
 @
 
@@ -884,8 +888,9 @@ if kind == "wordcloud":
 @
 
 The multiple-choice round-trip test fixes the storage contract for option order
-and the multi-select flag.  If either field is lost or renamed later, old data
-would silently change meaning.
+and the multi-select flag.  Legacy payloads may still omit [[next]], but
+reloading them should normalise the explicit persistence shape the store now
+writes.
 
 <<test functions>>=
 def test_mc_question_round_trip():
@@ -899,11 +904,17 @@ def test_mc_question_round_trip():
     question = question_from_dict(payload)
 
     assert isinstance(question, MCQuestion)
-    assert question.to_dict() == payload
+    assert question.to_dict() == {
+        "kind": "mc",
+        "text": "How was the lecture?",
+        "options": ["Great", "OK", "Boring"],
+        "multi": True,
+        "next": True,
+    }
 @
 
-The basic open-question round trip preserves the historical shape without a
-fence key.
+The basic open-question round trip accepts the historical sparse shape without a
+fence key, then normalises the stored form back to explicit defaults.
 
 <<test functions>>=
 def test_open_question_round_trip_without_fence():
@@ -916,10 +927,17 @@ def test_open_question_round_trip_without_fence():
     question = question_from_dict(payload)
 
     assert isinstance(question, OpenQuestion)
-    assert question.to_dict() == payload
+    assert question.to_dict() == {
+        "kind": "open",
+        "text": "One thing to change?",
+        "max_chars": 140,
+        "fence": None,
+        "next": True,
+    }
 @
 
-The fenced open-question round trip pins the newer upload-highlighting field.
+The fenced open-question round trip pins the newer upload-highlighting field,
+while the normalised persistence shape still backfills the default [[next]].
 
 <<test functions>>=
 def test_open_question_round_trip_with_fence():
@@ -933,11 +951,18 @@ def test_open_question_round_trip_with_fence():
     question = question_from_dict(payload)
 
     assert isinstance(question, OpenQuestion)
-    assert question.to_dict() == payload
+    assert question.to_dict() == {
+        "kind": "open",
+        "text": "Show your code",
+        "max_chars": 5000,
+        "fence": "python",
+        "next": True,
+    }
 @
 
 Scale round trips are mostly about keeping all four range fields tied together:
-the numeric bounds and their optional endpoint labels.
+the numeric bounds, their optional endpoint labels, and the now-explicit
+default [[next]] flag.
 
 <<test functions>>=
 def test_scale_question_round_trip():
@@ -953,13 +978,21 @@ def test_scale_question_round_trip():
     question = question_from_dict(payload)
 
     assert isinstance(question, ScaleQuestion)
-    assert question.to_dict() == payload
+    assert question.to_dict() == {
+        "kind": "scale",
+        "text": "Pace?",
+        "low": 1,
+        "high": 7,
+        "low_label": "slow",
+        "high_label": "fast",
+        "next": True,
+    }
 @
 
-The word-cloud round trip checks two properties at once: every
-presentation field survives the JSON detour, and the
-[[extra_stop_words]] list is rebuilt as a tuple --- without the
-coercion, the frozen dataclass would refuse to hash and any later
+The word-cloud round trip checks three properties at once: every presentation
+field survives the JSON detour, the [[extra_stop_words]] list is rebuilt as a
+tuple, and the explicit persistence shape backfills the default [[next]] flag.
+Without the coercion, the frozen dataclass would refuse to hash and any later
 use in a set or dictionary would fail.
 
 <<test functions>>=
@@ -979,7 +1012,17 @@ def test_word_cloud_round_trip_preserves_extra_stop_words_as_tuple():
 
     assert isinstance(question, WordCloudQuestion)
     assert question.extra_stop_words == ("foo", "bar")
-    assert question.to_dict() == payload
+    assert question.to_dict() == {
+        "kind": "wordcloud",
+        "text": "What did you learn?",
+        "max_chars": 140,
+        "split_words": True,
+        "min_word_length": 4,
+        "extra_stop_words": ["foo", "bar"],
+        "use_default_stopwords": False,
+        "render": "table",
+        "next": True,
+    }
 @
 
 The [[next]] flag has to survive the store's JSON detour for every question
@@ -1009,13 +1052,12 @@ The canonical hash uses sorted JSON keys so that it depends on the meaning of
 the question, not on the incidental order in which Python produced a mapping.
 
 Every question type now exposes a [[canonical_dict]] method that returns the
-identity-only payload.  For multiple-choice, open, and scale questions the
-identity is the whole persistence shape minus the [[next]] flag --- the only
-presentation field they carry.  Word clouds additionally strip their
-visualisation fields.  Because [[to_dict]] omits a default-true [[next]],
-identity payloads for pre-existing questions are byte-for-byte the same as
-before this field was introduced, and existing answer logs keep resolving to
-the same URL prefix.
+identity-only payload.  For multiple-choice and scale questions the identity is
+the whole persistence shape minus the [[next]] flag.  Open questions do the
+same and additionally drop an unset [[fence]] so historical hashes stay
+byte-for-byte stable even though [[to_dict]] now records explicit defaults.
+Word clouds additionally strip their visualisation fields, keeping existing
+answer logs bound to the same URL prefix while presentation evolves.
 
 <<functions>>=
 def question_hash(question: Question) -> str:

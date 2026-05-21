@@ -510,13 +510,11 @@ orphans, leaving the live sequence behind them in correct document order.
 The split between identity and presentation still matters here.  The hash ---
 the key into [[data["questions"]]] --- only sees identity fields, so a
 re-registration with new presentation hits the existing slot rather than
-allocating a fresh prefix.  Merging the freshly serialised question over the
-existing entry refreshes presentation keys to their new values, while
-[[url_prefix]] is taken from the existing entry so the prefix and answer log
-carry over unchanged.  Any auxiliary keys the store kept beside the question
-(for example [[qr_targets]] from later [[remember_qr_target]] calls) survive
-the refresh because the dictionary spread keeps every key the existing entry
-already had.
+allocating a fresh prefix.  The refresh path therefore rebuilds the question
+payload from scratch and only carries forward keys that do not belong to the
+question contract at all.  That is what lets a lecturer revert a presentation
+field back to its default without a stale stored value surviving by omission,
+while store-owned metadata such as remembered QR targets still carries over.
 
 <<store methods>>=
 def register(self, question: Question) -> str:
@@ -528,8 +526,14 @@ def register(self, question: Question) -> str:
 
         if full_hash in data["questions"]:
             existing = data["questions"].pop(full_hash)
-            refreshed = {**existing, **question.to_dict()}
-            refreshed["url_prefix"] = existing["url_prefix"]
+            existing_question = question_from_dict(existing).to_dict()
+            metadata = {
+                key: value
+                for key, value in existing.items()
+                if key not in existing_question
+            }
+            refreshed = question.to_dict()
+            refreshed.update(metadata)
             data["questions"][full_hash] = refreshed
             self._write(data)
             return existing["url_prefix"]
@@ -716,9 +720,9 @@ Re-registration must keep the auxiliary [[qr_targets]] list that
 [[remember_qr_target]] writes after the original registration --- otherwise
 every PythonTeX rebuild would lose the lecturer's record of which printed
 QR codes the question owns, and stale handouts would no longer be
-regeneratable.  The dictionary spread inside [[register]] preserves any key
-the existing entry already had, but we still pin the behaviour here in case
-a future refactor restructures the merge.
+regeneratable.  The refresh now derives store-owned metadata by subtracting the
+question payload from the stored entry, but we still pin the behaviour here in
+case a future refactor blurs that boundary again.
 
 <<test functions>>=
 
@@ -732,6 +736,54 @@ def test_register_refresh_preserves_remembered_qr_targets(tmp_path):
     store.register(WordCloudQuestion("Words?", render="table"))
 
     assert store.qr_targets(full_hash) == [target.resolve()]
+@
+
+Refreshing a question back to default presentation values must clear the old
+question-owned keys while keeping the stable prefix and any answers.  This is
+the bug class that originally surfaced for [[next]].  The same subtraction rule
+also has to preserve store-owned metadata without hardcoding its key names.
+
+<<test functions>>=
+
+def test_register_refresh_clears_a_stale_opt_out_next_flag(tmp_path):
+    store_path = tmp_path / "mentipy.json"
+    prefix = Store(store_path, min_prefix=4).register(
+        OpenQuestion("Feedback?", next=False)
+    )
+
+    store = Store(store_path, min_prefix=4)
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, "More examples")
+    refreshed_prefix = store.register(OpenQuestion("Feedback?"))
+
+    reloaded = Store(store_path, min_prefix=4)
+    rebuilt = reloaded.question(full_hash)
+
+    assert refreshed_prefix == prefix
+    assert rebuilt.next is True
+    assert reloaded.results(full_hash)["answers"][0]["value"] == "More examples"
+
+
+def test_register_refresh_preserves_store_owned_metadata_keys(tmp_path):
+    store_path = tmp_path / "mentipy.json"
+    prefix = Store(store_path, min_prefix=4).register(
+        WordCloudQuestion("Words?", render="svg")
+    )
+
+    store = Store(store_path, min_prefix=4)
+    full_hash = store.resolve(prefix)
+    data = store._data()
+    data["questions"][full_hash]["custom_store_key"] = "kept"
+    store._write(data)
+
+    refreshed_prefix = store.register(WordCloudQuestion("Words?", render="table"))
+
+    reloaded = Store(store_path, min_prefix=4)
+    metadata = reloaded._data()["questions"][full_hash]
+
+    assert refreshed_prefix == prefix
+    assert metadata["custom_store_key"] == "kept"
+    assert metadata["render"] == "table"
 @
 
 Resolution prefers an exact issued prefix, because that is what keeps an old QR
