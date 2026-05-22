@@ -12,6 +12,7 @@ from __future__ import annotations
 
 <<constants>>
 <<functions>>
+<<option completions>>
 <<cli setup>>
 @
 
@@ -236,6 +237,52 @@ OPEN_FENCE_CHOICES = (
 WORD_CLOUD_RENDER_CHOICES = ("svg", "scaled", "table")
 @
 
+Fixed-value flags need only prefix filtering over a tiny tuple.  The helper
+stays generic so the shared module-level option objects and the command-local
+[[--fence]] and [[--render]] options can all advertise the same accepted values
+without repeating the list comprehension.
+
+<<functions>>=
+def _choice_completer(values: tuple[str, ...]):
+    def _complete(_ctx: typer.Context, incomplete: str) -> list[str]:
+        return [value for value in values if value.startswith(incomplete)]
+
+    return _complete
+@
+
+The command-local [[--fence]] and [[--render]] options can pass
+[[autocompletion=_choice_completer(...)]] directly to [[typer.Option(...)]],
+because their construction happens inside [[<<cli setup>>]] -- by then both
+the choices and the helper are defined.  The shared module-level options
+above sit in [[<<constants>>]], which is tangled before [[<<functions>>]],
+so [[_choice_completer]] does not yet exist when they are constructed.  We
+therefore wire their completion callbacks here, in a chunk that runs after
+both definitions are in scope.  The contract test below pins this wiring so
+a future refactor that drops the assignments, reorders the top-level chunks,
+or upgrades to a Typer release that rejects attribute mutation fails loudly
+instead of silently leaving tab-completion empty.
+
+<<option completions>>=
+LAYOUT_OPTION.autocompletion = _choice_completer(LAYOUT_CHOICES)
+QR_FORMAT_OPTION.autocompletion = _choice_completer(QR_FORMAT_CHOICES)
+EXPORT_FORMAT_OPTION.autocompletion = _choice_completer(EXPORT_FORMAT_CHOICES)
+@
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    "option, expected",
+    [
+        (LAYOUT_OPTION, LAYOUT_CHOICES),
+        (QR_FORMAT_OPTION, QR_FORMAT_CHOICES),
+        (EXPORT_FORMAT_OPTION, EXPORT_FORMAT_CHOICES),
+    ],
+)
+def test_shared_options_advertise_choice_completion(option, expected):
+    completer = option.autocompletion
+    assert completer is not None
+    assert completer(None, "") == list(expected)
+@
+
 Question listings should fit normal terminals without assuming one particular
 width.  The public-exposure warning is also a constant so [[serve]] and [[url]]
 print the same risk statement whenever they make an unauthenticated endpoint
@@ -424,7 +471,11 @@ The prefix-oriented commands already depend on the store's issued
 [[url_prefix]] metadata.  Their completion hook can therefore reuse the same
 listing without adding any shell-time side effects: it reads the configured
 store, honours an already-typed [[--store]] override, and quietly returns no
-suggestions if the store is missing or broken.
+suggestions if the store is missing or broken.  The catch is intentionally
+broad because shell completion runs in the middle of the user typing a
+command, so a leaked traceback into their prompt is far worse than a missing
+suggestion.  Programmer errors here surface through the matching pytest
+cases below, not through the user's terminal.
 
 <<functions>>=
 def _complete_question_prefix(
@@ -479,29 +530,6 @@ def test_complete_question_prefix_returns_empty_on_missing_store(tmp_path):
     ctx = SimpleNamespace(params={"store": str(tmp_path / "missing.json")})
 
     assert mentipy.cli._complete_question_prefix(ctx, "") == []
-@
-
-Fixed-value flags need only prefix filtering over a tiny tuple.  The helper
-stays generic so the shared module-level option objects and the command-local
-options below can all advertise the same accepted values without repeating the
-list comprehension.
-
-<<functions>>=
-def _choice_completer(values: tuple[str, ...]):
-    def _complete(_ctx: typer.Context, incomplete: str) -> list[str]:
-        return [value for value in values if value.startswith(incomplete)]
-
-    return _complete
-@
-
-The shared [[typer.Option()]] objects were created earlier in the module, so we
-attach their completion callbacks after defining the helper and before the
-command declarations reuse them.
-
-<<functions>>=
-LAYOUT_OPTION.autocompletion = _choice_completer(LAYOUT_CHOICES)
-QR_FORMAT_OPTION.autocompletion = _choice_completer(QR_FORMAT_CHOICES)
-EXPORT_FORMAT_OPTION.autocompletion = _choice_completer(EXPORT_FORMAT_CHOICES)
 @
 
 Terminal output still needs small presentation helpers.  Question text is
