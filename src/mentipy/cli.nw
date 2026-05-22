@@ -25,6 +25,7 @@ mostly as wiring.
 <<imports>>=
 from contextlib import contextmanager
 import csv
+import ipaddress
 import io
 import json
 from pathlib import Path
@@ -326,6 +327,27 @@ def _configured_base(base: str | None) -> str | None:
     if base is not None:
         return base
     return get_setting(BASE_URL_CONFIG)
+
+
+def _format_index_hint(public_url: str, host: str, port: int) -> str:
+    public_index = public_url.rstrip("/") + "/"
+    bind_host = _index_host(host)
+    bind_index = f"http://{bind_host}:{port}/"
+    return (
+        "Open the question index at:\n"
+        f"  {public_index}\n"
+        f"  {bind_index}"
+    )
+
+
+def _index_host(host: str) -> str:
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    if address.is_loopback or address.is_unspecified:
+        return "localhost"
+    return host
 @
 
 TyperConf already provides the path-based configuration command shape we want.
@@ -1387,17 +1409,17 @@ def _serve_publicly(
     results: bool,
 ):
     with _public_url_context(public, chosen_port) as public_url:
-        configured_base = get_setting(BASE_URL_CONFIG)
-
-        if public_url == configured_base:
+        count = regenerate_qrs(active_store, public_url)
+        if count == 0:
             typer.echo(f"Public URL: {public_url}")
         else:
-            count = regenerate_qrs(active_store, public_url)
             typer.echo(
                 f"Public URL: {public_url}\n"
                 f"Regenerated {count} QR codes; recompile your slides so "
                 "they embed the new images."
             )
+        if not results:
+            typer.echo(_format_index_hint(public_url, chosen_host, chosen_port))
 
         serve_http(
             active_store,
@@ -1494,7 +1516,10 @@ def activate(
 The local serving path resolves the address that should appear in remembered
 QR codes before starting the HTTP server.  A pinned base URL is trusted as-is;
 otherwise the current bind port is used to resolve a LAN-style URL and refresh
-the QR artifacts that LaTeX will later include.
+the QR artifacts that LaTeX will later include.  When the lecturer is not using
+[[--results]], we also print the root index URL on both the respondent-facing
+address and the reachable local bind address so the presenter can open the
+local results hub directly.
 
 <<cli setup>>=
 @cli.command(context_settings={"allow_extra_args": True})
@@ -1520,7 +1545,23 @@ def serve(
     if public_mode is None:
         configured_base = _configured_base(None)
         if configured_base not in (None, "", "auto"):
-            typer.echo(f"Serving at {configured_base}")
+            count = regenerate_qrs(active_store, configured_base)
+            if count == 0:
+                typer.echo(f"Serving at {configured_base}")
+            else:
+                typer.echo(
+                    f"Serving at {configured_base}\n"
+                    f"Regenerated {count} QR codes; recompile your slides so "
+                    "they embed the new images."
+                )
+            if not results:
+                typer.echo(
+                    _format_index_hint(
+                        configured_base,
+                        chosen_host,
+                        chosen_port,
+                    )
+                )
         else:
             resolved = resolve_base_url(configured_base, chosen_port)
             count = regenerate_qrs(active_store, resolved)
@@ -1529,6 +1570,8 @@ def serve(
                 f"Regenerated {count} QR codes; recompile your slides so "
                 "they embed the new images."
             )
+            if not results:
+                typer.echo(_format_index_hint(resolved, chosen_host, chosen_port))
         serve_http(
             active_store,
             chosen_host,
@@ -2574,6 +2617,7 @@ def test_serve_command_passes_public_results_flag(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert called["path"] == tmp_path / "answers.json"
     assert called["public_results"] is True
+    assert "Open the question index at:" not in result.stdout
 @
 
 When the base URL is automatic or unset, starting the local server must refresh
@@ -2621,9 +2665,12 @@ def test_serve_regenerates_qrs_when_base_url_is_auto(tmp_path, monkeypatch):
     )
     assert "Serving at http://192.0.2.25:9123" in result.stdout
     assert "Regenerated 2 QR codes" in result.stdout
+    assert "Open the question index at:" in result.stdout
+    assert "  http://192.0.2.25:9123/" in result.stdout
+    assert "  http://localhost:9123/" in result.stdout
 
 
-def test_serve_skips_qr_regeneration_when_base_url_is_pinned(
+def test_serve_rewrites_qrs_for_a_pinned_base_url(
     tmp_path, monkeypatch
 ):
     runner = CliRunner()
@@ -2631,18 +2678,22 @@ def test_serve_skips_qr_regeneration_when_base_url_is_pinned(
     set_setting("base_url", "http://example.test:9000")
     called = {}
 
-    def fail_regenerate(_store, _base_url):
-        raise AssertionError("regenerate_qrs should not be called")
+    def fake_regenerate(store, base_url):
+        called["path"] = store.path
+        called["base_url"] = base_url
+        return 1
 
     def fake_serve(store, host, port, public_results=False):
         called["serve"] = (store.path, host, port, public_results)
 
-    monkeypatch.setattr("mentipy.cli.regenerate_qrs", fail_regenerate)
+    monkeypatch.setattr("mentipy.cli.regenerate_qrs", fake_regenerate)
     monkeypatch.setattr("mentipy.cli.serve_http", fake_serve)
 
     result = runner.invoke(cli, ["serve", "--store", str(tmp_path / "answers.json")])
 
     assert result.exit_code == 0
+    assert called["path"] == tmp_path / "answers.json"
+    assert called["base_url"] == "http://example.test:9000"
     assert called["serve"] == (
         tmp_path / "answers.json",
         DEFAULT_HOST,
@@ -2650,7 +2701,10 @@ def test_serve_skips_qr_regeneration_when_base_url_is_pinned(
         False,
     )
     assert "Serving at http://example.test:9000" in result.stdout
-    assert "Regenerated" not in result.stdout
+    assert "Regenerated 1 QR codes" in result.stdout
+    assert "Open the question index at:" in result.stdout
+    assert "  http://example.test:9000/" in result.stdout
+    assert f"  http://localhost:{DEFAULT_PORT}/" in result.stdout
 
 
 def test_serve_uses_bind_port_for_resolved_url(tmp_path, monkeypatch):
@@ -2780,8 +2834,8 @@ def test_serve_command_public_ssh_requires_configuration(tmp_path, monkeypatch):
 @
 
 Public URL selection has two invariants: an explicit public base URL wins over
-the transport-derived address, and QR regeneration is only necessary when the
-public address differs from the base URL already embedded in the slides.
+the transport-derived address, and the command always refreshes remembered QR
+targets against the final advertised address before it starts serving.
 
 <<test functions>>=
 def test_public_base_url_overrides_the_derived_url(tmp_path, monkeypatch):
@@ -2816,36 +2870,46 @@ def test_public_base_url_overrides_the_derived_url(tmp_path, monkeypatch):
         "base_url": "https://polls.example",
     }
     assert "Public URL: https://polls.example" in result.stdout
+    assert "Open the question index at:" in result.stdout
+    assert "  https://polls.example/" in result.stdout
+    assert "  http://localhost:8080/" in result.stdout
 
 
-def test_matching_public_url_skips_qr_regeneration(tmp_path, monkeypatch):
+def test_matching_public_url_still_checks_qr_regeneration(tmp_path, monkeypatch):
     runner = CliRunner()
     config_path = tmp_path / "config.json"
     monkeypatch.setenv("MENTIPY_CONFIG", str(config_path))
     set_setting("base_url", "http://public.example:8080")
-    called = {"regenerated": False}
+    called = {}
 
     @contextmanager
     def fake_expose(mode, local_port, *, ssh_endpoint=None):
         yield "http://public.example:8080"
 
-    def fail_regenerate(_store, _base_url):
-        called["regenerated"] = True
-        raise AssertionError("regenerate_qrs should not be called")
+    def fake_regenerate(store, base_url):
+        called["path"] = store.path
+        called["base_url"] = base_url
+        return 0
 
     monkeypatch.setattr("mentipy.cli.expose", fake_expose)
-    monkeypatch.setattr("mentipy.cli.regenerate_qrs", fail_regenerate)
+    monkeypatch.setattr("mentipy.cli.regenerate_qrs", fake_regenerate)
     monkeypatch.setattr("mentipy.cli.serve_http", lambda *_args, **_kwargs: None)
 
     result = runner.invoke(
         cli,
-        ["serve", "--public"],
+        ["serve", "--public", "--store", str(tmp_path / "answers.json")],
         env={"MENTIPY_CONFIG": str(config_path)},
     )
 
     assert result.exit_code == 0
-    assert called["regenerated"] is False
+    assert called == {
+        "path": tmp_path / "answers.json",
+        "base_url": "http://public.example:8080",
+    }
     assert "Public URL: http://public.example:8080" in result.stdout
+    assert "Open the question index at:" in result.stdout
+    assert "  http://public.example:8080/" in result.stdout
+    assert "  http://localhost:8080/" in result.stdout
 
 
 def test_different_public_url_regenerates_qrs(tmp_path, monkeypatch):
@@ -2879,6 +2943,49 @@ def test_different_public_url_regenerates_qrs(tmp_path, monkeypatch):
         "base_url": "http://public.example:8080",
     }
     assert "Regenerated 3 QR codes" in result.stdout
+
+
+def test_serve_command_uses_bind_host_in_index_hint(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("base_url", "http://polls.example:8080")
+
+    monkeypatch.setattr("mentipy.cli.regenerate_qrs", lambda _store, _base_url: 0)
+    monkeypatch.setattr("mentipy.cli.serve_http", lambda *_args, **_kwargs: None)
+
+    result = runner.invoke(
+        cli,
+        ["serve", "--host", "192.0.2.40", "--port", "8080"],
+    )
+
+    assert result.exit_code == 0
+    assert "  http://polls.example:8080/" in result.stdout
+    assert "  http://192.0.2.40:8080/" in result.stdout
+
+
+def test_serve_command_public_prints_index_hint(tmp_path, monkeypatch):
+    runner = CliRunner()
+    config_path = tmp_path / "config.json"
+    monkeypatch.setenv("MENTIPY_CONFIG", str(config_path))
+
+    @contextmanager
+    def fake_expose(mode, local_port, *, ssh_endpoint=None):
+        yield "http://public.example:8080"
+
+    monkeypatch.setattr("mentipy.cli.expose", fake_expose)
+    monkeypatch.setattr("mentipy.cli.regenerate_qrs", lambda _store, _base_url: 0)
+    monkeypatch.setattr("mentipy.cli.serve_http", lambda *_args, **_kwargs: None)
+
+    result = runner.invoke(
+        cli,
+        ["serve", "--public", "--port", "8080"],
+        env={"MENTIPY_CONFIG": str(config_path)},
+    )
+
+    assert result.exit_code == 0
+    assert "Open the question index at:" in result.stdout
+    assert "  http://public.example:8080/" in result.stdout
+    assert "  http://localhost:8080/" in result.stdout
 
 
 def test_serve_command_closes_the_public_exposure_context(tmp_path, monkeypatch):
