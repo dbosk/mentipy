@@ -94,8 +94,10 @@ DEFAULT_SETTINGS = {
     SHOW_URL_CONFIG: DEFAULT_SHOW_URL,
 }
 
-STORE_TEMPLATE = {"questions": {}, "answers": {}}
+STORE_TEMPLATE = {"questions": {}, "answers": {}, "registration_counter": 0}
 QR_TARGETS_KEY = "qr_targets"
+REGISTRATION_COUNTER_KEY = "registration_counter"
+REGISTRATION_SERIAL_KEY = "registration_serial"
 @
 
 The environment override makes tests cheap and also gives power users a simple
@@ -237,7 +239,48 @@ def _blank_store() -> dict[str, Any]:
     return {
         "questions": dict(STORE_TEMPLATE["questions"]),
         "answers": dict(STORE_TEMPLATE["answers"]),
+        REGISTRATION_COUNTER_KEY: STORE_TEMPLATE[REGISTRATION_COUNTER_KEY],
     }
+
+
+_STORE_LOCKS: dict[Path, threading.Lock] = {}
+_STORE_LOCKS_GUARD = threading.Lock()
+
+
+def _store_lock(path: Path) -> threading.Lock:
+    resolved = path.resolve()
+    with _STORE_LOCKS_GUARD:
+        lock = _STORE_LOCKS.get(resolved)
+        if lock is None:
+            lock = threading.Lock()
+            _STORE_LOCKS[resolved] = lock
+    return lock
+def _live_hashes(data: dict[str, Any]) -> list[str]:
+    items = list(data["questions"].items())
+    if not items:
+        return []
+
+    live = [items[-1][0]]
+    expected = int(items[-1][1][REGISTRATION_SERIAL_KEY])
+
+    for full_hash, meta in reversed(items[:-1]):
+        serial = int(meta[REGISTRATION_SERIAL_KEY])
+        if serial + 1 != expected:
+            break
+        live.append(full_hash)
+        expected = serial
+
+    live.reverse()
+    return live
+
+
+def _ensure_registration_serials(data: dict[str, Any]):
+    counter = int(data.get(REGISTRATION_COUNTER_KEY, 0))
+    for fallback, meta in enumerate(data["questions"].values(), start=1):
+        if REGISTRATION_SERIAL_KEY not in meta:
+            meta[REGISTRATION_SERIAL_KEY] = fallback
+        counter = max(counter, int(meta[REGISTRATION_SERIAL_KEY]))
+    data[REGISTRATION_COUNTER_KEY] = counter
 @
 
 Answer timestamps are stored as UTC ISO strings with a [[Z]] suffix.  That is a
@@ -306,7 +349,7 @@ class Store:
 
         self.path = Path(chosen_path)
         self.min_prefix = int(chosen_prefix)
-        self._lock = threading.Lock()
+        self._lock = _store_lock(self.path)
 
     <<store methods>>
 @
@@ -326,6 +369,7 @@ def _data(self) -> dict[str, Any]:
 
     data.setdefault("questions", {})
     data.setdefault("answers", {})
+    _ensure_registration_serials(data)
     return data
 @
 
@@ -499,13 +543,15 @@ natural execution order.
 The first three properties came together once we treated issued prefixes as
 exact reservations, extended only the newer question on collision, and merged
 the freshly serialised question over the existing entry.  The fourth property
-is what changes here.  Rather than carrying an explicit sequence number, we
-piggyback on Python's guaranteed dict insertion order: every [[register]] call
-pops the entry (if any) before re-inserting it, so the question lands at the
-end of [[data["questions"]]] regardless of where it sat before.  A full
-PythonTeX rebuild therefore reorders the file to match the current slide
-sequence; questions dropped from the source remain pinned at the front as
-orphans, leaving the live sequence behind them in correct document order.
+needs one extra bit of operational metadata too, but not an explicit build
+session marker.  We still piggyback on Python's guaranteed dict insertion
+order: every [[register]] call pops the entry (if any) before re-inserting it,
+so the question lands at the end of [[data["questions"]]] regardless of where
+it sat before.  Alongside that order, we persist a monotonically increasing
+registration serial.  The current live lecture sequence is then the newest
+contiguous registration run at the end of the dict.  A full rebuild rewrites
+exactly that suffix in document order, so dropped slides stay behind as orphans
+while the server's book-style navigation can ignore them.
 
 The split between identity and presentation still matters here.  The hash ---
 the key into [[data["questions"]]] --- only sees identity fields, so a
@@ -523,6 +569,8 @@ def register(self, question: Question) -> str:
     with self._lock:
         data = self._data()
         full_hash = question_hash(question)
+        serial = int(data[REGISTRATION_COUNTER_KEY]) + 1
+        data[REGISTRATION_COUNTER_KEY] = serial
 
         if full_hash in data["questions"]:
             existing = data["questions"].pop(full_hash)
@@ -534,6 +582,7 @@ def register(self, question: Question) -> str:
             }
             refreshed = question.to_dict()
             refreshed.update(metadata)
+            refreshed[REGISTRATION_SERIAL_KEY] = serial
             data["questions"][full_hash] = refreshed
             self._write(data)
             return existing["url_prefix"]
@@ -541,6 +590,7 @@ def register(self, question: Question) -> str:
         prefix = self._allocate_prefix(full_hash, data["questions"])
         entry = question.to_dict()
         entry["url_prefix"] = prefix
+        entry[REGISTRATION_SERIAL_KEY] = serial
         data["questions"][full_hash] = entry
         data["answers"].setdefault(full_hash, [])
         self._write(data)
@@ -687,10 +737,12 @@ def test_register_reinserts_questions_in_document_order(tmp_path):
 
 When a lecturer drops a question from the slide deck and rebuilds, the dropped
 question is the only one whose [[register]] is no longer called.  Every other
-question gets popped and re-appended in source order, leaving the orphan
-pinned at the front --- a self-quarantining position where it cannot pollute
-the live sequence behind it, while its old QR codes still resolve for
-past-answer forensics.
+question gets popped and re-appended in source order with fresh registration
+serials, leaving the orphan pinned at the front of the dict for historical
+listings while the rebuilt suffix becomes the live lecture chain.  The
+navigation helpers then walk only that newest contiguous suffix, so old QR
+codes still resolve for past-answer forensics without polluting the current
+lecture sequence.
 
 <<test functions>>=
 
@@ -855,12 +907,15 @@ stable listing for index-like views.
 Those read helpers should expose the question contract, not the store's local
 housekeeping.  In particular, remembered QR artifact paths are operational
 metadata for later regeneration and would leak document-local filesystem layout
-if they escaped through [[metadata()]] or [[all_questions()]].
+if they escaped through [[metadata()]] or [[all_questions()]].  The same goes
+for the internal registration serial that the navigation helpers use to recover
+the newest live suffix.
 
 <<functions>>=
 def _public_question_metadata(meta: dict[str, Any]) -> dict[str, Any]:
     visible = dict(meta)
     visible.pop(QR_TARGETS_KEY, None)
+    visible.pop(REGISTRATION_SERIAL_KEY, None)
     return visible
 @
 
@@ -885,8 +940,8 @@ def question(self, full_hash: str) -> Question:
 The question listing follows the dict's natural iteration order, which after
 [[register]]'s pop-then-reinsert is the document order of the last full
 build.  Index pages and the CLI listing therefore mirror what a lecturer sees
-in their slide deck, and the same order seeds the sequence the
-\enquote{Next $\rightarrow$} link walks.
+in their slide deck, and the same order seeds the book-style navigation row on
+the post-submit and results pages.
 
 <<store methods>>=
 def all_questions(self) -> list[dict[str, Any]]:
@@ -903,19 +958,16 @@ def all_questions(self) -> list[dict[str, Any]]:
     return rows
 @
 
-The sequence-navigation helper is the read counterpart of [[register]]'s
-pop-then-reinsert: it returns the hash of the next question after [[full_hash]]
-in registration order, or [[None]] when [[full_hash]] is the last entry.  The
-server uses it to render the \enquote{Next $\rightarrow$} link on the
-post-submit and results pages without having to know how the order is
-maintained.  Questions whose hash is not registered at all return [[None]] too,
-so a stale URL can never wedge the link computation.
+The forward sequence-navigation helper walks only the questions marked live in
+the current rebuild.  That keeps an orphaned slide reachable by direct URL
+while still preventing its old classroom neighbours from leaking back into the
+current lecture's \enquote{Next $\rightarrow$} chain.
 
 <<store methods>>=
 def next_question(self, full_hash: str) -> str | None:
-    """Return the next question's hash in registration order, or ``None``."""
+    """Return the next live question's hash, or ``None``."""
 
-    hashes = list(self._data()["questions"].keys())
+    hashes = _live_hashes(self._data())
     try:
         index = hashes.index(full_hash)
     except ValueError:
@@ -960,14 +1012,80 @@ def test_next_question_returns_none_for_unknown_hash(tmp_path):
 @
 
 When a lecturer drops a question from the slide deck, the orphan keeps its
-position at the front of the dict.  Its [[next]] still resolves to a live
-question --- specifically the new first question after the rebuild --- so
-visiting an old QR code's results page links forward into the current
-sequence rather than into a dead end.
+position at the front of the dict but falls out of the live sequence.  Visiting
+an old QR code should still show that question's own results, but it should not
+link respondents back into the current lecture sequence.
 
 <<test functions>>=
 
-def test_next_question_for_orphan_returns_new_first_live(tmp_path):
+def test_next_question_for_orphan_returns_none(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    questions = [OpenQuestion(f"Q{i}") for i in range(1, 4)]
+    for question in questions:
+        store.register(question)
+
+    store.register(questions[1])
+    store.register(questions[2])
+
+    orphan = question_hash(questions[0])
+    assert store.next_question(orphan) is None
+@
+
+Walking backwards uses the same live-only snapshot and stops at the front of
+that sequence.  That lets the server omit the left-hand
+\enquote{$\leftarrow$ Previous} link without introducing placeholder markup.
+
+<<store methods>>=
+def prev_question(self, full_hash: str) -> str | None:
+    """Return the previous live question's hash, or ``None``."""
+
+    hashes = _live_hashes(self._data())
+    try:
+        index = hashes.index(full_hash)
+    except ValueError:
+        return None
+    return hashes[index - 1] if index > 0 else None
+@
+
+The reverse walk pins the other end of the same sequence: the first question
+has no predecessor, and every later question points back to the one before it.
+
+<<test functions>>=
+
+def test_prev_question_walks_registration_order(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first = OpenQuestion("Q1")
+    second = OpenQuestion("Q2")
+    third = OpenQuestion("Q3")
+
+    store.register(first)
+    store.register(second)
+    store.register(third)
+
+    assert store.prev_question(question_hash(first)) is None
+    assert store.prev_question(question_hash(second)) == question_hash(first)
+    assert store.prev_question(question_hash(third)) == question_hash(second)
+@
+
+Unknown hashes still collapse to [[None]].  The server can therefore treat the
+left-hand link exactly like the right-hand one and concatenate the helper's
+output without a special error path.
+
+<<test functions>>=
+
+def test_prev_question_returns_none_for_unknown_hash(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    store.register(OpenQuestion("Q1"))
+
+    assert store.prev_question("0" * 64) is None
+@
+
+When the first question from an old build becomes an orphan, the new first live
+question must not point back to it.
+
+<<test functions>>=
+
+def test_prev_question_skips_the_orphan_before_the_new_live_head(tmp_path):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     questions = [OpenQuestion(f"Q{i}") for i in range(1, 4)]
     for question in questions:
@@ -979,7 +1097,8 @@ def test_next_question_for_orphan_returns_new_first_live(tmp_path):
     orphan = question_hash(questions[0])
     new_first_live = question_hash(questions[1])
 
-    assert store.next_question(orphan) == new_first_live
+    assert store.prev_question(orphan) is None
+    assert store.prev_question(new_first_live) is None
 @
 
 Prefix iteration is a small helper for server startup checks.  It takes a
@@ -1241,9 +1360,10 @@ def test_record_leaves_the_original_file_intact_on_failed_replace(
     assert path.read_text(encoding="utf-8") == before
 @
 
-The instance lock protects the read-modify-write cycle.  Recording from two
-threads through the same [[Store]] instance should keep both answers rather
-than letting the later writer overwrite the earlier one.
+The shared per-path lock protects the read-modify-write cycle even when callers
+hold different [[Store]] instances for the same file.  Recording from two
+threads should keep both answers rather than letting the later writer overwrite
+the earlier one.
 
 <<test functions>>=
 def test_record_keeps_answers_from_concurrent_threads(tmp_path):
@@ -1265,6 +1385,37 @@ def test_record_keeps_answers_from_concurrent_threads(tmp_path):
     second.join()
 
     answers = store.results(full_hash)["answers"]
+
+    assert len(answers) == 2
+    assert sorted(answer["value"] for answer in answers) == [0, 1]
+@
+
+The same-path lock must also work across distinct [[Store]] objects, because the
+CLI, server, and document build code do not always reuse a single instance.
+
+<<test functions>>=
+def test_record_keeps_answers_from_concurrent_store_instances(tmp_path):
+    path = tmp_path / "mentipy.json"
+    writer = Store(path, min_prefix=4)
+    prefix = writer.register(MCQuestion("Pick one", ("A", "B")))
+    full_hash = writer.resolve(prefix)
+    first = Store(path, min_prefix=4)
+    second = Store(path, min_prefix=4)
+    start = threading.Barrier(3)
+
+    def worker(store, value):
+        start.wait()
+        store.record(full_hash, value)
+
+    first_thread = threading.Thread(target=worker, args=(first, 0))
+    second_thread = threading.Thread(target=worker, args=(second, 1))
+    first_thread.start()
+    second_thread.start()
+    start.wait()
+    first_thread.join()
+    second_thread.join()
+
+    answers = Store(path, min_prefix=4).results(full_hash)["answers"]
 
     assert len(answers) == 2
     assert sorted(answer["value"] for answer in answers) == [0, 1]

@@ -228,6 +228,11 @@ pre code.highlight {
   margin: 0 0 1rem;
 }
 
+.wordcloud-word {
+  display: inline-block;
+  margin-right: 0.35rem;
+}
+
 .wordcloud-table {
   border-collapse: collapse;
   font-variant-numeric: tabular-nums;
@@ -254,17 +259,28 @@ pre code.highlight {
 .md-answer > :last-child { margin-bottom: 0; }
 .md-answer ul, .md-answer ol { margin: 0.25rem 0 0.25rem 1.5rem; }
 
+.question-nav {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin: 1rem 0;
+}
+
+.prev-link,
 .next-link {
   background: #4a90d9;
   border-radius: 3px;
   color: white;
   display: inline-block;
-  margin: 1rem 0;
   padding: 0.5rem 1rem;
   text-decoration: none;
 }
+.prev-link:hover,
 .next-link:hover {
   background: #3a7dc0;
+}
+.next-link {
+  margin-left: auto;
 }
 
 @media (min-width: 40rem) {
@@ -547,7 +563,10 @@ def _parse_answer(question, fields: dict[str, list[str]]) -> Any:
             raise ValueError("text answer too long")
         return text
 
-    value = int(fields.get("value", [str(question.low)])[0])
+    values = fields.get("value", [])
+    if len(values) != 1:
+        raise ValueError("choose exactly one scale value")
+    value = int(values[0])
     if value < question.low or value > question.high:
         raise ValueError("scale answer outside the allowed range")
     return value
@@ -844,6 +863,21 @@ def test_parse_answer_rejects_combined_open_answers_that_are_too_long():
         )
 @
 
+Scale answers use the same radio-button transport as single-choice polls, so a
+valid submission must contain exactly one [[value]] field.
+
+
+<<test functions>>=
+def test_parse_answer_requires_exactly_one_scale_value():
+    question = ScaleQuestion("Rate this", 1, 5)
+
+    with pytest.raises(ValueError, match="choose exactly one scale value"):
+        server_module._parse_answer(question, {})
+
+    with pytest.raises(ValueError, match="choose exactly one scale value"):
+        server_module._parse_answer(question, {"value": ["1", "2"]})
+@
+
 \section{Rendering question forms}
 
 <<functions>>=
@@ -865,6 +899,35 @@ def _render_index(store: Store) -> str:
         return "<p>No questions have been registered yet.</p>"
 
     return "<ul>" + "".join(items) + "</ul>"
+@
+
+The index page is intentionally plain HTML, so the direct tests only need to
+pin the links the lecturer relies on: the form URL and the matching results
+URL for each registered question.  We also keep the empty-store case explicit,
+because that is what a new lecturer sees before the first render command has
+registered anything.
+
+<<test functions>>=
+def test_render_index_lists_each_registered_question_with_results_link(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first_prefix = store.register(OpenQuestion("Warm-up?"))
+    second_prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+
+    rendered = server_module._render_index(store)
+
+    assert rendered.count(f'href="/{first_prefix}"') == 1
+    assert rendered.count(f'href="/{first_prefix}/results"') == 1
+    assert rendered.count(f'href="/{second_prefix}"') == 1
+    assert rendered.count(f'href="/{second_prefix}/results"') == 1
+
+
+def test_render_index_handles_empty_store(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    assert (
+        server_module._render_index(store)
+        == "<p>No questions have been registered yet.</p>"
+    )
 @
 
 The form renderer mirrors the parser's input policy.  Open questions keep both
@@ -1480,7 +1543,7 @@ the project does not currently carry.
 def _render_wordcloud_scaled(pairs: list[tuple[str, int]]) -> str:
     counts = [count for _, count in pairs]
     sizes = _wordcloud_font_scale(counts, min_size=0.9, max_size=2.6)
-    spans = "".join(
+    spans = " ".join(
         f'<span class="wordcloud-word" '
         f'style="font-size: {size:.2f}em">{escape(word)}</span>'
         for (word, _count), size in zip(pairs, sizes)
@@ -1658,43 +1721,139 @@ def test_render_wordcloud_svg_uses_optional_package_when_available(
 
 \subsection{Sequence-navigation link}
 
-The thanks page and the results page both want to offer a \enquote{Next
-$\rightarrow$} link when the current question opts in.  The decision is
-identical in shape (\enquote{is there a next question to point at, and does
-this question opt out?}) but the link target depends on the caller --- the
-thanks page always sends respondents to the next question's form so they can
-answer, while the results page lands lecturers on the next question's results
-page when they are driving from localhost and on the next form otherwise.
-Centralising the decision in one helper keeps both call sites short and
-prevents the two paths from drifting apart.
+The thanks page and the results page both want the familiar book-style
+navigation row: \enquote{$\leftarrow$ Previous} on the left and
+\enquote{Next $\rightarrow$} on the right.  The caller still decides whether
+those links should target forms or results pages, but the decision about which
+neighbours exist belongs in one place so the two routes cannot drift apart.
 
-A missing or unknown next question, or [[question.next]] being false, returns
-the empty string so a caller can unconditionally concatenate the result into
-the page body.
+Only the right-hand link respects [[question.next]]: lecturers sometimes want
+a terminal slide with no forward path, while the left-hand link should appear
+whenever there is an earlier question in the current registration order.
+
+<<functions>>=
+def _render_prev_link(
+    store: Store, full_hash: str, *, results: bool = False
+) -> str:
+    prev_hash = store.prev_question(full_hash)
+    if prev_hash is None:
+        return ""
+    prev_prefix = store.metadata(prev_hash)["url_prefix"]
+    suffix = "/results" if results else ""
+    return (
+        f'<a class="prev-link" href="/{prev_prefix}{suffix}">'
+        f"← Previous</a>"
+    )
+@
+
+The forward helper still honours [[question.next]], but it asks the store for
+the neighbour first.  That keeps stale hashes on the empty-output path instead
+of raising before we even know whether a link exists.
 
 <<functions>>=
 def _render_next_link(
     store: Store, full_hash: str, *, results: bool = False
 ) -> str:
-    question = store.question(full_hash)
-    if not question.next:
-        return ""
     next_hash = store.next_question(full_hash)
     if next_hash is None:
+        return ""
+    question = store.question(full_hash)
+    if not question.next:
         return ""
     next_prefix = store.metadata(next_hash)["url_prefix"]
     suffix = "/results" if results else ""
     return (
-        f'<p><a class="next-link" href="/{next_prefix}{suffix}">'
-        f"Next →</a></p>"
+        f'<a class="next-link" href="/{next_prefix}{suffix}">'
+        f"Next →</a>"
     )
 @
 
-The three exit conditions deserve their own tests because every one of them
-maps to a distinct lecturer-facing outcome: the last slide of a lecture must
-not link forward, an opt-out slide must suppress the link entirely, and a
-healthy in-sequence slide must point at its successor with the right target
-URL.
+The wrapper emits one row when either side has something to show, and nothing
+at all when both helpers return the empty string.  Rendering the links in
+source order pins the HTML to the same left-to-right convention the CSS uses.
+
+<<functions>>=
+def _render_question_nav(
+    store: Store, full_hash: str, *, results: bool = False
+) -> str:
+    prev_link = _render_prev_link(store, full_hash, results=results)
+    next_link = _render_next_link(store, full_hash, results=results)
+    if not prev_link and not next_link:
+        return ""
+    return f'<nav class="question-nav">{prev_link}{next_link}</nav>'
+@
+
+The previous-link helper mirrors the forward path except for the opt-out case:
+the first question has no predecessor, middle questions render the left-hand
+label, and the caller still controls whether the target is a form or a results
+page.
+
+<<test functions>>=
+
+def test_render_prev_link_returns_empty_for_the_first_question(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Only one"))
+    full_hash = store.resolve(prefix)
+
+    assert server_module._render_prev_link(store, full_hash) == ""
+
+
+def test_render_prev_link_uses_previous_label(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    store.register(OpenQuestion("Q1"))
+    second_prefix = store.register(OpenQuestion("Q2"))
+    second_hash = store.resolve(second_prefix)
+
+    rendered = server_module._render_prev_link(store, second_hash)
+
+    assert "← Previous" in rendered
+
+
+def test_render_prev_link_points_to_form_by_default(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first_prefix = store.register(OpenQuestion("Q1"))
+    second_prefix = store.register(OpenQuestion("Q2"))
+    second_hash = store.resolve(second_prefix)
+
+    rendered = server_module._render_prev_link(store, second_hash)
+
+    assert f'href="/{first_prefix}"' in rendered
+
+
+def test_render_prev_link_points_to_results_when_requested(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first_prefix = store.register(OpenQuestion("Q1"))
+    second_prefix = store.register(OpenQuestion("Q2"))
+    second_hash = store.resolve(second_prefix)
+
+    rendered = server_module._render_prev_link(
+        store, second_hash, results=True
+    )
+
+    assert f'href="/{first_prefix}/results"' in rendered
+
+
+def test_render_prev_link_skips_orphaned_questions(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first_prefix = store.register(OpenQuestion("Q1"))
+    second_prefix = store.register(OpenQuestion("Q2"))
+    third_prefix = store.register(OpenQuestion("Q3"))
+    store.register(OpenQuestion("Q2"))
+    store.register(OpenQuestion("Q3"))
+    second_hash = store.resolve(second_prefix)
+
+    rendered = server_module._render_prev_link(store, second_hash)
+
+    assert rendered == ""
+    assert first_prefix != second_prefix
+    assert third_prefix
+@
+
+The three forward-link exit conditions deserve their own tests because every
+one of them maps to a distinct lecturer-facing outcome: the last slide of a
+lecture must not link forward, an opt-out slide must suppress the right-hand
+link entirely, and a healthy in-sequence slide must point at its successor
+with the right target URL.
 
 <<test functions>>=
 
@@ -1740,6 +1899,28 @@ def test_render_next_link_points_to_results_when_requested(tmp_path):
     assert f'href="/{second_prefix}/results"' in rendered
 @
 
+The wrapper's own test locks in the HTML structure that the flex layout relies
+on: one [[question-nav]] row with the previous link first and the next link
+second.
+
+<<test functions>>=
+
+def test_render_question_nav_wraps_links_in_book_order(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    store.register(OpenQuestion("Q1"))
+    second_prefix = store.register(OpenQuestion("Q2"))
+    store.register(OpenQuestion("Q3"))
+    second_hash = store.resolve(second_prefix)
+
+    rendered = server_module._render_question_nav(store, second_hash)
+
+    assert 'class="question-nav"' in rendered
+    assert rendered.index('class="prev-link"') < rendered.index(
+        'class="next-link"'
+    )
+    assert rendered.index("← Previous") < rendered.index("Next →")
+@
+
 \subsection{Dispatching by question type}
 
 The top-level renderer reads the window-filtered summary from the store
@@ -1749,8 +1930,8 @@ line follows because that is the first number every lecturer asks for;
 then come the type-specific stats and the visualization.  The optional
 [[is_local]] keyword lets the caller communicate whether the requester is
 the lecturer driving from localhost, which controls where the trailing
-\enquote{Next $\rightarrow$} link points: localhost callers land on the
-next question's results page, everyone else on its form.
+navigation row points: localhost callers land on neighbouring results pages,
+everyone else on the corresponding forms.
 
 <<functions>>=
 def _render_results(
@@ -1797,7 +1978,7 @@ def _render_results(
         parts.append(_render_wordcloud_stats(summary))
         parts.append(_render_wordcloud(question, summary["frequencies"]))
 
-    parts.append(_render_next_link(store, full_hash, results=is_local))
+    parts.append(_render_question_nav(store, full_hash, results=is_local))
 
     return "".join(parts)
 
@@ -2015,7 +2196,7 @@ def _handle_question_get(self, segments: list[str], query: str):
         title = store.metadata(full_hash)["text"]
         body = (
             "<p>Thanks, your answer was recorded.</p>"
-            + _render_next_link(store, full_hash)
+            + _render_question_nav(store, full_hash)
         )
         self._send(
             HTTPStatus.OK,
@@ -2371,6 +2552,19 @@ def test_handler_marks_non_local_admin_clients_as_remote(tmp_path):
 The route test covers the request/response surface the presenter actually uses.
 
 <<test functions>>=
+def test_root_path_returns_index_html_locally(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Warm-up?"))
+
+    with _running_server(store) as port:
+        response, body = _request(port, "GET", "/")
+
+    assert response.status == 200
+    assert "<title>Questions</title>" in body
+    assert "<h1>Questions</h1>" in body
+    assert prefix in body
+
+
 def test_server_routes_return_expected_status_codes(live_server):
     store, prefix, port = live_server
 
@@ -2413,11 +2607,10 @@ def test_results_page_includes_viewport_meta(live_server):
     assert 'width=device-width' in body
 @
 
-The thanks-page integration test sets up a two-question sequence and
-verifies the rendered HTML carries a forward link to the next question's
-form.  This is the surface the student actually meets, so even though the
-underlying helper has its own unit tests, we want one end-to-end pin that
-covers the route plumbing as well.
+The thanks-page integration tests pin both sides of the navigation row on the
+surface the student actually meets.  Even though the underlying helpers have
+their own unit tests, we still want end-to-end checks that cover the route
+plumbing as well.
 
 <<test functions>>=
 
@@ -2436,6 +2629,37 @@ def test_thanks_page_renders_next_link_to_following_question(tmp_path):
     assert "Next →" in body
 
 
+def test_thanks_page_renders_prev_link_to_previous_question(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first_prefix = store.register(OpenQuestion("Warm-up?"))
+    second_prefix = store.register(OpenQuestion("Main point?"))
+
+    with _running_server(store) as port:
+        response, body = _request(
+            port, "GET", f"/{second_prefix}/thanks"
+        )
+
+    assert response.status == 200
+    assert f'href="/{first_prefix}"' in body
+    assert "← Previous" in body
+
+
+def test_thanks_page_omits_prev_link_to_orphaned_question(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first_prefix = store.register(OpenQuestion("Q1"))
+    second_prefix = store.register(OpenQuestion("Q2"))
+    store.register(OpenQuestion("Q2"))
+
+    with _running_server(store) as port:
+        response, body = _request(
+            port, "GET", f"/{second_prefix}/thanks"
+        )
+
+    assert response.status == 200
+    assert f'href="/{first_prefix}"' not in body
+    assert "← Previous" not in body
+
+
 def test_thanks_page_omits_next_link_when_question_opts_out(tmp_path):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     first_prefix = store.register(OpenQuestion("Warm-up?", next=False))
@@ -2450,13 +2674,40 @@ def test_thanks_page_omits_next_link_when_question_opts_out(tmp_path):
     assert "next-link" not in body
 @
 
-The results-page next-link target is the one place in the routing where the
-requester's address determines the URL: lecturers driving from localhost
-step through results pages, everyone else lands on the next form.  We
-exercise [[_render_results]] directly with both [[is_local]] settings
-because [[_request]] always originates from [[127.0.0.1]].
+The results-page navigation targets are the one place in the routing where the
+requester's address determines the URL: lecturers driving from localhost step
+through results pages, everyone else lands on the corresponding forms.  We
+exercise [[_render_results]] directly with both [[is_local]] settings because
+[[_request]] always originates from [[127.0.0.1]].
 
 <<test functions>>=
+
+def test_render_results_prev_link_targets_form_for_remote_clients(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first_prefix = store.register(OpenQuestion("Q1"))
+    second_prefix = store.register(OpenQuestion("Q2"))
+    second_hash = store.resolve(second_prefix)
+
+    rendered = server_module._render_results(
+        store, second_hash, is_local=False
+    )
+
+    assert f'href="/{first_prefix}"' in rendered
+    assert f'href="/{first_prefix}/results"' not in rendered
+
+
+def test_render_results_prev_link_targets_results_for_localhost(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first_prefix = store.register(OpenQuestion("Q1"))
+    second_prefix = store.register(OpenQuestion("Q2"))
+    second_hash = store.resolve(second_prefix)
+
+    rendered = server_module._render_results(
+        store, second_hash, is_local=True
+    )
+
+    assert f'href="/{first_prefix}/results"' in rendered
+
 
 def test_render_results_next_link_targets_form_for_remote_clients(tmp_path):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
@@ -2872,6 +3123,7 @@ def test_results_page_wordcloud_scaled_uses_sized_spans_and_shows_frequencies(
 
     assert 'class="wordcloud-scaled"' in body
     assert "font-size:" in body
+    assert "apple</span> <span" in body
     assert 'class="wordcloud-table"' in body
     assert "<th>Count (3)</th>" in body
     assert "<th>Percentage</th>" in body
