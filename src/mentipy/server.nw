@@ -1831,6 +1831,22 @@ def test_render_prev_link_points_to_results_when_requested(tmp_path):
     )
 
     assert f'href="/{first_prefix}/results"' in rendered
+
+
+def test_render_prev_link_skips_orphaned_questions(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first_prefix = store.register(OpenQuestion("Q1"))
+    second_prefix = store.register(OpenQuestion("Q2"))
+    third_prefix = store.register(OpenQuestion("Q3"))
+    store.register(OpenQuestion("Q2"))
+    store.register(OpenQuestion("Q3"))
+    second_hash = store.resolve(second_prefix)
+
+    rendered = server_module._render_prev_link(store, second_hash)
+
+    assert rendered == ""
+    assert first_prefix != second_prefix
+    assert third_prefix
 @
 
 The three forward-link exit conditions deserve their own tests because every
@@ -2626,6 +2642,22 @@ def test_thanks_page_renders_prev_link_to_previous_question(tmp_path):
     assert response.status == 200
     assert f'href="/{first_prefix}"' in body
     assert "← Previous" in body
+
+
+def test_thanks_page_omits_prev_link_to_orphaned_question(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first_prefix = store.register(OpenQuestion("Q1"))
+    second_prefix = store.register(OpenQuestion("Q2"))
+    store.register(OpenQuestion("Q2"))
+
+    with _running_server(store) as port:
+        response, body = _request(
+            port, "GET", f"/{second_prefix}/thanks"
+        )
+
+    assert response.status == 200
+    assert f'href="/{first_prefix}"' not in body
+    assert "← Previous" not in body
 
 
 def test_thanks_page_omits_next_link_when_question_opts_out(tmp_path):
