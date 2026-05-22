@@ -228,6 +228,11 @@ pre code.highlight {
   margin: 0 0 1rem;
 }
 
+.wordcloud-word {
+  display: inline-block;
+  margin-right: 0.35rem;
+}
+
 .wordcloud-table {
   border-collapse: collapse;
   font-variant-numeric: tabular-nums;
@@ -558,7 +563,10 @@ def _parse_answer(question, fields: dict[str, list[str]]) -> Any:
             raise ValueError("text answer too long")
         return text
 
-    value = int(fields.get("value", [str(question.low)])[0])
+    values = fields.get("value", [])
+    if len(values) != 1:
+        raise ValueError("choose exactly one scale value")
+    value = int(values[0])
     if value < question.low or value > question.high:
         raise ValueError("scale answer outside the allowed range")
     return value
@@ -855,6 +863,21 @@ def test_parse_answer_rejects_combined_open_answers_that_are_too_long():
         )
 @
 
+Scale answers use the same radio-button transport as single-choice polls, so a
+valid submission must contain exactly one [[value]] field.
+
+
+<<test functions>>=
+def test_parse_answer_requires_exactly_one_scale_value():
+    question = ScaleQuestion("Rate this", 1, 5)
+
+    with pytest.raises(ValueError, match="choose exactly one scale value"):
+        server_module._parse_answer(question, {})
+
+    with pytest.raises(ValueError, match="choose exactly one scale value"):
+        server_module._parse_answer(question, {"value": ["1", "2"]})
+@
+
 \section{Rendering question forms}
 
 <<functions>>=
@@ -876,6 +899,35 @@ def _render_index(store: Store) -> str:
         return "<p>No questions have been registered yet.</p>"
 
     return "<ul>" + "".join(items) + "</ul>"
+@
+
+The index page is intentionally plain HTML, so the direct tests only need to
+pin the links the lecturer relies on: the form URL and the matching results
+URL for each registered question.  We also keep the empty-store case explicit,
+because that is what a new lecturer sees before the first render command has
+registered anything.
+
+<<test functions>>=
+def test_render_index_lists_each_registered_question_with_results_link(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first_prefix = store.register(OpenQuestion("Warm-up?"))
+    second_prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+
+    rendered = server_module._render_index(store)
+
+    assert rendered.count(f'href="/{first_prefix}"') == 1
+    assert rendered.count(f'href="/{first_prefix}/results"') == 1
+    assert rendered.count(f'href="/{second_prefix}"') == 1
+    assert rendered.count(f'href="/{second_prefix}/results"') == 1
+
+
+def test_render_index_handles_empty_store(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    assert (
+        server_module._render_index(store)
+        == "<p>No questions have been registered yet.</p>"
+    )
 @
 
 The form renderer mirrors the parser's input policy.  Open questions keep both
@@ -1491,7 +1543,7 @@ the project does not currently carry.
 def _render_wordcloud_scaled(pairs: list[tuple[str, int]]) -> str:
     counts = [count for _, count in pairs]
     sizes = _wordcloud_font_scale(counts, min_size=0.9, max_size=2.6)
-    spans = "".join(
+    spans = " ".join(
         f'<span class="wordcloud-word" '
         f'style="font-size: {size:.2f}em">{escape(word)}</span>'
         for (word, _count), size in zip(pairs, sizes)
@@ -2484,6 +2536,19 @@ def test_handler_marks_non_local_admin_clients_as_remote(tmp_path):
 The route test covers the request/response surface the presenter actually uses.
 
 <<test functions>>=
+def test_root_path_returns_index_html_locally(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Warm-up?"))
+
+    with _running_server(store) as port:
+        response, body = _request(port, "GET", "/")
+
+    assert response.status == 200
+    assert "<title>Questions</title>" in body
+    assert "<h1>Questions</h1>" in body
+    assert prefix in body
+
+
 def test_server_routes_return_expected_status_codes(live_server):
     store, prefix, port = live_server
 
@@ -3026,6 +3091,7 @@ def test_results_page_wordcloud_scaled_uses_sized_spans_and_shows_frequencies(
 
     assert 'class="wordcloud-scaled"' in body
     assert "font-size:" in body
+    assert "apple</span> <span" in body
     assert 'class="wordcloud-table"' in body
     assert "<th>Count (3)</th>" in body
     assert "<th>Percentage</th>" in body
