@@ -331,7 +331,7 @@ def _configured_base(base: str | None) -> str | None:
 
 def _format_index_hint(public_url: str, host: str, port: int) -> str:
     public_index = public_url.rstrip("/") + "/"
-    bind_host = _index_host(host)
+    bind_host = _index_url_host(host)
     bind_index = f"http://{bind_host}:{port}/"
     return (
         "Open the question index at:\n"
@@ -348,6 +348,17 @@ def _index_host(host: str) -> str:
     if address.is_loopback or address.is_unspecified:
         return "localhost"
     return host
+
+
+def _index_url_host(host: str) -> str:
+    bind_host = _index_host(host)
+    try:
+        address = ipaddress.ip_address(bind_host)
+    except ValueError:
+        return bind_host
+    if address.version == 6:
+        return f"[{bind_host}]"
+    return bind_host
 @
 
 TyperConf already provides the path-based configuration command shape we want.
@@ -2961,6 +2972,24 @@ def test_serve_command_uses_bind_host_in_index_hint(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert "  http://polls.example:8080/" in result.stdout
     assert "  http://192.0.2.40:8080/" in result.stdout
+
+
+def test_serve_command_wraps_ipv6_bind_host_in_index_hint(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("base_url", "http://polls.example:8080")
+
+    monkeypatch.setattr("mentipy.cli.regenerate_qrs", lambda _store, _base_url: 0)
+    monkeypatch.setattr("mentipy.cli.serve_http", lambda *_args, **_kwargs: None)
+
+    result = runner.invoke(
+        cli,
+        ["serve", "--host", "2001:db8::10", "--port", "8080"],
+    )
+
+    assert result.exit_code == 0
+    assert "  http://polls.example:8080/" in result.stdout
+    assert "  http://[2001:db8::10]:8080/" in result.stdout
 
 
 def test_serve_command_public_prints_index_hint(tmp_path, monkeypatch):

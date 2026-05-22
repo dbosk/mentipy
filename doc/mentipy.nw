@@ -634,10 +634,11 @@ The lecturer never has to declare the sequence explicitly.  PythonTeX
 executes the [[pyblock]]s in document order, and every [[register]] call
 moves its question to the end of the store's question dict; a full
 rebuild therefore reorders the store to match the current slide deck.
-The book-style navigation row follows that order, so inserting a new
-question between two existing ones and recompiling \emph{just works}
---- the new question lands between its neighbours in the chain on the
-next request.
+The book-style navigation row follows that order, so after inserting a
+new question between two existing ones the lecturer should clean and
+rebuild before serving again.  That reruns the registrations in deck
+order, so the new question lands between its neighbours in the chain on
+the next request.
 
 \ltnote{%
   \textbf{Variation pattern}: Fusion
