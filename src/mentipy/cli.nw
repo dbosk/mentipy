@@ -12,6 +12,7 @@ from __future__ import annotations
 
 <<constants>>
 <<functions>>
+<<option completions>>
 <<cli setup>>
 @
 
@@ -200,6 +201,88 @@ LIST_FULL_OPTION = typer.Option(
 )
 @
 
+Rendering completions for fixed-value flags does not require more logic than
+remembering the accepted strings.  Keeping those tuples explicit makes the
+suggestions easy to reuse wherever the same value set appears.
+
+<<constants>>=
+LAYOUT_CHOICES = (
+    "slide",
+    "article",
+    "article+qr",
+    "auto",
+)
+QR_FORMAT_CHOICES = ("png", "svg")
+EXPORT_FORMAT_CHOICES = ("json", "csv")
+OPEN_FENCE_CHOICES = (
+    "python",
+    "javascript",
+    "typescript",
+    "java",
+    "c",
+    "cpp",
+    "rust",
+    "go",
+    "bash",
+    "sh",
+    "sql",
+    "html",
+    "css",
+    "json",
+    "yaml",
+    "markdown",
+    "latex",
+    "haskell",
+)
+WORD_CLOUD_RENDER_CHOICES = ("svg", "scaled", "table")
+@
+
+Fixed-value flags need only prefix filtering over a tiny tuple.  The helper
+stays generic so the shared module-level option objects and the command-local
+[[--fence]] and [[--render]] options can all advertise the same accepted values
+without repeating the list comprehension.
+
+<<functions>>=
+def _choice_completer(values: tuple[str, ...]):
+    def _complete(_ctx: typer.Context, incomplete: str) -> list[str]:
+        return [value for value in values if value.startswith(incomplete)]
+
+    return _complete
+@
+
+The command-local [[--fence]] and [[--render]] options can pass
+[[autocompletion=_choice_completer(...)]] directly to [[typer.Option(...)]],
+because their construction happens inside [[<<cli setup>>]] -- by then both
+the choices and the helper are defined.  The shared module-level options
+above sit in [[<<constants>>]], which is tangled before [[<<functions>>]],
+so [[_choice_completer]] does not yet exist when they are constructed.  We
+therefore wire their completion callbacks here, in a chunk that runs after
+both definitions are in scope.  The contract test below pins this wiring so
+a future refactor that drops the assignments, reorders the top-level chunks,
+or upgrades to a Typer release that rejects attribute mutation fails loudly
+instead of silently leaving tab-completion empty.
+
+<<option completions>>=
+LAYOUT_OPTION.autocompletion = _choice_completer(LAYOUT_CHOICES)
+QR_FORMAT_OPTION.autocompletion = _choice_completer(QR_FORMAT_CHOICES)
+EXPORT_FORMAT_OPTION.autocompletion = _choice_completer(EXPORT_FORMAT_CHOICES)
+@
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    "option, expected",
+    [
+        (LAYOUT_OPTION, LAYOUT_CHOICES),
+        (QR_FORMAT_OPTION, QR_FORMAT_CHOICES),
+        (EXPORT_FORMAT_OPTION, EXPORT_FORMAT_CHOICES),
+    ],
+)
+def test_shared_options_advertise_choice_completion(option, expected):
+    completer = option.autocompletion
+    assert completer is not None
+    assert completer(None, "") == list(expected)
+@
+
 Question listings should fit normal terminals without assuming one particular
 width.  The public-exposure warning is also a constant so [[serve]] and [[url]]
 print the same risk statement whenever they make an unauthenticated endpoint
@@ -382,6 +465,71 @@ def _resolve_full_hash(store: Store, prefix: str) -> str:
 def _canonical_prefix(store: Store, prefix: str) -> str:
     full_hash = _resolve_full_hash(store, prefix)
     return store.metadata(full_hash)["url_prefix"]
+@
+
+The prefix-oriented commands already depend on the store's issued
+[[url_prefix]] metadata.  Their completion hook can therefore reuse the same
+listing without adding any shell-time side effects: it reads the configured
+store, honours an already-typed [[--store]] override, and quietly returns no
+suggestions if the store is missing or broken.  The catch is intentionally
+broad because shell completion runs in the middle of the user typing a
+command, so a leaked traceback into their prompt is far worse than a missing
+suggestion.  Programmer errors here surface through the matching pytest
+cases below, not through the user's terminal.
+
+<<functions>>=
+def _complete_question_prefix(
+    ctx: typer.Context,
+    incomplete: str,
+) -> list[str]:
+    try:
+        params = getattr(ctx, "params", {}) or {}
+        store = _configured_store(params.get("store"))
+        return [
+            str(entry["url_prefix"])
+            for entry in store.all_questions()
+            if str(entry["url_prefix"]).startswith(incomplete)
+        ]
+    except Exception:
+        return []
+@
+
+Let's verify that the completion helper lists issued prefixes, filters partial
+matches, and degrades quietly when the configured store does not exist.
+
+<<test functions>>=
+def test_complete_question_prefix_lists_registered_prefixes(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefixes = [
+        store.register(OpenQuestion("First?")),
+        store.register(OpenQuestion("Second?")),
+    ]
+    ctx = SimpleNamespace(params={"store": str(store.path)})
+
+    assert mentipy.cli._complete_question_prefix(ctx, "") == prefixes
+
+
+def test_complete_question_prefix_filters_by_incomplete(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefixes = [
+        store.register(OpenQuestion("First?")),
+        store.register(OpenQuestion("Second?")),
+    ]
+    ctx = SimpleNamespace(params={"store": str(store.path)})
+    incomplete = prefixes[0]
+    for length in range(1, len(prefixes[0]) + 1):
+        candidate = prefixes[0][:length]
+        if not prefixes[1].startswith(candidate):
+            incomplete = candidate
+            break
+
+    assert mentipy.cli._complete_question_prefix(ctx, incomplete) == [prefixes[0]]
+
+
+def test_complete_question_prefix_returns_empty_on_missing_store(tmp_path):
+    ctx = SimpleNamespace(params={"store": str(tmp_path / "missing.json")})
+
+    assert mentipy.cli._complete_question_prefix(ctx, "") == []
 @
 
 Terminal output still needs small presentation helpers.  Question text is
@@ -1454,6 +1602,7 @@ def render_open(
     fence: Optional[str] = typer.Option(
         None,
         "--fence",
+        autocompletion=_choice_completer(OPEN_FENCE_CHOICES),
         help="Fence language for uploaded file bodies, e.g. python.",
     ),
     next: bool = NEXT_OPTION,
@@ -1624,6 +1773,7 @@ def render_word_cloud(
     render: str = typer.Option(
         "svg",
         "--render",
+        autocompletion=_choice_completer(WORD_CLOUD_RENDER_CHOICES),
         help="Render mode: svg, scaled, or table.",
     ),
     next: bool = NEXT_OPTION,
@@ -1800,7 +1950,10 @@ apart in how they render counts, Markdown, or timestamps.
 <<cli setup>>=
 @cli.command()
 def view(
-    prefix: str,
+    prefix: str = typer.Argument(
+        ...,
+        autocompletion=_complete_question_prefix,
+    ),
     store: Optional[str] = STORE_OPTION,
 ):
     """Show current results for ``prefix`` in the terminal."""
@@ -1845,7 +1998,10 @@ screen flutter while keeping a chronological transcript visible.
 <<cli setup>>=
 @cli.command()
 def watch(
-    prefix: str,
+    prefix: str = typer.Argument(
+        ...,
+        autocompletion=_complete_question_prefix,
+    ),
     store: Optional[str] = STORE_OPTION,
     interval: float = WATCH_INTERVAL_OPTION,
 ):
@@ -2025,7 +2181,10 @@ raw answer rows.
 <<cli setup>>=
 @cli.command()
 def export(
-    prefix: str,
+    prefix: str = typer.Argument(
+        ...,
+        autocompletion=_complete_question_prefix,
+    ),
     format: str = EXPORT_FORMAT_OPTION,
     store: Optional[str] = STORE_OPTION,
 ):
@@ -2057,7 +2216,10 @@ the network helper.
 @cli.command(context_settings={"allow_extra_args": True})
 def url(
     ctx: typer.Context,
-    prefix: str,
+    prefix: str = typer.Argument(
+        ...,
+        autocompletion=_complete_question_prefix,
+    ),
     store: Optional[str] = STORE_OPTION,
     port: Optional[int] = PORT_OPTION,
     public: bool = PUBLIC_OPTION,
@@ -3244,6 +3406,7 @@ import json
 import mentipy.cli
 import pytest
 import re
+from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
