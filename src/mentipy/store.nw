@@ -885,8 +885,8 @@ def question(self, full_hash: str) -> Question:
 The question listing follows the dict's natural iteration order, which after
 [[register]]'s pop-then-reinsert is the document order of the last full
 build.  Index pages and the CLI listing therefore mirror what a lecturer sees
-in their slide deck, and the same order seeds the sequence the
-\enquote{Next $\rightarrow$} link walks.
+in their slide deck, and the same order seeds the book-style navigation row on
+the post-submit and results pages.
 
 <<store methods>>=
 def all_questions(self) -> list[dict[str, Any]]:
@@ -903,11 +903,11 @@ def all_questions(self) -> list[dict[str, Any]]:
     return rows
 @
 
-The sequence-navigation helper is the read counterpart of [[register]]'s
-pop-then-reinsert: it returns the hash of the next question after [[full_hash]]
-in registration order, or [[None]] when [[full_hash]] is the last entry.  The
-server uses it to render the \enquote{Next $\rightarrow$} link on the
-post-submit and results pages without having to know how the order is
+The forward sequence-navigation helper is the read counterpart of
+[[register]]'s pop-then-reinsert: it returns the hash of the next question
+after [[full_hash]] in registration order, or [[None]] when [[full_hash]] is
+the last entry.  The server uses it to render the right-hand
+\enquote{Next $\rightarrow$} link without having to know how the order is
 maintained.  Questions whose hash is not registered at all return [[None]] too,
 so a stale URL can never wedge the link computation.
 
@@ -980,6 +980,74 @@ def test_next_question_for_orphan_returns_new_first_live(tmp_path):
     new_first_live = question_hash(questions[1])
 
     assert store.next_question(orphan) == new_first_live
+@
+
+Walking backwards uses the same registration-order snapshot, but stops at the
+front of the sequence.  That lets the server omit the left-hand
+\enquote{$\leftarrow$ Previous} link without introducing placeholder markup.
+
+<<store methods>>=
+def prev_question(self, full_hash: str) -> str | None:
+    """Return the previous question's hash in registration order, or ``None``."""
+
+    hashes = list(self._data()["questions"].keys())
+    try:
+        index = hashes.index(full_hash)
+    except ValueError:
+        return None
+    return hashes[index - 1] if index > 0 else None
+@
+
+The reverse walk pins the other end of the same sequence: the first question
+has no predecessor, and every later question points back to the one before it.
+
+<<test functions>>=
+
+def test_prev_question_walks_registration_order(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first = OpenQuestion("Q1")
+    second = OpenQuestion("Q2")
+    third = OpenQuestion("Q3")
+
+    store.register(first)
+    store.register(second)
+    store.register(third)
+
+    assert store.prev_question(question_hash(first)) is None
+    assert store.prev_question(question_hash(second)) == question_hash(first)
+    assert store.prev_question(question_hash(third)) == question_hash(second)
+@
+
+Unknown hashes still collapse to [[None]].  The server can therefore treat the
+left-hand link exactly like the right-hand one and concatenate the helper's
+output without a special error path.
+
+<<test functions>>=
+
+def test_prev_question_returns_none_for_unknown_hash(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    store.register(OpenQuestion("Q1"))
+
+    assert store.prev_question("0" * 64) is None
+@
+
+When the first question from an old build becomes an orphan, it drifts to the
+front of the dict and therefore has no predecessor in the live sequence.
+
+<<test functions>>=
+
+def test_prev_question_for_orphan_returns_none(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    questions = [OpenQuestion(f"Q{i}") for i in range(1, 4)]
+    for question in questions:
+        store.register(question)
+
+    store.register(questions[1])
+    store.register(questions[2])
+
+    orphan = question_hash(questions[0])
+
+    assert store.prev_question(orphan) is None
 @
 
 Prefix iteration is a small helper for server startup checks.  It takes a

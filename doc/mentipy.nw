@@ -560,11 +560,13 @@ cloud is drawn.
 
 A typical lecture polls the room more than once.  Every question helper
 therefore accepts a [[next]] flag that controls whether
-[[mentipy serve]] renders a \enquote{Next $\rightarrow$} link on the
-post-submit and results pages, pointing at the question that follows
-this one in the lecture.  The flag defaults to true and is presentation
-only --- it does not affect the canonical hash, so flipping it between
-recompiles does not orphan any answers already collected.
+[[mentipy serve]] renders the right-hand \enquote{Next $\rightarrow$}
+link in a book-style row on the post-submit and results pages.  When a
+question is not the first in the lecture, that same row also shows
+\enquote{$\leftarrow$ Previous} on the left.  The flag defaults to true
+and is presentation only --- it does not affect the canonical hash, so
+flipping it between recompiles does not orphan any answers already
+collected.
 
 The default is what the lecturer almost always wants: a respondent who
 just submitted an answer can step to the next question without
@@ -588,8 +590,8 @@ print(
 \end{pyblock}
 
 Rendered in the document, the LaTeX is identical to a question with
-[[next=True]]: the flag only changes the server's post-submit page, not
-the slide layout.
+[[next=True]]: the flag only changes the server's navigation row on the
+post-submit and results pages, not the slide layout.
 \begin{center}\printpythontex\end{center}
 
 The CLI mirrors the helper with [[--no-next]]:
@@ -632,8 +634,8 @@ The lecturer never has to declare the sequence explicitly.  PythonTeX
 executes the [[pyblock]]s in document order, and every [[register]] call
 moves its question to the end of the store's question dict; a full
 rebuild therefore reorders the store to match the current slide deck.
-The \enquote{Next $\rightarrow$} link follows that order, so inserting a
-new question between two existing ones and recompiling \emph{just works}
+The book-style navigation row follows that order, so inserting a new
+question between two existing ones and recompiling \emph{just works}
 --- the new question lands between its neighbours in the chain on the
 next request.
 
@@ -641,8 +643,9 @@ next request.
   \textbf{Variation pattern}: Fusion
 
   \textbf{What varies}: The [[next]] flag, toggled across the lecturer's
-  slides.  [[next=True]] (the default) attaches a sequence link to the
-  question; [[next=False]] suppresses it on the final slide.
+  slides.  [[next=True]] (the default) keeps the right-hand
+  \enquote{Next $\rightarrow$} link in the server's book-style row;
+  [[next=False]] suppresses that side on the final slide.
 
   \textbf{What stays invariant}: The rendered LaTeX, the question's
   canonical hash, the URL prefix, and the recorded answers.  Only the
