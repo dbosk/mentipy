@@ -31,7 +31,7 @@ import sys
 from socketserver import ThreadingMixIn
 from string import Template
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 
 from markdown_it import MarkdownIt
 from pygments import highlight as _pygments_highlight
@@ -2165,6 +2165,16 @@ logging, check whether an admin-only route comes from localhost, and write
 small UTF-8 responses with explicit lengths.  Keeping these operations as
 handler-local helpers avoids repeating HTTP header details in every route.
 
+Both writers stamp [[Referrer-Policy: no-referrer]] on every response.  The
+admin link carries the token in [[?admin=...]], and a results page may embed a
+respondent-chosen image once the lecturer opts into [[allow_images]]; without
+this header the browser would attach the token-bearing results URL as the
+[[Referer]] of that outbound image request, handing the token to an external
+host.  The polling server never needs to advertise where a request came from,
+so suppressing the referrer everywhere costs nothing and removes the leak at
+the source.  [[_redirect]] also accepts [[headers]] so the same response that
+strips the token from the URL can carry the [[Set-Cookie]] that replaces it.
+
 <<mentipy handler helpers>>=
 def log_message(self, *_args):
     return
@@ -2184,16 +2194,21 @@ def _send(
     self.send_response(status)
     self.send_header("Content-Type", content_type)
     self.send_header("Content-Length", str(len(payload)))
+    self.send_header("Referrer-Policy", "no-referrer")
     if headers:
         for name, value in headers.items():
             self.send_header(name, value)
     self.end_headers()
     self.wfile.write(payload)
 
-def _redirect(self, location: str):
+def _redirect(self, location: str, *, headers: dict[str, str] | None = None):
     self.send_response(HTTPStatus.SEE_OTHER)
     self.send_header("Location", location)
     self.send_header("Content-Length", "0")
+    self.send_header("Referrer-Policy", "no-referrer")
+    if headers:
+        for name, value in headers.items():
+            self.send_header(name, value)
     self.end_headers()
 @
 
@@ -2246,9 +2261,7 @@ def _admin_allowed(self) -> bool:
     return self._is_local() and not require_token
 
 def _admin_cookie_headers(self) -> dict[str, str]:
-    query = urlparse(self.path).query
-    values = parse_qs(query).get("admin")
-    if not (admin_token and values and self._has_admin_token()):
+    if not self._authenticated_via_query():
         return {}
     cookie = SimpleCookie()
     cookie["mentipy_admin"] = admin_token
@@ -2267,6 +2280,36 @@ def _deny_admin(self, subject: str):
             "or via the admin link.</p>",
         ),
     )
+@
+
+Minting the cookie is only half the job: if we then \emph{render} the page the
+lecturer requested, the token stays in the address bar, in browser history, and
+in the [[Referer]] of every subresource that page loads.  So a query-token
+request is never rendered---it is answered with a redirect to the same path
+with [[admin]] stripped out, carrying the [[Set-Cookie]].  The browser follows
+the redirect with the cookie and no token, and from then on the token exists
+only in the cookie jar.  [[_authenticated_via_query]] is the single predicate
+that recognises this case; [[_admin_cookie_headers]] reuses it so the cookie is
+built exactly when the redirect fires.
+
+We rebuild the query with [[parse_qsl]]/[[urlencode]] rather than string
+surgery so unrelated parameters survive---most importantly [[window]], which the
+results page uses to scope its time filter and which would otherwise be dropped
+on the redirect.
+
+<<mentipy handler admin access>>=
+def _authenticated_via_query(self) -> bool:
+    values = parse_qs(urlparse(self.path).query).get("admin")
+    return bool(admin_token and values and self._has_admin_token())
+
+def _detokenized_location(self) -> str:
+    parsed = urlparse(self.path)
+    remaining = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key != "admin"
+    ]
+    return urlunparse(parsed._replace(query=urlencode(remaining)))
 @
 
 Route handlers work with printed URL prefixes, but the store records answers by
@@ -2318,6 +2361,12 @@ are available to anyone who has the URL.  \enquote{Presenter-only} is exactly
 [[_admin_allowed()]]: localhost when running locally, the admin token once a
 tunnel is in play.
 
+A query-token request is intercepted before any routing: we set the cookie and
+redirect to the de-tokenized URL, so the token is consumed exactly once and no
+rendered route ever sees it.  Doing this in one place---rather than per
+route---is why the individual routes no longer thread [[Set-Cookie]]
+themselves.
+
 <<mentipy handler get routes>>=
 def do_GET(self):
     parsed = urlparse(self.path)
@@ -2331,6 +2380,13 @@ def do_GET(self):
         )
         return
 
+    if self._authenticated_via_query():
+        self._redirect(
+            self._detokenized_location(),
+            headers=self._admin_cookie_headers(),
+        )
+        return
+
     if path == "/":
         if not self._admin_allowed():
             self._deny_admin("The question index is")
@@ -2339,7 +2395,6 @@ def do_GET(self):
         self._send(
             HTTPStatus.OK,
             _page("Questions", "Questions", _render_index(store)),
-            headers=self._admin_cookie_headers(),
         )
         return
 
@@ -2391,7 +2446,6 @@ def _handle_question_get(self, segments: list[str], query: str):
                 ),
                 refresh=True,
             ),
-            headers=self._admin_cookie_headers(),
         )
         return
 
@@ -2409,7 +2463,6 @@ def _handle_question_get(self, segments: list[str], query: str):
             HTTPStatus.OK,
             _json_results(store, full_hash, window=window),
             content_type="application/json; charset=utf-8",
-            headers=self._admin_cookie_headers(),
         )
         return
 
@@ -3153,7 +3206,10 @@ Behind an SSH tunnel the loopback test is meaningless, so we pin the dangerous
 case: a request that \emph{looks} local (the tunnel forwards from
 [[127.0.0.1]]) must still be refused unless it carries the admin token.  We
 force [[_is_local]] to report [[True]] to model exactly that tunnel, and check
-that [[require_token]] overrides it.
+that [[require_token]] overrides it.  A \emph{valid} query token does not render
+in place---it redirects to the de-tokenized URL with the cookie, so the token
+never lingers in the address bar---and the cookie then authenticates the bare
+URL the redirect points at.
 
 <<test functions>>=
 def test_admin_token_required_overrides_loopback_trust(tmp_path):
@@ -3183,13 +3239,67 @@ def test_admin_token_required_overrides_loopback_trust(tmp_path):
         response, _body = _request(
             port, "GET", f"/{prefix}/results.json?admin=s3cret"
         )
-        assert response.status == 200
+        assert response.status == 303
+        assert response.getheader("Location") == f"/{prefix}/results.json"
         cookie = response.getheader("Set-Cookie")
         assert cookie is not None and "mentipy_admin=s3cret" in cookie
+
+        response, _body = _request(
+            port,
+            "GET",
+            f"/{prefix}/results.json",
+            headers={"Cookie": "mentipy_admin=s3cret"},
+        )
+        assert response.status == 200
     finally:
         server.shutdown()
         thread.join()
         server.server_close()
+@
+
+The redirect must keep unrelated query parameters; otherwise opening the admin
+link to a time-scoped results view would silently reset the window.  We pin that
+[[admin]] is the only parameter stripped:
+
+<<test functions>>=
+def test_admin_query_redirect_preserves_other_params(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+    server = create_server(
+        store,
+        host="127.0.0.1",
+        port=0,
+        admin_token="s3cret",
+        require_token=True,
+    )
+    server.RequestHandlerClass._is_local = lambda self: True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+
+    try:
+        response, _body = _request(
+            port, "GET", f"/{prefix}/results?window=day&admin=s3cret"
+        )
+        assert response.status == 303
+        assert response.getheader("Location") == f"/{prefix}/results?window=day"
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+@
+
+Every response suppresses the referrer so a token-bearing URL cannot leak to an
+external host through the [[Referer]] header of an embedded image:
+
+<<test functions>>=
+def test_responses_suppress_referrer(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    store.register(MCQuestion("Pick one", ("A", "B")))
+    with _running_server(store) as port:
+        response, _body = _request(port, "GET", "/")
+        assert response.status == 200
+        assert response.getheader("Referrer-Policy") == "no-referrer"
 @
 
 The query token is for the first click; the cookie it sets is what keeps the
