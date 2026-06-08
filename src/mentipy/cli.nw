@@ -29,6 +29,7 @@ import ipaddress
 import io
 import json
 from pathlib import Path
+import secrets
 import shutil
 import sys
 import textwrap
@@ -67,6 +68,7 @@ from mentipy.store import (
     PORT_CONFIG,
     QR_DIR_CONFIG,
     QR_FORMAT_CONFIG,
+    ALLOW_IMAGES_CONFIG,
     QUESTION_ENVIRONMENT_CONFIG,
     SHOW_URL_CONFIG,
     SSH_TUNNEL_CONFIG,
@@ -111,6 +113,10 @@ CONFIG_KEY_HELP = (
     (QR_FORMAT_CONFIG, "Default QR image format."),
     (QUESTION_ENVIRONMENT_CONFIG, "Default LaTeX environment name."),
     (SHOW_URL_CONFIG, "Default URL visibility for QR-less article layouts."),
+    (
+        ALLOW_IMAGES_CONFIG,
+        "Permit markdown images in free-text answers (off by default).",
+    ),
     (SSH_TUNNEL_CONFIG, "SSH endpoint for mentipy serve --public ssh."),
     (STORE_CONFIG, "Default path to mentipy.json."),
     (VENV_CONFIG, "Default virtualenv path used by mentipy init/activate."),
@@ -1404,9 +1410,26 @@ def _tutorial_paths() -> tuple[Path, ...]:
 
 @
 
+The presenter-only routes normally trust the loopback address, but that trust is
+unsound behind an SSH reverse tunnel: the tunnel forwards remote visitors to
+[[localhost]] on the serving machine, so every public request appears to come
+from [[127.0.0.1]].  UPnP does not have this problem---it forwards a port while
+preserving the real client address---so only the SSH mode replaces localhost
+trust with an unguessable per-run token.  Generating the token here, in the
+mode-aware CLI, keeps the server itself agnostic about how exposure happens.
+
+<<functions>>=
+def _admin_token_policy(public: PublicMode) -> tuple[Optional[str], bool]:
+    require_token = public is PublicMode.ssh
+    token = secrets.token_urlsafe(16) if require_token else None
+    return token, require_token
+@
+
 The public-serving branch still needs one helper of its own.  It reuses the
 shared URL context above, rewrites remembered QR targets when the public URL
-changes, and then hands control to the HTTP server.
+changes, and then hands control to the HTTP server.  When the tunnel disables
+localhost trust we print the tokenised admin link instead of the plain index
+hint, because the bare index URL would now be refused for the lecturer too.
 
 <<functions>>=
 
@@ -1419,6 +1442,8 @@ def _serve_publicly(
     public: PublicMode,
     results: bool,
 ):
+    admin_token, require_token = _admin_token_policy(public)
+    allow_images = get_setting(ALLOW_IMAGES_CONFIG)
     with _public_url_context(public, chosen_port) as public_url:
         count = regenerate_qrs(active_store, public_url)
         if count == 0:
@@ -1429,7 +1454,13 @@ def _serve_publicly(
                 f"Regenerated {count} QR codes; recompile your slides so "
                 "they embed the new images."
             )
-        if not results:
+        if require_token:
+            typer.echo(
+                "Presenter admin link (keep private; localhost trust is "
+                "disabled behind the tunnel):\n"
+                f"  {public_url}/?admin={admin_token}"
+            )
+        elif not results:
             typer.echo(_format_index_hint(public_url, chosen_host, chosen_port))
 
         serve_http(
@@ -1437,6 +1468,9 @@ def _serve_publicly(
             chosen_host,
             chosen_port,
             public_results=results,
+            allow_images=allow_images,
+            admin_token=admin_token,
+            require_token=require_token,
         )
 @
 
@@ -1588,6 +1622,7 @@ def serve(
             chosen_host,
             chosen_port,
             public_results=results,
+            allow_images=get_setting(ALLOW_IMAGES_CONFIG),
         )
         return
 
@@ -2567,7 +2602,7 @@ def test_serve_command_uses_config_defaults(tmp_path, monkeypatch):
     set_setting("store", str(tmp_path / "answers.json"))
     called = {}
 
-    def fake_serve(store, host, port, public_results=False):
+    def fake_serve(store, host, port, public_results=False, **_kwargs):
         called["path"] = store.path
         called["host"] = host
         called["port"] = port
@@ -2612,7 +2647,7 @@ def test_serve_command_passes_public_results_flag(tmp_path, monkeypatch):
     set_setting("base_url", "http://example.test:8080")
     called = {}
 
-    def fake_serve(store, host, port, public_results=False):
+    def fake_serve(store, host, port, public_results=False, **_kwargs):
         called["path"] = store.path
         called["host"] = host
         called["port"] = port
@@ -2652,7 +2687,7 @@ def test_serve_regenerates_qrs_when_base_url_is_auto(tmp_path, monkeypatch):
         called["base_url"] = base_url
         return 2
 
-    def fake_serve(store, host, port, public_results=False):
+    def fake_serve(store, host, port, public_results=False, **_kwargs):
         called["serve"] = (store.path, host, port, public_results)
 
     monkeypatch.setattr("mentipy.cli.resolve_base_url", fake_resolve)
@@ -2694,7 +2729,7 @@ def test_serve_rewrites_qrs_for_a_pinned_base_url(
         called["base_url"] = base_url
         return 1
 
-    def fake_serve(store, host, port, public_results=False):
+    def fake_serve(store, host, port, public_results=False, **_kwargs):
         called["serve"] = (store.path, host, port, public_results)
 
     monkeypatch.setattr("mentipy.cli.regenerate_qrs", fake_regenerate)
@@ -2764,7 +2799,7 @@ def test_serve_command_public_without_value_defaults_to_upnp(
         finally:
             state["closed"] = True
 
-    def fake_serve(store, host, port, public_results=False):
+    def fake_serve(store, host, port, public_results=False, **_kwargs):
         called["path"] = store.path
         called["host"] = host
         called["port"] = port
@@ -2827,6 +2862,89 @@ def test_serve_command_public_ssh_reads_the_configured_endpoint(
         "local_port": 8080,
         "ssh_endpoint": "alice@example.test:9000",
     }
+
+
+@
+The token policy is the security-relevant decision, so we pin it directly: only
+the SSH tunnel withdraws localhost trust, and only it mints a token.
+
+<<test functions>>=
+def test_admin_token_policy_is_ssh_only():
+    token, require = mentipy.cli._admin_token_policy(PublicMode.ssh)
+    assert require is True
+    assert token
+
+    assert mentipy.cli._admin_token_policy(PublicMode.upnp) == (None, False)
+
+
+@
+End to end, the SSH serve path must hand the server a token, set
+[[require_token]], and print the tokenised admin link for the lecturer to open.
+
+<<test functions>>=
+def test_serve_command_public_ssh_enables_admin_token(tmp_path, monkeypatch):
+    runner = CliRunner()
+    config_path = tmp_path / "config.json"
+    monkeypatch.setenv("MENTIPY_CONFIG", str(config_path))
+    set_setting("ssh_tunnel", "alice@example.test:9000")
+    captured = {}
+
+    @contextmanager
+    def fake_expose(mode, local_port, *, ssh_endpoint=None):
+        yield "http://example.test:9000"
+
+    def fake_serve(store, host, port, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("mentipy.cli.expose", fake_expose)
+    monkeypatch.setattr(
+        "mentipy.cli.regenerate_qrs", lambda _store, _base_url: 0
+    )
+    monkeypatch.setattr("mentipy.cli.serve_http", fake_serve)
+
+    result = runner.invoke(
+        cli,
+        ["serve", "--public", "ssh", "--port", "8080"],
+        env={"MENTIPY_CONFIG": str(config_path)},
+    )
+
+    assert result.exit_code == 0
+    assert captured["require_token"] is True
+    assert captured["admin_token"]
+    assert f"admin={captured['admin_token']}" in result.output
+
+
+def test_serve_command_public_ssh_passes_allow_images_setting(
+    tmp_path, monkeypatch
+):
+    runner = CliRunner()
+    config_path = tmp_path / "config.json"
+    monkeypatch.setenv("MENTIPY_CONFIG", str(config_path))
+    set_setting("ssh_tunnel", "alice@example.test:9000")
+    set_setting("allow_images", "true")
+    captured = {}
+
+    @contextmanager
+    def fake_expose(mode, local_port, *, ssh_endpoint=None):
+        yield "http://example.test:9000"
+
+    def fake_serve(store, host, port, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("mentipy.cli.expose", fake_expose)
+    monkeypatch.setattr(
+        "mentipy.cli.regenerate_qrs", lambda _store, _base_url: 0
+    )
+    monkeypatch.setattr("mentipy.cli.serve_http", fake_serve)
+
+    result = runner.invoke(
+        cli,
+        ["serve", "--public", "ssh", "--port", "8080"],
+        env={"MENTIPY_CONFIG": str(config_path)},
+    )
+
+    assert result.exit_code == 0
+    assert captured["allow_images"] is True
 
 
 def test_serve_command_public_ssh_requires_configuration(tmp_path, monkeypatch):

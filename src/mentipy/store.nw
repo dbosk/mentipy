@@ -67,6 +67,7 @@ SSH_TUNNEL_CONFIG = "mentipy.ssh_tunnel"
 PUBLIC_BASE_URL_CONFIG = "mentipy.public_base_url"
 QUESTION_ENVIRONMENT_CONFIG = "mentipy.question_environment"
 SHOW_URL_CONFIG = "mentipy.show_url"
+ALLOW_IMAGES_CONFIG = "mentipy.allow_images"
 
 DEFAULT_BASE_URL = None
 DEFAULT_HOST = "0.0.0.0"
@@ -78,6 +79,7 @@ DEFAULT_VENV_PATH = "./.venv"
 DEFAULT_MIN_PREFIX = 4
 DEFAULT_QUESTION_ENVIRONMENT = None
 DEFAULT_SHOW_URL = True
+DEFAULT_ALLOW_IMAGES = False
 
 DEFAULT_SETTINGS = {
     BASE_URL_CONFIG: DEFAULT_BASE_URL,
@@ -92,6 +94,7 @@ DEFAULT_SETTINGS = {
     PUBLIC_BASE_URL_CONFIG: None,
     QUESTION_ENVIRONMENT_CONFIG: DEFAULT_QUESTION_ENVIRONMENT,
     SHOW_URL_CONFIG: DEFAULT_SHOW_URL,
+    ALLOW_IMAGES_CONFIG: DEFAULT_ALLOW_IMAGES,
 }
 
 STORE_TEMPLATE = {"questions": {}, "answers": {}, "registration_counter": 0}
@@ -164,7 +167,7 @@ def _coerce_setting_value(full_key: str, value: Any) -> Any:
             return parsed
         return value
 
-    if full_key == SHOW_URL_CONFIG:
+    if full_key in (SHOW_URL_CONFIG, ALLOW_IMAGES_CONFIG):
         if isinstance(parsed, bool):
             return parsed
         if isinstance(parsed, int):
@@ -467,16 +470,21 @@ def test_question_rendering_settings_have_defaults_and_round_trip(
 
     assert get_setting(QUESTION_ENVIRONMENT_CONFIG) is None
     assert get_setting(SHOW_URL_CONFIG) is True
+    assert get_setting(ALLOW_IMAGES_CONFIG) is False
     assert list_settings()["question_environment"] is None
     assert list_settings()["show_url"] is True
+    assert list_settings()["allow_images"] is False
 
     set_setting("question_environment", "exercise")
     set_setting("show_url", False)
+    set_setting("allow_images", True)
 
     assert get_setting(QUESTION_ENVIRONMENT_CONFIG) == "exercise"
     assert get_setting(SHOW_URL_CONFIG) is False
+    assert get_setting(ALLOW_IMAGES_CONFIG) is True
     assert list_settings()["question_environment"] == "exercise"
     assert list_settings()["show_url"] is False
+    assert list_settings()["allow_images"] is True
 
 
 def test_venv_setting_has_a_default_and_round_trip(tmp_path, monkeypatch):
@@ -505,10 +513,12 @@ def test_get_setting_coerces_string_values_written_by_typerconf(
     config.set(PORT_CONFIG, "9000")
     config.set(MIN_PREFIX_CONFIG, "6")
     config.set(SHOW_URL_CONFIG, "false")
+    config.set(ALLOW_IMAGES_CONFIG, "true")
 
     assert get_setting(PORT_CONFIG) == 9000
     assert get_setting(MIN_PREFIX_CONFIG) == 6
     assert get_setting(SHOW_URL_CONFIG) is False
+    assert get_setting(ALLOW_IMAGES_CONFIG) is True
 
 
 def test_get_setting_keeps_nullable_string_settings_as_strings(

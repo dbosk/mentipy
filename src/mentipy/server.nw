@@ -20,11 +20,13 @@ from email.parser import BytesParser
 from email.policy import default as default_policy
 from html import escape
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import importlib
 import json
 import logging
 import os
+import secrets
 import sys
 from socketserver import ThreadingMixIn
 from string import Template
@@ -1265,6 +1267,14 @@ are still safe.  [[PYGMENTS_CSS]] is generated once at import time
 from the same [[_FORMATTER]] instance used at render time, guaranteeing
 the stylesheet and the highlighted spans always agree.
 
+The language name comes from the student-controlled fence marker, so it
+reaches us as untrusted input even though Pygments only resolves a fixed
+set of alphanumeric aliases.  We still pass it through [[escape]] before
+interpolating it into the [[class]] attribute: relying on the lexer-alias
+character set for HTML safety would couple an output-escaping guarantee to
+an unrelated library's naming policy, so we escape at the boundary where
+the contract is actually ours to keep.
+
 <<constants>>=
 _FORMATTER = _HtmlFormatter(nowrap=True)
 PYGMENTS_CSS = _FORMATTER.get_style_defs(".highlight")
@@ -1279,7 +1289,7 @@ def _highlight_code(content: str, lang: str, attrs: str) -> str:
     except ClassNotFound:
         return ""
     return (
-        f'<pre><code class="language-{lang} highlight">'
+        f'<pre><code class="language-{escape(lang)} highlight">'
         + _pygments_highlight(content, lexer, _FORMATTER)
         + "</code></pre>"
     )
@@ -1287,24 +1297,37 @@ def _highlight_code(content: str, lang: str, attrs: str) -> str:
 
 @
 
+Embedding an image makes every viewer of the results page fetch a
+respondent-chosen URL, which is a deliberate pixel-tracking channel.  Some
+lecturers accept that for their cohort and some do not, so the decision is a
+deployment policy rather than a fixed property of the renderer.  We express
+that by building two parsers that are identical except for the image rule and
+selecting between them per render.  Two pre-built instances rather than one
+mutable parser matters because the server is threaded: toggling
+[[enable]]/[[disable]] on a shared parser would race across concurrent
+requests, whereas immutable instances are safe to share.
+
 <<constants>>=
-_MARKDOWN = MarkdownIt(
-    "commonmark",
-    {
-        "html": False,
-        "linkify": False,
-        "typographer": False,
-        "highlight": _highlight_code,
-    },
-).disable("image")
+_MARKDOWN_OPTIONS = {
+    "html": False,
+    "linkify": False,
+    "typographer": False,
+    "highlight": _highlight_code,
+}
+
+_MARKDOWN = MarkdownIt("commonmark", _MARKDOWN_OPTIONS).disable("image")
+_MARKDOWN_IMAGES = MarkdownIt("commonmark", _MARKDOWN_OPTIONS)
 
 _SAFE_URL_SCHEMES = {"http", "https", "mailto"}
 @
 
-The validator runs on every link the parser sees and is bound to
-[[_MARKDOWN]] once at import time.  A relative URL (no colon) is
-rejected: the polling server does not host arbitrary local pages, and
-resolving relative links at render time is outside the threat model.
+The validator runs on every link the parser sees and is bound to both
+parsers once at import time.  Binding it to the image-enabled parser too
+keeps the [[src]] of any embedded image under the same allow-list as
+ordinary links, so enabling images widens the markup surface without
+widening the URL-scheme surface.  A relative URL (no colon) is rejected:
+the polling server does not host arbitrary local pages, and resolving
+relative links at render time is outside the threat model.
 
 <<functions>>=
 def _is_safe_url(url: str) -> bool:
@@ -1315,11 +1338,20 @@ def _is_safe_url(url: str) -> bool:
 
 
 _MARKDOWN.validateLink = _is_safe_url
+_MARKDOWN_IMAGES.validateLink = _is_safe_url
 
 
-def _render_open_answer_markdown(text: str) -> str:
-    """Render a student's free-text answer as safe HTML."""
-    return _MARKDOWN.render(text)
+def _render_open_answer_markdown(
+    text: str, *, allow_images: bool = False
+) -> str:
+    """Render a student's free-text answer as safe HTML.
+
+    When ``allow_images`` is true, markdown image syntax is permitted so a
+    lecturer can let respondents embed pictures; the link validator still
+    restricts the image ``src`` to the safe URL schemes.
+    """
+    parser = _MARKDOWN_IMAGES if allow_images else _MARKDOWN
+    return parser.render(text)
 @
 
 <<test functions>>=
@@ -1372,9 +1404,8 @@ def test_open_answer_blocks_relative_url():
     assert 'href="relative/path"' not in rendered
 @
 
-Images are disabled independently of link validation because an image element
-would make every lecturer viewing the results fetch a respondent-chosen URL.
-
+By default images are suppressed, so a respondent cannot turn the results
+page into a tracking beacon without the lecturer opting in:
 
 <<test functions>>=
 def test_open_answer_disables_remote_images():
@@ -1382,6 +1413,28 @@ def test_open_answer_disables_remote_images():
         "![tracking pixel](https://attacker.example/pixel.png)"
     )
     assert "<img" not in rendered
+@
+
+When the lecturer enables images, the syntax renders, but the [[src]]
+allow-list still applies---an active-scheme image URL is dropped just like
+an active-scheme link:
+
+<<test functions>>=
+def test_open_answer_allows_images_when_enabled():
+    rendered = server_module._render_open_answer_markdown(
+        "![pic](https://example.com/p.png)",
+        allow_images=True,
+    )
+    assert '<img src="https://example.com/p.png"' in rendered
+
+
+def test_open_answer_images_keep_url_allow_list():
+    rendered = server_module._render_open_answer_markdown(
+        "![x](javascript:alert(1))",
+        allow_images=True,
+    )
+    assert "<img" not in rendered
+    assert 'src="javascript' not in rendered
 @
 
 Let's verify that fenced code blocks get Pygments spans for known
@@ -1414,12 +1467,14 @@ but a screen full of timestamps does not help the lecturer scan
 free-text reactions during a live lecture.
 
 <<functions>>=
-def _render_open_answers(answers: list[dict[str, Any]]) -> str:
+def _render_open_answers(
+    answers: list[dict[str, Any]], *, allow_images: bool = False
+) -> str:
     if not answers:
         return "<p>No free-text answers yet.</p>"
     items = "".join(
         f'<li class="md-answer">'
-        f'{_render_open_answer_markdown(answer["value"])}'
+        f'{_render_open_answer_markdown(answer["value"], allow_images=allow_images)}'
         f'</li>'
         for answer in answers
     )
@@ -1578,6 +1633,18 @@ def _render_wordcloud_svg(pairs: list[tuple[str, int]]) -> str:
 The optional-package path is an optimisation, not a requirement.  A
 missing dependency is normal, so [[ImportError]] simply returns
 [[None]] and lets the caller fall back to Mentipy's own SVG layout.
+
+This path is the one place in the results renderer where attacker-controlled
+text is emitted as inline SVG markup that we did not assemble ourselves.  Words
+are respondent input---and with [[split_words=False]] an entire answer becomes a
+single token, since [[_punctuation_to_space]] only blanks Unicode punctuation
+and leaves symbols such as [[<]] and [[>]] intact.  Inline SVG executes
+[[<script>]] in HTML5, so the XSS safety of this branch rests on
+[[WordCloud.to_svg]] XML-escaping the word text (it uses [[saxutils.escape]],
+verified in [[wordcloud]] 1.9.6).  Every renderer we control---the table, the
+scaled spans, and the fallback layout---escapes words with [[escape]]
+explicitly; only this branch delegates that guarantee to the optional
+dependency, which is why the dependency floor is pinned in [[pyproject.toml]].
 
 <<functions>>=
 def _render_wordcloud_svg_with_package(
@@ -1931,7 +1998,10 @@ then come the type-specific stats and the visualization.  The optional
 [[is_local]] keyword lets the caller communicate whether the requester is
 the lecturer driving from localhost, which controls where the trailing
 navigation row points: localhost callers land on neighbouring results pages,
-everyone else on the corresponding forms.
+everyone else on the corresponding forms.  The [[allow_images]] keyword is
+threaded straight through to the open-answer renderer so the image policy is
+decided once, by the caller that knows the deployment, rather than rediscovered
+deep in the rendering stack.
 
 <<functions>>=
 def _render_results(
@@ -1940,6 +2010,7 @@ def _render_results(
     *,
     window: str = "all",
     is_local: bool = False,
+    allow_images: bool = False,
 ) -> str:
     summary = store.results(full_hash, window=window)
     question = store.question(full_hash)
@@ -1973,7 +2044,11 @@ def _render_results(
         parts.append(_render_bar_chart(labels, counts, percentages))
     elif isinstance(question, OpenQuestion):
         parts.append(_render_open_stats(summary))
-        parts.append(_render_open_answers(summary["answers"]))
+        parts.append(
+            _render_open_answers(
+                summary["answers"], allow_images=allow_images
+            )
+        )
     elif isinstance(question, WordCloudQuestion):
         parts.append(_render_wordcloud_stats(summary))
         parts.append(_render_wordcloud(question, summary["frequencies"]))
@@ -2053,12 +2128,31 @@ to make every request see the same persistence backend without resorting to
 global state, and it lets the CLI decide whether the live results page should
 stay local-only or be shown to respondents after they submit.
 
+The closure also carries the access policy for the presenter-only routes.  The
+default policy trusts the loopback address, which is correct when the server is
+reachable only on the lecturer's own machine.  It is \emph{not} correct behind
+an SSH reverse tunnel: that tunnel forwards remote visitors to
+[[localhost:local_port]], so every public request arrives from [[127.0.0.1]] and
+would inherit lecturer privileges.  [[require_token]] closes that gap---when set,
+the loopback shortcut is withdrawn and the presenter routes demand the
+unguessable [[admin_token]] the CLI minted for this run.  [[allow_images]] is the
+unrelated image-embedding policy decided earlier; it is captured here because
+the GET routes are where it enters the rendering call.
+
 <<functions>>=
-def _build_handler(store: Store, *, public_results: bool = False):
+def _build_handler(
+    store: Store,
+    *,
+    public_results: bool = False,
+    allow_images: bool = False,
+    admin_token: str | None = None,
+    require_token: bool = False,
+):
     class MentipyHandler(BaseHTTPRequestHandler):
         server_version = "mentipy/0.1"
 
         <<mentipy handler helpers>>
+        <<mentipy handler admin access>>
         <<mentipy handler prefix resolution>>
         <<mentipy handler get routes>>
         <<mentipy handler post routes>>
@@ -2101,6 +2195,78 @@ def _redirect(self, location: str):
     self.send_header("Location", location)
     self.send_header("Content-Length", "0")
     self.end_headers()
+@
+
+A presenter authenticates by presenting [[admin_token]] either as an
+[[?admin=...]] query parameter on the link the CLI prints, or as a cookie the
+server set on a previous authenticated request.  The query form is what the
+lecturer pastes once; the cookie form is what makes the \emph{links inside} the
+results and index pages keep working, because those links carry no query string
+of their own.  Without the cookie we would have to rewrite every internal link
+to thread the token, coupling the token to URL construction throughout the
+renderer.
+
+We compare with [[secrets.compare_digest]] rather than [[==]] so a network
+attacker cannot recover the token byte-by-byte from response timing.
+
+<<mentipy handler admin access>>=
+def _supplied_admin_token(self) -> str | None:
+    query = urlparse(self.path).query
+    values = parse_qs(query).get("admin")
+    if values:
+        return values[0]
+    raw_cookie = self.headers.get("Cookie")
+    if raw_cookie:
+        morsel = SimpleCookie(raw_cookie).get("mentipy_admin")
+        if morsel is not None:
+            return morsel.value
+    return None
+
+def _has_admin_token(self) -> bool:
+    if not admin_token:
+        return False
+    supplied = self._supplied_admin_token()
+    return supplied is not None and secrets.compare_digest(
+        supplied, admin_token
+    )
+@
+
+The gate combines the two trust sources.  When [[require_token]] is unset the
+loopback shortcut stands, preserving today's bare-URL workflow for purely local
+runs; when it is set, only a valid token passes, regardless of the apparent
+source address.  Fresh authentication via the query parameter mints a
+[[Set-Cookie]] response so the rest of the session needs no query string; the
+cookie is [[HttpOnly]] and [[SameSite=Strict]] to keep it out of scripts and
+cross-site requests.
+
+<<mentipy handler admin access>>=
+def _admin_allowed(self) -> bool:
+    if self._has_admin_token():
+        return True
+    return self._is_local() and not require_token
+
+def _admin_cookie_headers(self) -> dict[str, str]:
+    query = urlparse(self.path).query
+    values = parse_qs(query).get("admin")
+    if not (admin_token and values and self._has_admin_token()):
+        return {}
+    cookie = SimpleCookie()
+    cookie["mentipy_admin"] = admin_token
+    cookie["mentipy_admin"]["httponly"] = True
+    cookie["mentipy_admin"]["samesite"] = "Strict"
+    cookie["mentipy_admin"]["path"] = "/"
+    return {"Set-Cookie": cookie["mentipy_admin"].OutputString()}
+
+def _deny_admin(self, subject: str):
+    self._send(
+        HTTPStatus.FORBIDDEN,
+        _page(
+            "Forbidden",
+            "Forbidden",
+            f"<p>{subject} only available on localhost "
+            "or via the admin link.</p>",
+        ),
+    )
 @
 
 Route handlers work with printed URL prefixes, but the store records answers by
@@ -2146,9 +2312,11 @@ def _resolve(self, prefix: str) -> str | None:
 @
 
 The [[GET]] routes separate presenter-only surfaces from student-facing ones.
-The index and JSON export remain local-only, the results page is local-only
+The index and JSON export are presenter-only, the results page is presenter-only
 unless the CLI explicitly enables public results, and ordinary question forms
-are available to anyone who has the URL.
+are available to anyone who has the URL.  \enquote{Presenter-only} is exactly
+[[_admin_allowed()]]: localhost when running locally, the admin token once a
+tunnel is in play.
 
 <<mentipy handler get routes>>=
 def do_GET(self):
@@ -2164,20 +2332,14 @@ def do_GET(self):
         return
 
     if path == "/":
-        if not self._is_local():
-            self._send(
-                HTTPStatus.FORBIDDEN,
-                _page(
-                    "Forbidden",
-                    "Forbidden",
-                    "<p>The question index is only available on localhost.</p>",
-                ),
-            )
+        if not self._admin_allowed():
+            self._deny_admin("The question index is")
             return
 
         self._send(
             HTTPStatus.OK,
             _page("Questions", "Questions", _render_index(store)),
+            headers=self._admin_cookie_headers(),
         )
         return
 
@@ -2205,15 +2367,8 @@ def _handle_question_get(self, segments: list[str], query: str):
         return
 
     if len(segments) == 2 and segments[1] == "results":
-        if not public_results and not self._is_local():
-            self._send(
-                HTTPStatus.FORBIDDEN,
-                _page(
-                    "Forbidden",
-                    "Forbidden",
-                    "<p>Results pages are only available on localhost.</p>",
-                ),
-            )
+        if not public_results and not self._admin_allowed():
+            self._deny_admin("Results pages are")
             return
 
         full_hash = self._resolve(segments[0])
@@ -2232,22 +2387,17 @@ def _handle_question_get(self, segments: list[str], query: str):
                     full_hash,
                     window=window,
                     is_local=self._is_local(),
+                    allow_images=allow_images,
                 ),
                 refresh=True,
             ),
+            headers=self._admin_cookie_headers(),
         )
         return
 
     if len(segments) == 2 and segments[1] == "results.json":
-        if not self._is_local():
-            self._send(
-                HTTPStatus.FORBIDDEN,
-                _page(
-                    "Forbidden",
-                    "Forbidden",
-                    "<p>Result exports are only available on localhost.</p>",
-                ),
-            )
+        if not self._admin_allowed():
+            self._deny_admin("Result exports are")
             return
 
         full_hash = self._resolve(segments[0])
@@ -2259,6 +2409,7 @@ def _handle_question_get(self, segments: list[str], query: str):
             HTTPStatus.OK,
             _json_results(store, full_hash, window=window),
             content_type="application/json; charset=utf-8",
+            headers=self._admin_cookie_headers(),
         )
         return
 
@@ -2336,8 +2487,10 @@ def do_POST(self):
 
 Creating the server is intentionally a thin wrapper around the threaded server
 class and the generated handler.  That keeps port binding visible to callers
-such as the CLI while preserving the store and [[public_results]] policy inside
-the handler closure.
+such as the CLI while preserving the store, the [[public_results]] policy, the
+image policy, and the admin-token policy inside the handler closure.  These
+policies are passed in rather than read from configuration here so the server
+stays agnostic about where its settings come from---the CLI owns that decision.
 
 <<functions>>=
 
@@ -2347,12 +2500,21 @@ def create_server(
     port: int = 8080,
     *,
     public_results: bool = False,
+    allow_images: bool = False,
+    admin_token: str | None = None,
+    require_token: bool = False,
 ) -> ThreadingHTTPServer:
     """Return a configured mentipy HTTP server."""
 
     return ThreadingHTTPServer(
         (host, port),
-        _build_handler(store, public_results=public_results),
+        _build_handler(
+            store,
+            public_results=public_results,
+            allow_images=allow_images,
+            admin_token=admin_token,
+            require_token=require_token,
+        ),
     )
 @
 
@@ -2367,10 +2529,21 @@ def serve(
     port: int = 8080,
     *,
     public_results: bool = False,
+    allow_images: bool = False,
+    admin_token: str | None = None,
+    require_token: bool = False,
 ):
     """Run the mentipy HTTP server until interrupted."""
 
-    server = create_server(store, host, port, public_results=public_results)
+    server = create_server(
+        store,
+        host,
+        port,
+        public_results=public_results,
+        allow_images=allow_images,
+        admin_token=admin_token,
+        require_token=require_token,
+    )
     try:
         server.serve_forever()
     finally:
@@ -2912,7 +3085,7 @@ def test_results_routes_stay_local_by_default(tmp_path):
     try:
         response, body = _request(server.server_address[1], "GET", f"/{prefix}/results")
         assert response.status == 403
-        assert "Results pages are only available on localhost." in body
+        assert "Results pages are only available on localhost" in body
 
         response, body = _request(
             server.server_address[1],
@@ -2920,7 +3093,7 @@ def test_results_routes_stay_local_by_default(tmp_path):
             f"/{prefix}/results.json",
         )
         assert response.status == 403
-        assert "Result exports are only available on localhost." in body
+        assert "Result exports are only available on localhost" in body
     finally:
         server.shutdown()
         thread.join()
@@ -2969,7 +3142,143 @@ def test_public_results_mode_redirects_to_results_and_allows_remote_view(
             f"/{prefix}/results.json",
         )
         assert response.status == 403
-        assert "Result exports are only available on localhost." in body
+        assert "Result exports are only available on localhost" in body
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+@
+
+Behind an SSH tunnel the loopback test is meaningless, so we pin the dangerous
+case: a request that \emph{looks} local (the tunnel forwards from
+[[127.0.0.1]]) must still be refused unless it carries the admin token.  We
+force [[_is_local]] to report [[True]] to model exactly that tunnel, and check
+that [[require_token]] overrides it.
+
+<<test functions>>=
+def test_admin_token_required_overrides_loopback_trust(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+    server = create_server(
+        store,
+        host="127.0.0.1",
+        port=0,
+        admin_token="s3cret",
+        require_token=True,
+    )
+    server.RequestHandlerClass._is_local = lambda self: True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+
+    try:
+        response, _body = _request(port, "GET", f"/{prefix}/results.json")
+        assert response.status == 403
+
+        response, _body = _request(
+            port, "GET", f"/{prefix}/results.json?admin=wrong"
+        )
+        assert response.status == 403
+
+        response, _body = _request(
+            port, "GET", f"/{prefix}/results.json?admin=s3cret"
+        )
+        assert response.status == 200
+        cookie = response.getheader("Set-Cookie")
+        assert cookie is not None and "mentipy_admin=s3cret" in cookie
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+@
+
+The query token is for the first click; the cookie it sets is what keeps the
+links \emph{inside} the results and index pages working, since those carry no
+query string.  This test confirms the cookie authenticates on its own.
+
+<<test functions>>=
+def test_admin_cookie_authenticates_without_query(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+    server = create_server(
+        store,
+        host="127.0.0.1",
+        port=0,
+        admin_token="s3cret",
+        require_token=True,
+    )
+    server.RequestHandlerClass._is_local = lambda self: True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+
+    try:
+        response, _body = _request(
+            port,
+            "GET",
+            f"/{prefix}/results",
+            headers={"Cookie": "mentipy_admin=s3cret"},
+        )
+        assert response.status == 200
+
+        response, _body = _request(
+            port,
+            "GET",
+            "/",
+            headers={"Cookie": "mentipy_admin=wrong"},
+        )
+        assert response.status == 403
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+@
+
+The image policy is the lecturer's, so the renderer only emits [[<img>]] when
+the server was built with [[allow_images]].  We post a markdown image answer and
+read it back through the live results page in both modes.
+
+<<test functions>>=
+def test_results_page_honours_allow_images_flag(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?", max_chars=5000))
+    store.record(
+        store.resolve(prefix),
+        "![pic](https://example.com/p.png)",
+    )
+
+    server = create_server(
+        store, host="127.0.0.1", port=0, allow_images=True
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _response, body = _request(
+            server.server_address[1], "GET", f"/{prefix}/results"
+        )
+        assert "<img src=" in body
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
+def test_results_page_suppresses_images_by_default(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?", max_chars=5000))
+    store.record(
+        store.resolve(prefix),
+        "![pic](https://example.com/p.png)",
+    )
+
+    server = create_server(store, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _response, body = _request(
+            server.server_address[1], "GET", f"/{prefix}/results"
+        )
+        assert "<img" not in body
     finally:
         server.shutdown()
         thread.join()
