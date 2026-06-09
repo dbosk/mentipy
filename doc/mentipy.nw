@@ -112,6 +112,8 @@ def render_help_excerpt():
             lines.append(line)
         if line.startswith("  open"):
             lines.append(line)
+        if line.startswith("  ranking"):
+            lines.append(line)
         if line.startswith("  scale"):
             lines.append(line)
         if line.startswith("  word-cloud"):
@@ -127,6 +129,8 @@ def latex_pydoc_excerpt():
         if stripped.startswith("mc("):
             lines.append(line)
         if stripped.startswith("open_text("):
+            lines.append(line)
+        if stripped.startswith("ranking("):
             lines.append(line)
         if stripped.startswith("scale("):
             lines.append(line)
@@ -554,6 +558,117 @@ cloud is drawn.
   established for [[mc]], [[scale]], and [[open_text]] generalises to a
   question kind whose visualisation is a first-class authoring choice
   rather than a fixed output shape.
+}
+
+\subsection{A Ranking Poll}
+
+A ranking poll asks the room to order a set of items rather than pick one.
+Respondents assign each item a position with a dropdown, and the results
+page reports each item's mean rank so the lecturer reads the consensus
+order top to bottom.  Leaving [[top_n]] unset asks for a full ordering of
+every option; passing an integer asks only for that many favourites, which
+keeps a long list approachable.  Unlike the word-cloud visualisation
+knobs, [[top_n]] is part of the question's identity, because changing how
+many items respondents rank changes the question being asked.
+
+\begin{pyblock}
+from mentipy.latex import ranking
+
+print(
+    ranking(
+        "Rank these review priorities, most important first.",
+        ["Correctness", "Readability", "Performance"],
+        base_url="http://localhost:8080",
+        qr_dir="mentipy-obj",
+        layout="article+qr",
+    )
+)
+\end{pyblock}
+
+Rendered in the document, that call becomes:
+\begin{center}\printpythontex\end{center}
+
+The same prompt and options become a shortlist by adding a [[top_n]] cap.
+Respondents still see all three options but are asked to place only their
+top two.  Because [[top_n]] is part of the question's identity, this is a
+genuinely different question: the instruction line changes, and the slide
+also carries a new QR code and URL rather than the ones from the full
+ordering above.
+
+\begin{pyblock}
+print(
+    ranking(
+        "Rank these review priorities, most important first.",
+        ["Correctness", "Readability", "Performance"],
+        top_n=2,
+        base_url="http://localhost:8080",
+        qr_dir="mentipy-obj",
+        layout="article+qr",
+    )
+)
+\end{pyblock}
+
+Rendered in the document, that call becomes:
+\begin{center}\printpythontex\end{center}
+
+The CLI mirrors the helper, taking the items as positional arguments just
+like [[mc]] and adding a single [[--top-n]] flag for the partial case:
+
+\begin{minted}{text}
+mentipy render ranking "Rank these review priorities, most important first." \
+  "Correctness" "Readability" "Performance" \
+  --base-url http://localhost:8080 --qr-dir mentipy-obj --layout article+qr
+\end{minted}
+
+\begin{pycode}
+print(
+    render_cli(
+        [
+            "render",
+            "ranking",
+            "Rank these review priorities, most important first.",
+            "Correctness",
+            "Readability",
+            "Performance",
+            "--base-url",
+            "http://localhost:8080",
+            "--qr-dir",
+            "mentipy-obj",
+            "--layout",
+            "article+qr",
+        ]
+    )
+)
+\end{pycode}
+\saveprintpythontex{cli-ranking}
+
+The command prints the following LaTeX:
+\useprintpythontex[verbatim]{cli-ranking}
+
+Included in the document, that output compiles to:
+\begin{center}\useprintpythontex{cli-ranking}\end{center}
+
+\ltnote{%
+  \textbf{Variation pattern}: Generalization across kinds, Contrast within
+  the kind.
+
+  \textbf{What varies}: Across the chapter, the question kind, now a
+  ranking.  Within this subsection, [[top_n]] alone: the two source calls
+  are identical apart from [[top_n=2]], so every difference in the rendered
+  slides is down to the cap.
+
+  \textbf{What stays invariant}: The PythonTeX-to-CLI parallel between
+  the [[ranking]] helper and the [[ranking]] subcommand, the
+  positional-options grammar shared with [[mc]], and --- between the two
+  ranking renders --- the prompt, the options, the base URL, the QR
+  \emph{directory} ([[qr_dir]]), and the layout.
+
+  \textbf{What this reveals}: The authoring-path correspondence
+  generalises again, while the [[top_n]] contrast shows the cap is an
+  identity field, not presentation.  The visible signature of that is the
+  fresh QR code and URL on the capped slide: changing [[top_n]] mints a new
+  question, whereas the word cloud's [[render]] knob keeps the same QR and
+  answer pool because it only changes how the same answers are shown.
 }
 
 \subsection{Sequencing Questions}

@@ -35,6 +35,7 @@ from mentipy.questions import (
     MCQuestion,
     OpenQuestion,
     Question,
+    RankingQuestion,
     ScaleQuestion,
     WordCloudQuestion,
     question_from_dict,
@@ -1195,16 +1196,19 @@ the stored value already matches the registered question type, so
 [[Store.record()]] validates and normalises answers before it appends them.
 
 The validation rules mirror the question types.  Single-choice and scale
-answers are bounded integers, multi-select answers are non-empty collections of
-unique indices, and open-text and word-cloud answers are strings within the
-configured limit.  We normalise multi-select sequences to plain lists so the
-JSON shape on disk is stable no matter whether a caller passed a list or a
-tuple.
+answers are bounded integers, multi-select and ranking answers are non-empty
+collections of unique indices, and open-text and word-cloud answers are strings
+within the configured limit.  We normalise the index-collection sequences to
+plain lists so the JSON shape on disk is stable no matter whether a caller
+passed a list or a tuple.  Ranking adds two checks on top of the multi-select
+contract --- a [[top_n]] cap and, for a full ordering, complete coverage of the
+option set --- because for a ranking the \emph{order} of the list is the answer,
+not merely the membership.
 
 The dispatcher walks the question types in increasing surface area.  We make
 each string-typed arm explicit rather than letting one type fall through to
-the other, so the dispatcher reads as a list of contracts: a future fifth
-question type that also accepts a string would otherwise inherit one of these
+the other, so the dispatcher reads as a list of contracts: a future
+string-accepting question type would otherwise inherit one of these
 contracts by accident.
 
 <<functions>>=
@@ -1223,6 +1227,9 @@ def _normalize_recorded_answer(question: Question, value: Any) -> Any:
 
     if isinstance(question, WordCloudQuestion):
         <<normalise wordcloud answer>>
+
+    if isinstance(question, RankingQuestion):
+        <<normalise ranking answer>>
 
     raise TypeError(f"unsupported question type: {type(question).__name__}")
 @
@@ -1314,6 +1321,44 @@ if not isinstance(value, str):
 if len(value) > question.max_chars:
     raise ValueError("word-cloud answer exceeds the question limit")
 return value
+@
+
+A ranking answer is the ordered list of option indices the respondent
+chose, best first.  It reuses the multi-select contract --- unique
+in-range integer indices normalised to a plain list --- and adds the two
+checks that make a list an \emph{ordering} rather than a set: it may rank
+no more options than [[top_n]] allows, and a full ranking ([[top_n]] is
+[[None]]) must cover every option exactly once.  Storing the validated
+list here means the mean-rank aggregation can trust that every index is a
+real option and that position truly encodes rank.
+
+<<normalise ranking answer>>=
+if not isinstance(value, (list, tuple)):
+    raise TypeError("ranking answers must be stored as a list or tuple")
+if not value:
+    raise ValueError("rank at least one option")
+
+option_count = len(question.options)
+limit = question.top_n if question.top_n is not None else option_count
+if len(value) > limit:
+    raise ValueError("ranking answer ranks more options than allowed")
+
+indices = []
+seen = set()
+for index in value:
+    if type(index) is not int:
+        raise TypeError("ranking answer indices must be integers")
+    if index < 0 or index >= option_count:
+        raise ValueError("ranking answer outside the allowed range")
+    if index in seen:
+        raise ValueError("ranking answer repeats the same option")
+    seen.add(index)
+    indices.append(index)
+
+if question.top_n is None and len(indices) != option_count:
+    raise ValueError("a full ranking must order every option")
+
+return indices
 @
 
 <<store methods>>=
@@ -1550,6 +1595,8 @@ def results(self, full_hash: str,
         <<add open-text stats>>
     elif isinstance(question, WordCloudQuestion):
         <<add wordcloud frequencies>>
+    elif isinstance(question, RankingQuestion):
+        <<add ranking mean ranks>>
 
     return results
 @
@@ -1691,6 +1738,47 @@ results["unique_words"] = len(frequencies)
 results["total_tokens"] = sum(count for _, count in frequencies)
 @
 
+A ranking aggregates into a single consensus number per option: its mean
+rank across the respondents who ranked it.  Because an answer is an
+ordered list of option indices, the rank an answer assigns to an item is
+just its position plus one, so we accumulate a sum and a count per option
+in one pass.  An option that no respondent ranked --- possible whenever
+[[top_n]] is set --- has no mean, so we record [[None]] rather than divide
+by zero, and place those options last in [[order]].
+
+We expose two parallel views.  [[mean_ranks]] is aligned to the option
+list so a caller can look up any option by index; [[order]] is the option
+indices sorted best-first (lowest mean rank), which is what the bar charts
+render.  Sorting on a [[(unranked, mean)]] key keeps the comparison total
+even when some means are [[None]]: ranked options sort by ascending mean,
+and the never-ranked ones fall to the end without comparing [[None]] to a
+float.
+
+<<add ranking mean ranks>>=
+option_count = len(question.options)
+rank_sums = [0] * option_count
+rank_counts = [0] * option_count
+for answer in answers:
+    for position, option_index in enumerate(answer["value"]):
+        if 0 <= option_index < option_count:
+            rank_sums[option_index] += position + 1
+            rank_counts[option_index] += 1
+mean_ranks = [
+    (rank_sums[index] / rank_counts[index])
+    if rank_counts[index] else None
+    for index in range(option_count)
+]
+results["mean_ranks"] = mean_ranks
+results["rank_counts"] = rank_counts
+results["order"] = sorted(
+    range(option_count),
+    key=lambda index: (
+        mean_ranks[index] is None,
+        mean_ranks[index] if mean_ranks[index] is not None else 0.0,
+    ),
+)
+@
+
 The aggregation test keeps the counting contract explicit for the
 dashboard and the watcher.
 
@@ -1707,6 +1795,50 @@ def test_results_aggregate_multiple_choice_answers(tmp_path):
 
     assert results["counts"] == [1, 0, 2]
     assert results["total"] == 3
+@
+
+A ranking aggregates into mean ranks rather than counts.  Two respondents
+who swap the top two options leave those options tied on a mean rank of
+[[1.5]] while the unanimously last option keeps its rank of [[3]], and the
+best-first [[order]] breaks the tie by option index.
+
+<<test functions>>=
+
+def test_results_aggregate_ranking_into_mean_ranks(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(RankingQuestion("Rank", ("A", "B", "C")))
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, [0, 1, 2])
+    store.record(full_hash, [1, 0, 2])
+
+    results = store.results(full_hash)
+
+    assert results["mean_ranks"] == [1.5, 1.5, 3.0]
+    assert results["rank_counts"] == [2, 2, 2]
+    assert results["order"] == [0, 1, 2]
+@
+
+A partial ranking leaves some options unranked.  Those options have no
+mean rank, so we record [[None]] and sort them to the end of [[order]]
+behind every option that did receive a rank.
+
+<<test functions>>=
+
+def test_results_ranking_marks_unranked_options(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(
+        RankingQuestion("Rank", ("A", "B", "C"), top_n=1)
+    )
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, [2])
+    store.record(full_hash, [2])
+
+    results = store.results(full_hash)
+
+    assert results["mean_ranks"] == [None, None, 1.0]
+    assert results["rank_counts"] == [0, 0, 2]
+    assert results["order"][0] == 2
+    assert set(results["order"]) == {0, 1, 2}
 @
 
 The window filter is the cross-cutting concern, so we test it

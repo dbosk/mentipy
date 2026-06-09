@@ -30,6 +30,7 @@ from mentipy.questions import (
     MCQuestion,
     OpenQuestion,
     Question,
+    RankingQuestion,
     ScaleQuestion,
     WordCloudQuestion,
     question_hash,
@@ -193,6 +194,28 @@ def _render_word_cloud(question: WordCloudQuestion) -> str:
     return "\n".join(lines)
 @
 
+A ranking slide body lists the items to be ordered and states how many of
+them the respondent should rank.  The prompt has to spell this out because
+the slide is the only place a respondent learns whether a full ordering or
+just a top-[[top_n]] shortlist is expected --- the form repeats the rule,
+but authors typically read the prompt aloud first.  We use an enumerated
+list only to give each item a stable visual handle; it does not imply a
+preset order.
+
+<<functions>>=
+def _render_ranking(question: RankingQuestion) -> str:
+    if question.top_n is None:
+        prompt = "Rank every option from most to least preferred:"
+    else:
+        prompt = f"Rank your top {question.top_n}:"
+    lines = ["\\emph{" + prompt + "}", "\\begin{enumerate}"]
+    lines.extend(
+        f"\\item {_escape_latex(option)}" for option in question.options
+    )
+    lines.append("\\end{enumerate}")
+    return "\n".join(lines)
+@
+
 \subsection{Question content wrapper}
 
 The question-specific body stays the same across layouts.  Only the outer
@@ -217,6 +240,8 @@ def _render_body(question: Question) -> str:
         return _render_open(question)
     if isinstance(question, WordCloudQuestion):
         return _render_word_cloud(question)
+    if isinstance(question, RankingQuestion):
+        return _render_ranking(question)
     return _render_scale(question)
 @
 
@@ -684,6 +709,51 @@ def word_cloud(
     )
 @
 
+The ranking wrapper mirrors the multiple-choice one: it takes the items as
+a plain sequence and threads them into a [[RankingQuestion]].  The only
+extra knob is [[top_n]], and unlike the word-cloud presentation knobs it
+\emph{does} enter the canonical hash --- raising or lowering the number of
+items a respondent ranks changes the question being asked, so it must mint
+a fresh identity rather than silently reinterpret answers collected under
+the old contract.
+
+<<functions>>=
+def ranking(
+    text: str,
+    options: list[str] | tuple[str, ...],
+    *,
+    top_n: int | None = None,
+    next: bool = True,
+    store: Store | None = None,
+    base_url: str | None = None,
+    qr_dir: str | Path | None = None,
+    qr_format: str | None = None,
+    environment: str | None = None,
+    show_url: bool | None = None,
+    layout: str = DEFAULT_LAYOUT,
+) -> str:
+    """Return LaTeX for a ranking question.
+
+    ``top_n`` caps how many items a respondent ranks: ``None`` asks for a
+    full ordering, an integer asks only for that many favourites.  Unlike
+    the word-cloud visualisation knobs, ``top_n`` is part of the question's
+    canonical identity.
+    """
+
+    return question(
+        RankingQuestion(
+            text=text, options=tuple(options), top_n=top_n, next=next
+        ),
+        store=store,
+        base_url=base_url,
+        qr_dir=qr_dir,
+        qr_format=qr_format,
+        environment=environment,
+        show_url=show_url,
+        layout=layout,
+    )
+@
+
 \section{Rendering contracts}
 
 The default tests pin the existing slide contract: each helper must register the
@@ -792,6 +862,10 @@ rearranged later.
         pytest.param(
             lambda **kw: word_cloud("Topic?", **kw), id="word_cloud"
         ),
+        pytest.param(
+            lambda **kw: ranking("Rank these", ("A", "B"), **kw),
+            id="ranking",
+        ),
     ],
 )
 def test_helpers_thread_next_false_into_the_stored_question(
@@ -872,6 +946,55 @@ def test_word_cloud_passes_visualisation_options_into_the_question(
     assert question.min_word_length == 5
     assert question.extra_stop_words == ("foo",)
     assert question.use_default_stopwords is False
+@
+
+The ranking wrapper meets the same registration contract, and the slide
+body lists the items so respondents know what they are ordering.
+
+<<test functions>>=
+def test_ranking_registers_the_question_and_references_the_qr(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    rendered = ranking(
+        "Rank these",
+        ("Encapsulation", "Performance"),
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir=DEFAULT_QR_DIR,
+    )
+
+    [entry] = store.all_questions()
+    prefix = entry["url_prefix"]
+
+    assert "Rank these" in rendered
+    assert "Encapsulation" in rendered
+    assert f"\\input{{{QR_SUBPATH}/Q-{prefix}.pdf_tex}}" in rendered
+    assert store.question(entry["hash"]).kind == "ranking"
+@
+
+The [[top_n]] cap travels through the wrapper into the stored question, so
+a capped poll authored in a slide actually limits respondents.
+
+<<test functions>>=
+def test_ranking_passes_top_n_into_the_question(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    ranking(
+        "Rank these",
+        ("A", "B", "C"),
+        top_n=2,
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir=DEFAULT_QR_DIR,
+    )
+
+    [entry] = store.all_questions()
+
+    assert store.question(entry["hash"]).top_n == 2
 @
 
 

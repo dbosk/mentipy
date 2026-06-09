@@ -42,6 +42,7 @@ from pygments.util import ClassNotFound
 from mentipy.questions import (
     MCQuestion,
     OpenQuestion,
+    RankingQuestion,
     ScaleQuestion,
     WordCloudQuestion,
 )
@@ -503,6 +504,19 @@ single token, neither of which matches what authors mean by a
 word-cloud poll.  The arm therefore reads only the textarea value,
 enforces [[max_chars]] directly, and returns the raw string.
 
+Ranking questions do not use the shared [[value]] field at all.  The
+no-JavaScript form gives each option its own rank dropdown named
+[[rank_]] followed by the option index ([[rank_0]], [[rank_1]], and so
+on), so the parser reads one field per option and reassembles the chosen
+positions into the best-first index list the store expects.
+We reject the answer unless the chosen positions are exactly
+$1\ldots m$ with no gaps or repeats: a respondent who put two items at
+\enquote{rank 1} or skipped from 1 to 3 has produced something that is
+not an ordering, and silently renumbering it would record a preference
+they did not express.  A full ranking ([[top_n]] is [[None]]) must fill
+every position; a [[top_n]] poll may stop early but never rank more than
+the cap.
+
 <<functions>>=
 
 
@@ -564,6 +578,35 @@ def _parse_answer(question, fields: dict[str, list[str]]) -> Any:
         if len(text) > question.max_chars:
             raise ValueError("text answer too long")
         return text
+
+    if isinstance(question, RankingQuestion):
+        option_count = len(question.options)
+        limit = (
+            question.top_n if question.top_n is not None else option_count
+        )
+        ranked = []
+        for index in range(option_count):
+            raw = fields.get(f"rank_{index}", [""])[0].strip()
+            if not raw:
+                continue
+            try:
+                rank = int(raw)
+            except ValueError:
+                raise ValueError("ranking positions must be whole numbers")
+            ranked.append((rank, index))
+        if not ranked:
+            raise ValueError("rank at least one option")
+        if len(ranked) > limit:
+            raise ValueError("you ranked more options than allowed")
+        positions = sorted(rank for rank, _ in ranked)
+        if positions != list(range(1, len(positions) + 1)):
+            raise ValueError(
+                "use each position once, starting at 1 with no gaps"
+            )
+        if question.top_n is None and len(ranked) != option_count:
+            raise ValueError("rank every option")
+        ranked.sort()
+        return [index for _, index in ranked]
 
     values = fields.get("value", [])
     if len(values) != 1:
@@ -880,6 +923,66 @@ def test_parse_answer_requires_exactly_one_scale_value():
         server_module._parse_answer(question, {"value": ["1", "2"]})
 @
 
+Ranking submissions arrive as one [[rank_]] field per option, named with
+the option index.  A valid full ordering reassembles into the best-first
+index list the store records, so position $1$ becomes the first index
+returned.
+
+<<test functions>>=
+def test_parse_answer_reassembles_a_full_ranking_best_first():
+    question = RankingQuestion("Rank these", ("A", "B", "C"))
+
+    answer = server_module._parse_answer(
+        question, {"rank_0": ["2"], "rank_1": ["1"], "rank_2": ["3"]}
+    )
+
+    assert answer == [1, 0, 2]
+@
+
+A ranking is only an ordering if the chosen positions are $1\ldots m$ with
+no gaps or repeats, so a duplicated position is rejected rather than
+silently broken.
+
+<<test functions>>=
+def test_parse_answer_rejects_repeated_ranking_positions():
+    question = RankingQuestion("Rank these", ("A", "B", "C"))
+
+    with pytest.raises(ValueError, match="position"):
+        server_module._parse_answer(
+            question, {"rank_0": ["1"], "rank_1": ["1"], "rank_2": ["2"]}
+        )
+@
+
+A full ranking must cover every option; leaving one blank is an
+incomplete ordering, not a partial one.
+
+<<test functions>>=
+def test_parse_answer_requires_every_option_in_a_full_ranking():
+    question = RankingQuestion("Rank these", ("A", "B", "C"))
+
+    with pytest.raises(ValueError, match="every option"):
+        server_module._parse_answer(
+            question, {"rank_0": ["1"], "rank_1": ["2"], "rank_2": [""]}
+        )
+@
+
+A [[top_n]] poll accepts a short answer but never one longer than the cap.
+
+<<test functions>>=
+def test_parse_answer_honours_the_ranking_top_n_cap():
+    question = RankingQuestion("Rank these", ("A", "B", "C"), top_n=2)
+
+    assert server_module._parse_answer(
+        question, {"rank_0": [""], "rank_1": ["1"], "rank_2": ["2"]}
+    ) == [1, 2]
+
+    with pytest.raises(ValueError, match="more options than allowed"):
+        server_module._parse_answer(
+            question,
+            {"rank_0": ["1"], "rank_1": ["2"], "rank_2": ["3"]},
+        )
+@
+
 \section{Rendering question forms}
 
 <<functions>>=
@@ -984,6 +1087,9 @@ def _render_form(store: Store, full_hash: str) -> str:
             "<button type=\"submit\">Submit</button></form>"
         )
 
+    if isinstance(question, RankingQuestion):
+        return _render_ranking_form(question, prefix)
+
     inputs = "".join(
         f'<label><input type="radio" name="value" value="{value}"> '
         f"{value}</label>"
@@ -1008,6 +1114,48 @@ def _render_form(store: Store, full_hash: str) -> str:
 
 @
 
+The ranking form is the only one that needs no JavaScript yet still
+captures an ordering: each option gets its own position dropdown named to
+match the [[rank_]] fields the parser reads, one per option index.  Plain
+HTML selects keep
+the form usable on a phone and degrade gracefully without scripting, at
+the cost of letting a respondent pick the same position twice --- which is
+exactly why [[_parse_answer]] revalidates the positions server-side rather
+than trusting the widget.  Each dropdown offers a blank entry so an option
+can stay unranked, and the position range stops at [[top_n]] so a capped
+poll never offers a rank a respondent is not allowed to use.  We wrap each
+option in a block-level row so the choices stack vertically without any
+new stylesheet rules.
+
+<<functions>>=
+def _render_ranking_form(question: RankingQuestion, prefix: str) -> str:
+    option_count = len(question.options)
+    limit = (
+        question.top_n if question.top_n is not None else option_count
+    )
+    positions = "".join(
+        f'<option value="{rank}">{rank}</option>'
+        for rank in range(1, limit + 1)
+    )
+    rows = "".join(
+        f'<div class="rank-row">'
+        f'<select name="rank_{index}">'
+        f'<option value="">—</option>{positions}</select> '
+        f"{escape(option)}</div>"
+        for index, option in enumerate(question.options)
+    )
+    if question.top_n is None:
+        instructions = "<p>Give every option a position.</p>"
+    else:
+        instructions = f"<p>Rank your top {question.top_n}.</p>"
+    return (
+        f"<p>{escape(question.text)}</p>"
+        f"{instructions}"
+        f'<form method="post" action="/{prefix}">{rows}'
+        '<button type="submit">Submit</button></form>'
+    )
+@
+
 The open-question form keeps both inputs visible because respondents may need
 to pair a short explanation with an uploaded artifact.  We pin the multipart
 encoding and the field names directly on the renderer so the browser and the
@@ -1024,6 +1172,63 @@ def test_open_form_uses_multipart_and_renders_both_inputs(tmp_path):
     assert 'enctype="multipart/form-data"' in rendered
     assert 'name="value"' in rendered
     assert 'name="file"' in rendered
+@
+
+The ranking form gives each option its own position dropdown.  We pin the
+per-option field names and the absence of any script tag, since the
+no-JavaScript guarantee is the whole point of the dropdown design.
+
+<<test functions>>=
+def test_ranking_form_renders_one_select_per_option_without_js(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(
+        RankingQuestion("Rank these", ("A", "B", "C"))
+    )
+    full_hash = store.resolve(prefix)
+
+    rendered = server_module._render_form(store, full_hash)
+
+    assert rendered.count("<select") == 3
+    assert 'name="rank_0"' in rendered
+    assert 'name="rank_2"' in rendered
+    assert "<script" not in rendered
+@
+
+A capped poll must not offer a position beyond [[top_n]], otherwise the
+form would invite an answer the parser then rejects.
+
+<<test functions>>=
+def test_ranking_form_caps_positions_at_top_n(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(
+        RankingQuestion("Rank these", ("A", "B", "C"), top_n=2)
+    )
+    full_hash = store.resolve(prefix)
+
+    rendered = server_module._render_form(store, full_hash)
+
+    assert '<option value="2">2</option>' in rendered
+    assert '<option value="3">3</option>' not in rendered
+@
+
+The ranking results page lists options best-first and labels each with its
+mean rank, so a lecturer reads the room's consensus order top to bottom.
+
+<<test functions>>=
+def test_ranking_results_lists_options_best_first(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(
+        RankingQuestion("Rank these", ("A", "B", "C"))
+    )
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, [2, 0, 1])
+    store.record(full_hash, [2, 1, 0])
+
+    rendered = server_module._render_results(store, full_hash)
+
+    assert rendered.index(">C<") < rendered.index(">A<")
+    assert rendered.index(">C<") < rendered.index(">B<")
+    assert "avg 1.0" in rendered
 @
 
 The word-cloud form test pins the opposite contract: no multipart, no
@@ -1990,6 +2195,47 @@ def test_render_question_nav_wraps_links_in_book_order(tmp_path):
 
 \subsection{Dispatching by question type}
 
+A ranking result is a single bar per option, ordered best-first, where
+the bar length encodes consensus rather than a count: a low mean rank
+means the room agreed the item belongs near the top, so we map a mean of
+$1$ to a full bar and a mean of $N$ to the shortest.  Inverting the mean
+this way lets the same horizontal bar idiom carry \enquote{ranked highest}
+without a reader having to remember that, unlike every other chart on the
+site, a \emph{shorter} bar would be better.  Options that no one ranked
+have no mean, so they render as an empty bar labelled accordingly and sort
+to the end via the store's [[order]].  We reuse the existing bar-chart CSS
+classes directly instead of routing through [[_render_bar_chart]], because
+that helper's count-and-percentage label does not fit a mean-rank summary.
+
+<<functions>>=
+def _render_ranking_stats(
+    question: RankingQuestion, summary: dict[str, Any]
+) -> str:
+    option_count = len(question.options)
+    mean_ranks = summary["mean_ranks"]
+    rank_counts = summary["rank_counts"]
+    rows = []
+    for index in summary["order"]:
+        mean = mean_ranks[index]
+        if mean is None:
+            width = 0.0
+            detail = "not ranked"
+        else:
+            width = (option_count - mean + 1) / option_count * 100
+            detail = f"avg {mean:.1f}, {rank_counts[index]} ranked"
+        rows.append(
+            f'<div class="bar-row">'
+            f'<span class="bar-label">'
+            f'{escape(question.options[index])}</span>'
+            f'<span class="bar-bar">'
+            f'<span class="bar-fill" style="width:{width:.1f}%"></span>'
+            f'</span>'
+            f'<span class="bar-count">{detail}</span>'
+            f'</div>'
+        )
+    return '<div class="bar-chart">' + "".join(rows) + '</div>'
+@
+
 The top-level renderer reads the window-filtered summary from the store
 and dispatches to the per-type helpers.  The window filter sits at the
 top so the lecturer can rescope without scrolling; the total responses
@@ -2052,6 +2298,8 @@ def _render_results(
     elif isinstance(question, WordCloudQuestion):
         parts.append(_render_wordcloud_stats(summary))
         parts.append(_render_wordcloud(question, summary["frequencies"]))
+    elif isinstance(question, RankingQuestion):
+        parts.append(_render_ranking_stats(question, summary))
 
     parts.append(_render_question_nav(store, full_hash, results=is_local))
 

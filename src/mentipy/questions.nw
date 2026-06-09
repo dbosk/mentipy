@@ -792,6 +792,168 @@ def test_word_cloud_frequencies_disables_default_stopwords():
     assert counts["cat"] == 1
 @
 
+\section{Ranking Questions}
+
+A ranking question hands the respondent a set of items and asks for an
+order rather than a single pick.  It is the multiple-choice family seen
+from a different angle: where [[MCQuestion]] with [[multi]] records an
+\emph{unordered} set of chosen option indices, a ranking records an
+\emph{ordered} list of them.  We reuse that representation deliberately
+--- an answer is a list of option indices, best first, so the position
+in the list \emph{is} the assigned rank.  Nothing in the store or the
+JSON layer has to learn a new shape; the only new logic is validating
+that the list is a (partial) permutation and aggregating it into mean
+ranks.
+
+The one genuinely new field is [[top_n]].  Leaving it [[None]] asks for a
+full ordering of every option; setting it to an integer asks only for
+that many favourites, which keeps a long option list approachable.  Both
+the form and the answer recorder treat [[top_n]] as a hard cap on how
+many ranks a respondent may assign, so --- like the option set itself ---
+it shapes the input contract and must enter the canonical identity.  Only
+the shared [[next]] flag is presentation.
+
+<<classes>>=
+@dataclass(frozen=True)
+class RankingQuestion:
+    """A question that asks respondents to order a set of items.
+
+    An answer is an ordered list of option indices, best first, so each
+    item's position in the list is its assigned rank.  ``top_n`` caps how
+    many items a respondent ranks: ``None`` asks for a full ordering of
+    every option, while an integer asks for only that many favourites.
+    Like the option set, ``top_n`` shapes the input contract, so it is
+    part of the canonical identity; only ``next`` is presentation.
+    """
+
+    text: str
+    options: tuple[str, ...]
+    top_n: int | None = None
+    next: bool = True
+    kind: str = "ranking"
+
+    <<ranking question methods>>
+@
+
+\subsection{Validation}
+
+The two invariants protect the layers downstream.  An empty option set
+has no ordering to ask for, and the form would render an empty control.
+A [[top_n]] outside the closed interval $[1, |options|]$ is always an
+authoring mistake: zero favourites asks for nothing, and a cap larger
+than the option count can never be reached, so a respondent could never
+produce a valid answer.  Checking at construction surfaces the typo when
+the slide is compiled rather than when the first respondent loads the
+form.
+
+<<ranking question methods>>=
+def __post_init__(self):
+    <<validate ranking options>>
+    <<validate ranking [[top_n]]>>
+@
+
+<<validate ranking options>>=
+if not self.options:
+    raise ValueError("ranking questions need options")
+@
+
+<<validate ranking [[top_n]]>>=
+if self.top_n is not None and not 1 <= self.top_n <= len(self.options):
+    raise ValueError(
+        "ranking top_n must be between 1 and the option count"
+    )
+@
+
+The empty-option check mirrors [[MCQuestion]] so the two list-valued
+question types agree on what a usable option set looks like.
+
+<<test functions>>=
+
+def test_ranking_question_requires_options():
+    with pytest.raises(ValueError):
+        RankingQuestion("Rank these", ())
+@
+
+A [[top_n]] of zero or one larger than the option count both describe
+unanswerable polls, so we make sure either fails loudly.
+
+<<test functions>>=
+
+def test_ranking_question_rejects_out_of_range_top_n():
+    with pytest.raises(ValueError, match="top_n"):
+        RankingQuestion("Rank these", ("A", "B"), top_n=0)
+    with pytest.raises(ValueError, match="top_n"):
+        RankingQuestion("Rank these", ("A", "B"), top_n=3)
+@
+
+\subsection{Serialisation}
+
+The persistence shape keeps [[top_n]] explicit, even at its [[None]]
+default, so the store can refresh a ranking question without guessing
+whether an absent key means \enquote{full ordering} or \enquote{this is
+store metadata}.  [[canonical_dict]] strips only [[next]]: the prompt,
+the ordered option set, and [[top_n]] all shape what a respondent is
+asked to do, so all three stay in the identity.
+
+<<ranking question methods>>=
+def to_dict(self) -> dict[str, Any]:
+    """Return a JSON-friendly representation of the question."""
+
+    return {
+        "kind": self.kind,
+        "text": self.text,
+        "options": list(self.options),
+        "top_n": self.top_n,
+        "next": self.next,
+    }
+
+def canonical_dict(self) -> dict[str, Any]:
+    """Return the identity-only shape used by ``question_hash``."""
+
+    result = self.to_dict()
+    result.pop("next", None)
+    return result
+@
+
+The round-trip-shaped serialisation test pins both the full-ordering
+default and a partial [[top_n]], since the latter is the field most
+likely to be dropped or coerced by accident.
+
+<<test functions>>=
+
+def test_ranking_question_to_dict_includes_top_n():
+    assert RankingQuestion("Rank these", ("A", "B", "C")).to_dict() == {
+        "kind": "ranking",
+        "text": "Rank these",
+        "options": ["A", "B", "C"],
+        "top_n": None,
+        "next": True,
+    }
+    partial = RankingQuestion(
+        "Rank these", ("A", "B", "C"), top_n=2
+    ).to_dict()
+    assert partial["top_n"] == 2
+@
+
+The canonical dictionary keeps [[top_n]] but drops [[next]], which is the
+inverse of the word-cloud guarantee: there the visualisation never enters
+identity, here the answer-shaping cap always does.
+
+<<test functions>>=
+
+def test_ranking_canonical_dict_keeps_top_n_but_drops_next():
+    question = RankingQuestion(
+        "Rank these", ("A", "B", "C"), top_n=2, next=False
+    )
+
+    assert question.canonical_dict() == {
+        "kind": "ranking",
+        "text": "Rank these",
+        "options": ["A", "B", "C"],
+        "top_n": 2,
+    }
+@
+
 \section{Canonicalisation}
 
 The rest of the system works on a question union.  The helper that rebuilds a
@@ -799,7 +961,13 @@ question from stored JSON is the bridge between the typed model and the JSON
 registry.
 
 <<classes>>=
-Question = MCQuestion | OpenQuestion | ScaleQuestion | WordCloudQuestion
+Question = (
+    MCQuestion
+    | OpenQuestion
+    | ScaleQuestion
+    | WordCloudQuestion
+    | RankingQuestion
+)
 @
 
 \subsection{Rebuilding stored questions}
@@ -818,6 +986,7 @@ def question_from_dict(data: Mapping[str, Any]) -> Question:
     <<rebuild stored open question>>
     <<rebuild stored scale question>>
     <<rebuild stored wordcloud question>>
+    <<rebuild stored ranking question>>
 
     raise ValueError(f"unknown question kind: {kind}")
 @
@@ -883,6 +1052,23 @@ if kind == "wordcloud":
             data.get("use_default_stopwords", True)
         ),
         render=str(data.get("render", "svg")),
+        next=bool(data.get("next", True)),
+    )
+@
+
+Ranking reconstruction coerces [[options]] back to a tuple for the same
+reason multiple-choice does --- a list would make the frozen dataclass
+unhashable.  [[top_n]] is read with [[None]] as its fallback so an older
+or hand-edited store entry that omits it rebuilds as a full ordering, the
+same default the constructor uses.
+
+<<rebuild stored ranking question>>=
+if kind == "ranking":
+    stored_top_n = data.get("top_n")
+    return RankingQuestion(
+        text=str(data["text"]),
+        options=tuple(data["options"]),
+        top_n=None if stored_top_n is None else int(stored_top_n),
         next=bool(data.get("next", True)),
     )
 @
@@ -1038,6 +1224,7 @@ silently get the default behaviour back after a server restart.
         OpenQuestion("Feedback?", next=False),
         ScaleQuestion("Pace?", next=False),
         WordCloudQuestion("Topic?", next=False),
+        RankingQuestion("Rank these", ("A", "B"), next=False),
     ],
 )
 def test_question_from_dict_round_trips_an_opt_out_next_flag(question):
@@ -1057,7 +1244,10 @@ the whole persistence shape minus the [[next]] flag.  Open questions do the
 same and additionally drop an unset [[fence]] so historical hashes stay
 byte-for-byte stable even though [[to_dict]] now records explicit defaults.
 Word clouds additionally strip their visualisation fields, keeping existing
-answer logs bound to the same URL prefix while presentation evolves.
+answer logs bound to the same URL prefix while presentation evolves.  Ranking
+questions are the mirror image of that choice: their identity keeps the ordered
+option set and the [[top_n]] cap, because both shape what the respondent is
+asked to order, and only [[next]] is dropped.
 
 <<functions>>=
 def question_hash(question: Question) -> str:
@@ -1169,6 +1359,10 @@ def test_question_hash_invariant_to_next_flag_across_question_types():
         (
             WordCloudQuestion("Topic?"),
             WordCloudQuestion("Topic?", next=False),
+        ),
+        (
+            RankingQuestion("Rank these", ("A", "B")),
+            RankingQuestion("Rank these", ("A", "B"), next=False),
         ),
     ]
     for default, opted_out in pairs:
