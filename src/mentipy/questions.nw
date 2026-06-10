@@ -792,6 +792,884 @@ def test_word_cloud_frequencies_disables_default_stopwords():
     assert counts["cat"] == 1
 @
 
+\section{Ranking Questions}
+
+A ranking question hands the respondent a set of items and asks for an
+order rather than a single pick.  It is the multiple-choice family seen
+from a different angle: where [[MCQuestion]] with [[multi]] records an
+\emph{unordered} set of chosen option indices, a ranking records an
+\emph{ordered} list of them.  We reuse that representation deliberately
+--- an answer is a list of option indices, best first, so the position
+in the list \emph{is} the assigned rank.  Nothing in the store or the
+JSON layer has to learn a new shape; the only new logic is validating
+that the list is a (partial) permutation and aggregating it into mean
+ranks.
+
+The one genuinely new field is [[top_n]].  Leaving it [[None]] asks for a
+full ordering of every option; setting it to an integer asks only for
+that many favourites, which keeps a long option list approachable.  Both
+the form and the answer recorder treat [[top_n]] as a hard cap on how
+many ranks a respondent may assign, so --- like the option set itself ---
+it shapes the input contract and must enter the canonical identity.  Only
+the shared [[next]] flag is presentation.
+
+<<classes>>=
+@dataclass(frozen=True)
+class RankingQuestion:
+    """A question that asks respondents to order a set of items.
+
+    An answer is an ordered list of option indices, best first, so each
+    item's position in the list is its assigned rank.  ``top_n`` caps how
+    many items a respondent ranks: ``None`` asks for a full ordering of
+    every option, while an integer asks for only that many favourites.
+    Like the option set, ``top_n`` shapes the input contract, so it is
+    part of the canonical identity; only ``next`` is presentation.
+    """
+
+    text: str
+    options: tuple[str, ...]
+    top_n: int | None = None
+    next: bool = True
+    kind: str = "ranking"
+
+    <<ranking question methods>>
+@
+
+\subsection{Validation}
+
+The two invariants protect the layers downstream.  An empty option set
+has no ordering to ask for, and the form would render an empty control.
+A [[top_n]] outside the closed interval $[1, |options|]$ is always an
+authoring mistake: zero favourites asks for nothing, and a cap larger
+than the option count can never be reached, so a respondent could never
+produce a valid answer.  Checking at construction surfaces the typo when
+the slide is compiled rather than when the first respondent loads the
+form.
+
+<<ranking question methods>>=
+def __post_init__(self):
+    <<validate ranking options>>
+    <<validate ranking [[top_n]]>>
+@
+
+<<validate ranking options>>=
+if not self.options:
+    raise ValueError("ranking questions need options")
+@
+
+<<validate ranking [[top_n]]>>=
+if self.top_n is not None and not 1 <= self.top_n <= len(self.options):
+    raise ValueError(
+        "ranking top_n must be between 1 and the option count"
+    )
+@
+
+The empty-option check mirrors [[MCQuestion]] so the two list-valued
+question types agree on what a usable option set looks like.
+
+<<test functions>>=
+
+def test_ranking_question_requires_options():
+    with pytest.raises(ValueError):
+        RankingQuestion("Rank these", ())
+@
+
+A [[top_n]] of zero or one larger than the option count both describe
+unanswerable polls, so we make sure either fails loudly.
+
+<<test functions>>=
+
+def test_ranking_question_rejects_out_of_range_top_n():
+    with pytest.raises(ValueError, match="top_n"):
+        RankingQuestion("Rank these", ("A", "B"), top_n=0)
+    with pytest.raises(ValueError, match="top_n"):
+        RankingQuestion("Rank these", ("A", "B"), top_n=3)
+@
+
+\subsection{Serialisation}
+
+The persistence shape keeps [[top_n]] explicit, even at its [[None]]
+default, so the store can refresh a ranking question without guessing
+whether an absent key means \enquote{full ordering} or \enquote{this is
+store metadata}.  [[canonical_dict]] strips only [[next]]: the prompt,
+the ordered option set, and [[top_n]] all shape what a respondent is
+asked to do, so all three stay in the identity.
+
+<<ranking question methods>>=
+def to_dict(self) -> dict[str, Any]:
+    """Return a JSON-friendly representation of the question."""
+
+    return {
+        "kind": self.kind,
+        "text": self.text,
+        "options": list(self.options),
+        "top_n": self.top_n,
+        "next": self.next,
+    }
+
+def canonical_dict(self) -> dict[str, Any]:
+    """Return the identity-only shape used by ``question_hash``."""
+
+    result = self.to_dict()
+    result.pop("next", None)
+    return result
+@
+
+The round-trip-shaped serialisation test pins both the full-ordering
+default and a partial [[top_n]], since the latter is the field most
+likely to be dropped or coerced by accident.
+
+<<test functions>>=
+
+def test_ranking_question_to_dict_includes_top_n():
+    assert RankingQuestion("Rank these", ("A", "B", "C")).to_dict() == {
+        "kind": "ranking",
+        "text": "Rank these",
+        "options": ["A", "B", "C"],
+        "top_n": None,
+        "next": True,
+    }
+    partial = RankingQuestion(
+        "Rank these", ("A", "B", "C"), top_n=2
+    ).to_dict()
+    assert partial["top_n"] == 2
+@
+
+The canonical dictionary keeps [[top_n]] but drops [[next]], which is the
+inverse of the word-cloud guarantee: there the visualisation never enters
+identity, here the answer-shaping cap always does.
+
+<<test functions>>=
+
+def test_ranking_canonical_dict_keeps_top_n_but_drops_next():
+    question = RankingQuestion(
+        "Rank these", ("A", "B", "C"), top_n=2, next=False
+    )
+
+    assert question.canonical_dict() == {
+        "kind": "ranking",
+        "text": "Rank these",
+        "options": ["A", "B", "C"],
+        "top_n": 2,
+    }
+@
+
+\section{Pin Questions}
+
+A pin question asks respondents to \emph{point} at something: the form
+shows a target --- an image, or a rendered piece of text such as a code
+example --- and every click drops a pin.  The lecturer's results page
+overlays everyone's pins on the same target, so a prompt like
+\enquote{pin the keyword that causes the bug} turns into a visible
+cluster over the offending token.
+
+Pins are stored as coordinates normalised to the rendered target:
+$x/\mathit{width}$ and $y/\mathit{height}$, both in $[0, 1]$.  Pixel
+coordinates would tie an answer to the respondent's screen --- a phone
+and a projector render the same image at different sizes, so the
+lecturer's overlay would only line up for respondents with the same
+device.  Normalising makes a pin a statement about the \emph{content},
+which is the only thing all participants share.  An answer is a list of
+pin mappings, each with [[x]] and [[y]] and, when the question allows
+it, a short [[comment]].
+
+Two question types share this contract.  [[PinImageQuestion]] targets an
+image; [[PinTextQuestion]] targets a piece of text.  Everything about
+\emph{answering} --- the coordinate shape, the pin cap, the optional
+comments --- is identical, so the store and the server dispatch on a
+shared tuple rather than duplicating per-type logic.
+
+\subsection{The shared pin contract}
+
+Both [[max_pins]] and [[allow_comment]] shape what a respondent is asked
+to produce, so --- like ranking's [[top_n]] --- they belong to the
+canonical identity rather than presentation.  The cap on [[max_pins]]
+also bounds work downstream: the form renders one hidden input pair per
+possible pin and the server's answer parser loops over the same range,
+so an unbounded cap would let a single question inflate every request.
+The comment cap matches the default [[max_chars]] of open and word-cloud
+questions; it is a module constant rather than a per-question field
+because varying it would complicate identity for no authoring benefit.
+
+<<constants>>=
+MAX_PINS_LIMIT = 100
+PIN_COMMENT_MAX_CHARS = 280
+@
+
+<<validate pin contract>>=
+if not 1 <= self.max_pins <= MAX_PINS_LIMIT:
+    raise ValueError(
+        f"max_pins must be between 1 and {MAX_PINS_LIMIT}"
+    )
+@
+
+The validation chunk is reused verbatim by both pin classes, so one test
+per class is enough to show the shared contract holds on each.
+
+<<test functions>>=
+
+def test_pin_questions_reject_out_of_range_max_pins():
+    with pytest.raises(ValueError, match="max_pins"):
+        PinImageQuestion.from_image_bytes(
+            "Pin it", PNG_SAMPLE, max_pins=0
+        )
+    with pytest.raises(ValueError, match="max_pins"):
+        PinTextQuestion("Pin it", "total =+ x", max_pins=101)
+@
+
+\subsection{Sniffing image bytes}
+
+The server later serves registered image bytes back to respondents, so
+the question model fixes \emph{what counts as an image} once, here,
+where both the authoring side and the serving side can import it.  We
+recognise a closed allowlist of raster formats by their magic bytes
+instead of trusting a file extension or a client-supplied content type:
+the bytes are the only input we actually store, so they are the only
+thing worth deciding on.  SVG is deliberately absent --- it is an XML
+document that may carry scripts, and the served image ends up rendered
+in every respondent's browser.  Sniffing is prefix-only by design: it
+gatekeeps the content type for serving, not image integrity, and a
+truncated PNG fails harmlessly in the browser rather than in mentipy.
+
+<<constants>>=
+RASTER_IMAGE_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+)
+RASTER_IMAGE_MIMES = frozenset(
+    mime for _, mime in RASTER_IMAGE_MAGIC
+) | {"image/webp"}
+@
+
+WebP does not fit the simple prefix table: its container is RIFF, whose
+magic carries a length field at bytes 4--8, so we match the format tag
+at bytes 8--12 separately.
+
+<<functions>>=
+def sniff_image_mime(data: bytes) -> str | None:
+    """Return the MIME type of raster image bytes, or ``None``.
+
+    Recognises PNG, JPEG, GIF and WebP by their magic bytes.  SVG is
+    deliberately not recognised: it can carry scripts, so it is not
+    safe to serve back to respondents.
+    """
+
+    for magic, mime in RASTER_IMAGE_MAGIC:
+        if data.startswith(magic):
+            return mime
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+@
+
+The sniffer must accept each allowlisted format and reject SVG even
+when the markup is well-formed --- rejecting it here is the security
+boundary, not a formatting nicety.
+
+<<test functions>>=
+
+PNG_SAMPLE = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+
+
+def test_sniff_image_mime_detects_raster_and_rejects_svg():
+    assert sniff_image_mime(PNG_SAMPLE) == "image/png"
+    assert sniff_image_mime(b"\xff\xd8\xff\xe0rest") == "image/jpeg"
+    assert sniff_image_mime(b"GIF89a;") == "image/gif"
+    assert (
+        sniff_image_mime(b"RIFF\x00\x00\x00\x00WEBPVP8 ")
+        == "image/webp"
+    )
+    assert sniff_image_mime(b"<svg xmlns='...'></svg>") is None
+    assert sniff_image_mime(b"") is None
+@
+
+\subsection{Pin-on-image}
+
+The identity question for an image target is: \emph{which} image?  The
+answer must be the image \emph{bytes}, not the path.  A path changes
+when the lecturer recompiles the same slides from a different checkout
+or renames a figure directory, and tying the hash to it would orphan the
+collected answers on every such non-change.  Hashing the bytes mirrors
+how every other question type digests its full input contract --- two
+slides showing the same picture are the same poll.
+
+That choice creates a construction problem: [[question_from_dict]] must
+rebuild a stored question from JSON alone, with no filesystem in sight.
+The dataclass therefore carries the digest and the sniffed MIME type as
+plain string fields, and only the [[from_image_bytes]] classmethod ever
+touches raw bytes.  The original [[image_path]] is kept as a
+presentation field because the LaTeX renderer still needs something to
+hand to [[\includegraphics]]; it never enters the hash.
+
+<<classes>>=
+@dataclass(frozen=True)
+class PinImageQuestion:
+    """A question whose answers are pins dropped on an image.
+
+    An answer is a list of mappings with normalised coordinates
+    ``x`` and ``y`` in [0, 1] and, when ``allow_comment`` is set, an
+    optional short ``comment``.  The identity is the image *bytes*
+    (via ``image_sha256``) together with the pin contract
+    (``max_pins``, ``allow_comment``); the stored ``image_path`` and
+    ``image_mime`` are presentation.  Build instances from raw bytes
+    with ``from_image_bytes``.
+    """
+
+    text: str
+    image_sha256: str
+    image_mime: str
+    image_path: str | None = None
+    max_pins: int = 1
+    allow_comment: bool = False
+    next: bool = True
+    kind: str = "pinimage"
+
+    <<pin-image question methods>>
+@
+
+\subsection{Pin-image validation}
+
+The digest format is checked eagerly because the store later uses it as
+a file name for the registered image bytes: a malformed digest would
+either fail the lookup silently or, worse, smuggle path separators into
+a filesystem path.  The MIME check enforces the same allowlist as the
+sniffer so a hand-edited store file cannot relabel stored bytes as a
+type the sniffer would never produce.
+
+<<pin-image question methods>>=
+def __post_init__(self):
+    <<validate pin-image [[image_sha256]]>>
+    <<validate pin-image [[image_mime]]>>
+    <<validate pin contract>>
+@
+
+<<validate pin-image [[image_sha256]]>>=
+if not is_sha256_hex(self.image_sha256):
+    raise ValueError(
+        "image_sha256 must be 64 lowercase hex digits"
+    )
+@
+
+<<validate pin-image [[image_mime]]>>=
+if self.image_mime not in RASTER_IMAGE_MIMES:
+    raise ValueError(
+        f"image_mime must be one of {sorted(RASTER_IMAGE_MIMES)}"
+    )
+@
+
+The digest check is shared with the store's image lookup, where it
+doubles as the path-traversal guard, so it is a public helper rather
+than an inline expression.
+
+<<functions>>=
+def is_sha256_hex(value: str) -> bool:
+    """Return whether ``value`` is 64 lowercase hex digits."""
+
+    return len(value) == 64 and all(
+        character in "0123456789abcdef" for character in value
+    )
+@
+
+<<test functions>>=
+
+def test_pin_image_question_rejects_bad_sha_and_mime():
+    with pytest.raises(ValueError, match="image_sha256"):
+        PinImageQuestion("Pin it", "not-hex", "image/png")
+    with pytest.raises(ValueError, match="image_sha256"):
+        PinImageQuestion("Pin it", "0" * 63, "image/png")
+    with pytest.raises(ValueError, match="image_mime"):
+        PinImageQuestion("Pin it", "0" * 64, "image/svg+xml")
+@
+
+\subsection{Building from image bytes}
+
+[[from_image_bytes]] is the single place where image bytes meet the
+question model.  Concentrating the I/O-adjacent work here keeps the
+dataclass constructor pure --- the same property that lets
+[[question_from_dict]] rebuild stored questions offline --- while
+giving the authoring helpers a one-call path from a file's contents to
+a registered question.
+
+<<pin-image question methods>>=
+@classmethod
+def from_image_bytes(
+    cls,
+    text: str,
+    data: bytes,
+    *,
+    image_path: str | None = None,
+    max_pins: int = 1,
+    allow_comment: bool = False,
+    next: bool = True,
+) -> "PinImageQuestion":
+    """Build a pin-image question from raw image bytes.
+
+    The bytes are MIME-sniffed and hashed here, so the resulting
+    object never needs filesystem access again.  Raises
+    ``ValueError`` for bytes that are not an allowlisted raster
+    format.
+    """
+
+    mime = sniff_image_mime(data)
+    if mime is None:
+        raise ValueError(
+            "image data must be PNG, JPEG, GIF or WebP"
+        )
+    return cls(
+        text=text,
+        image_sha256=hashlib.sha256(data).hexdigest(),
+        image_mime=mime,
+        image_path=image_path,
+        max_pins=max_pins,
+        allow_comment=allow_comment,
+        next=next,
+    )
+@
+
+The central guarantee --- recompiling the same slide with the same
+image is idempotent --- only holds if the path stays out of the digest.
+We pin it by hashing the same bytes under two different paths.
+
+<<test functions>>=
+
+def test_pin_image_from_image_bytes_is_idempotent_across_paths():
+    first = PinImageQuestion.from_image_bytes(
+        "Pin the bug", PNG_SAMPLE, image_path="figures/code.png"
+    )
+    second = PinImageQuestion.from_image_bytes(
+        "Pin the bug", PNG_SAMPLE, image_path="other/dir/code.png"
+    )
+
+    assert first.image_sha256 == second.image_sha256
+    assert question_hash(first) == question_hash(second)
+@
+
+Bytes outside the allowlist must fail at authoring time, when the
+lecturer can still fix the figure, rather than at serving time.
+
+<<test functions>>=
+
+def test_pin_image_from_image_bytes_rejects_unknown_formats():
+    with pytest.raises(ValueError, match="PNG, JPEG, GIF or WebP"):
+        PinImageQuestion.from_image_bytes(
+            "Pin it", b"<svg xmlns='...'></svg>"
+        )
+@
+
+\subsection{Pin-image serialisation}
+
+The persistence shape records every field, including the presentation
+ones, so the store's refresh-on-merge can update a re-rendered path or
+MIME label.  [[canonical_dict]] keeps only the prompt, the byte digest
+and the pin contract: re-rendering with a moved image file keeps the
+URL prefix and the collected pins, while swapping in a different image
+mints a new question --- the pins would be meaningless over other
+pixels.
+
+<<pin-image question methods>>=
+def to_dict(self) -> dict[str, Any]:
+    """Return a JSON-friendly representation of the question."""
+
+    return {
+        "kind": self.kind,
+        "text": self.text,
+        "image_sha256": self.image_sha256,
+        "image_mime": self.image_mime,
+        "image_path": self.image_path,
+        "max_pins": self.max_pins,
+        "allow_comment": self.allow_comment,
+        "next": self.next,
+    }
+
+def canonical_dict(self) -> dict[str, Any]:
+    """Return the identity-only shape used by ``question_hash``."""
+
+    return {
+        "kind": self.kind,
+        "text": self.text,
+        "image_sha256": self.image_sha256,
+        "max_pins": self.max_pins,
+        "allow_comment": self.allow_comment,
+    }
+@
+
+<<test functions>>=
+
+def test_pin_image_canonical_dict_drops_path_mime_and_next():
+    question = PinImageQuestion(
+        "Pin the bug",
+        "0" * 64,
+        "image/png",
+        image_path="figures/code.png",
+        max_pins=3,
+        allow_comment=True,
+        next=False,
+    )
+
+    assert question.canonical_dict() == {
+        "kind": "pinimage",
+        "text": "Pin the bug",
+        "image_sha256": "0" * 64,
+        "max_pins": 3,
+        "allow_comment": True,
+    }
+@
+
+\subsection{Pin-on-text}
+
+The text variant exists because the most natural pin targets in a
+lecture are often not figures but \emph{rendered text}: a code example
+where students should pin the faulty keyword, a paragraph where they
+should pin the weakest claim.  The content is a single raw string ---
+deliberately not markdown, because the same content must also render on
+the LaTeX slide, and a markdown-to-LaTeX translation would make the two
+surfaces drift.  Instead the authoring call labels the string with a
+[[language]]: a Pygments lexer name renders it as highlighted code on
+the web and as a [[minted]] listing on the slide, [[None]] renders it
+as prose, and the special value [[latex]] means the string \emph{is}
+LaTeX --- the slide typesets it natively and the authoring helper
+caches a pandoc-converted HTML rendering in [[content_html]] so the
+stdlib server never needs pandoc installed.
+
+For identity the same reasoning as the image applies: the content
+string is the contract, so it is hashed; [[language]] and
+[[content_html]] only change how the same string is displayed, so ---
+like a word cloud's visualisation fields --- they stay out of the hash
+and retagging a snippet keeps its URL and answer pool.
+
+<<classes>>=
+@dataclass(frozen=True)
+class PinTextQuestion:
+    """A question whose answers are pins dropped on rendered text.
+
+    The target ``content`` is one raw string.  ``language`` selects
+    its presentation: a Pygments lexer name for highlighted code,
+    ``None`` for prose, or ``"latex"`` for content typeset natively
+    on the slide (with a pandoc-rendered HTML copy cached in
+    ``content_html`` for the web form).  Answers share the pin-image
+    shape: mappings with normalised ``x`` and ``y`` in [0, 1] and an
+    optional ``comment``.  Identity is the prompt, the content string
+    and the pin contract; ``language``, ``content_html`` and ``next``
+    are presentation.
+    """
+
+    text: str
+    content: str
+    language: str | None = None
+    content_html: str | None = None
+    max_pins: int = 1
+    allow_comment: bool = False
+    next: bool = True
+    kind: str = "pintext"
+
+    <<pin-text question methods>>
+@
+
+An empty content string would render an invisible, unclickable target,
+so it is always an authoring mistake --- the same construction-time
+loudness as an empty option set.
+
+<<pin-text question methods>>=
+def __post_init__(self):
+    <<validate pin-text [[content]]>>
+    <<validate pin contract>>
+@
+
+<<validate pin-text [[content]]>>=
+if not self.content.strip():
+    raise ValueError("pin-text questions need non-empty content")
+@
+
+<<test functions>>=
+
+def test_pin_text_question_requires_content():
+    with pytest.raises(ValueError, match="content"):
+        PinTextQuestion("Pin the bug", "")
+    with pytest.raises(ValueError, match="content"):
+        PinTextQuestion("Pin the bug", "   \n")
+@
+
+\subsection{Pin-text serialisation}
+
+[[content_html]] is derived data --- a cache of pandoc's output --- but
+it still travels through [[to_dict]] so the store's refresh-on-merge
+naturally replaces it whenever the slides are recompiled.  Keeping it
+out of [[canonical_dict]] means a pandoc upgrade that changes the HTML
+byte-for-byte cannot orphan collected pins.
+
+<<pin-text question methods>>=
+def to_dict(self) -> dict[str, Any]:
+    """Return a JSON-friendly representation of the question."""
+
+    return {
+        "kind": self.kind,
+        "text": self.text,
+        "content": self.content,
+        "language": self.language,
+        "content_html": self.content_html,
+        "max_pins": self.max_pins,
+        "allow_comment": self.allow_comment,
+        "next": self.next,
+    }
+
+def canonical_dict(self) -> dict[str, Any]:
+    """Return the identity-only shape used by ``question_hash``."""
+
+    return {
+        "kind": self.kind,
+        "text": self.text,
+        "content": self.content,
+        "max_pins": self.max_pins,
+        "allow_comment": self.allow_comment,
+    }
+@
+
+<<test functions>>=
+
+def test_pin_text_canonical_dict_drops_language_html_and_next():
+    question = PinTextQuestion(
+        "Pin the bug",
+        "total =+ x",
+        language="python",
+        content_html="<pre>total =+ x</pre>",
+        max_pins=2,
+        allow_comment=True,
+        next=False,
+    )
+
+    assert question.canonical_dict() == {
+        "kind": "pintext",
+        "text": "Pin the bug",
+        "content": "total =+ x",
+        "max_pins": 2,
+        "allow_comment": True,
+    }
+@
+
+\subsection{The pin dispatch tuple}
+
+The store's answer validation and the server's form, parser and results
+renderer all treat the two pin types identically; only the target
+rendering differs.  A shared tuple keeps that dispatch in one place ---
+adding a third pin target later means extending this tuple instead of
+hunting down every [[isinstance]] check.
+
+<<classes>>=
+PIN_QUESTIONS = (PinImageQuestion, PinTextQuestion)
+@
+
+\subsection{Binning pins into a density grid}
+
+The results summary deliberately carries the raw pin list, because
+binning resolution is presentation: the terminal heatmap has a handful
+of character cells to work with while the HTML page draws a fine
+blurred grid.  Both renderers still need the same counting step, so the
+grid builder lives here with the answer shape it consumes, and each
+renderer picks its own resolution.  The [[min]] guard folds the
+boundary value $1.0$ into the last bin --- a pin on the very edge of
+the target is a legal answer and must not index past the grid.
+
+<<functions>>=
+def bin_pins(
+    pins: Iterable[Mapping[str, Any]],
+    *,
+    columns: int,
+    rows: int,
+) -> list[list[int]]:
+    """Count pins into a ``rows`` x ``columns`` grid, row-major.
+
+    Each pin is a mapping with normalised ``x`` and ``y`` in [0, 1];
+    the returned grid holds the number of pins per cell, with row
+    index growing downwards like the y coordinate.
+    """
+
+    grid = [[0] * columns for _ in range(rows)]
+    for pin in pins:
+        column = min(int(pin["x"] * columns), columns - 1)
+        row = min(int(pin["y"] * rows), rows - 1)
+        grid[row][column] += 1
+    return grid
+@
+
+Let's verify the corner cases: an interior pin, and the edge pin that
+must land in the last cell rather than off the grid.
+
+<<test functions>>=
+
+def test_bin_pins_counts_cells_and_clamps_the_edge():
+    grid = bin_pins(
+        [
+            {"x": 0.0, "y": 0.0},
+            {"x": 0.26, "y": 0.51},
+            {"x": 1.0, "y": 1.0},
+        ],
+        columns=4,
+        rows=4,
+    )
+
+    assert grid[0][0] == 1
+    assert grid[2][1] == 1
+    assert grid[3][3] == 1
+    assert sum(sum(row) for row in grid) == 3
+@
+
+\subsection{Smoothing and colouring the grid}
+
+Both heatmap renderers follow the same recipe after binning: smooth
+the grid with a small kernel, normalise against the \emph{smoothed}
+peak, and colour each cell on a cold-to-hot ramp.  Normalising after
+smoothing is load-bearing --- it is what keeps a lecture's first
+scattered pins fully visible, because the densest spot always reaches
+intensity $1$ no matter how few pins exist --- so the smoothing step
+lives here beside the binning it completes, rather than being
+reimplemented per renderer.  The kernel is a parameter because the two
+surfaces want different widths: an HTML grid cell is a fine fraction
+of the image, while a terminal character cell is already coarse.
+
+The convolution is separable --- one horizontal pass, one vertical ---
+and scatter-based: it loops over the non-zero source cells and spreads
+each into its neighbours, rather than gathering at every destination.
+Classroom grids are overwhelmingly empty, so the work stays
+proportional to the number of pinned cells.  The vertical pass may use
+its own, typically narrower, kernel: on a square image grid both axes
+are equally uncertain, but on a text grid the column carries
+font-metric error while the line index is reliable, so smearing heat
+across neighbouring lines would only blur a signal that was sharp to
+begin with.
+
+<<functions>>=
+def smooth_pin_grid(
+    grid: list[list[int]],
+    *,
+    kernel: tuple[float, ...],
+    row_kernel: tuple[float, ...] | None = None,
+) -> list[list[float]]:
+    """Convolve a binned pin grid with separable kernels.
+
+    ``kernel`` smooths along the columns of each row; the vertical
+    pass uses ``row_kernel`` when given and ``kernel`` otherwise.
+    """
+
+    radius = len(kernel) // 2
+    rows = len(grid)
+    columns = len(grid[0])
+
+    horizontal = [[0.0] * columns for _ in range(rows)]
+    for row in range(rows):
+        for column in range(columns):
+            count = grid[row][column]
+            if not count:
+                continue
+            for offset, weight in enumerate(kernel):
+                neighbour = column + offset - radius
+                if 0 <= neighbour < columns:
+                    horizontal[row][neighbour] += count * weight
+
+    vertical = row_kernel if row_kernel is not None else kernel
+    vertical_radius = len(vertical) // 2
+    smoothed = [[0.0] * columns for _ in range(rows)]
+    for row in range(rows):
+        for column in range(columns):
+            value = horizontal[row][column]
+            if not value:
+                continue
+            for offset, weight in enumerate(vertical):
+                neighbour = row + offset - vertical_radius
+                if 0 <= neighbour < rows:
+                    smoothed[neighbour][column] += value * weight
+
+    return smoothed
+@
+
+A lone count must spread into a halo whose centre stays the maximum;
+that shape is what the renderers' normalisation step relies on.  With
+an asymmetric row kernel the halo flattens: neighbouring columns heat
+up more than neighbouring rows.
+
+<<test functions>>=
+
+def test_smooth_pin_grid_spreads_a_lone_count_around_its_centre():
+    grid = [[0] * 5 for _ in range(5)]
+    grid[2][2] = 1
+
+    smoothed = smooth_pin_grid(grid, kernel=(1.0, 2.0, 1.0))
+
+    assert smoothed[2][2] == 4.0
+    assert smoothed[2][1] == 2.0
+    assert smoothed[1][1] == 1.0
+    assert smoothed[0][0] == 0.0
+@
+
+<<test functions>>=
+
+def test_smooth_pin_grid_takes_a_narrower_row_kernel():
+    grid = [[0] * 5 for _ in range(5)]
+    grid[2][2] = 1
+
+    smoothed = smooth_pin_grid(
+        grid, kernel=(1.0, 2.0, 1.0), row_kernel=(1.0,)
+    )
+
+    assert smoothed[2][2] == 2.0
+    assert smoothed[2][1] == 1.0
+    assert smoothed[1][2] == 0.0
+@
+
+The colour ramp is shared so the web page and the terminal tell the
+same story, and it walks the whole conventional spectrum --- blue,
+green, yellow, red --- rather than blending the two endpoints
+directly.  A straight blue-to-red blend passes through a murky
+purple-grey at the midpoint, which reads as \emph{less} intense than
+either end; routing through green and yellow keeps perceived intensity
+monotone, which is the entire job of a heatmap ramp.  The cold and hot
+ends pin the site's bar-chart blue and pin-marker red so the heatmap
+still reads as part of the same palette.  Only the \emph{colour} is
+shared --- how a renderer applies it (SVG fill opacity, terminal font
+styling) stays its own business.
+
+<<constants>>=
+PIN_HEAT_STOPS = (
+    (74, 144, 217),
+    (76, 175, 80),
+    (255, 193, 7),
+    (220, 53, 69),
+)
+@
+
+<<functions>>=
+def pin_heat_color(intensity: float) -> str:
+    """Return the cold-to-hot hex colour for an intensity in [0, 1].
+
+    The ramp interpolates piecewise-linearly through blue, green,
+    yellow and red, in that order.
+    """
+
+    position = intensity * (len(PIN_HEAT_STOPS) - 1)
+    index = min(int(position), len(PIN_HEAT_STOPS) - 2)
+    fraction = position - index
+    low = PIN_HEAT_STOPS[index]
+    high = PIN_HEAT_STOPS[index + 1]
+    channels = (
+        round(cold + (hot - cold) * fraction)
+        for cold, hot in zip(low, high)
+    )
+    return "#" + "".join(f"{channel:02x}" for channel in channels)
+@
+
+The thirds land exactly on the inner stops, so the test can pin all
+four spectrum colours without floating-point slack.
+
+<<test functions>>=
+
+def test_pin_heat_color_walks_blue_green_yellow_red():
+    assert pin_heat_color(0.0) == "#4a90d9"
+    assert pin_heat_color(1 / 3) == "#4caf50"
+    assert pin_heat_color(2 / 3) == "#ffc107"
+    assert pin_heat_color(1.0) == "#dc3545"
+@
+
 \section{Canonicalisation}
 
 The rest of the system works on a question union.  The helper that rebuilds a
@@ -799,7 +1677,15 @@ question from stored JSON is the bridge between the typed model and the JSON
 registry.
 
 <<classes>>=
-Question = MCQuestion | OpenQuestion | ScaleQuestion | WordCloudQuestion
+Question = (
+    MCQuestion
+    | OpenQuestion
+    | ScaleQuestion
+    | WordCloudQuestion
+    | RankingQuestion
+    | PinImageQuestion
+    | PinTextQuestion
+)
 @
 
 \subsection{Rebuilding stored questions}
@@ -818,6 +1704,9 @@ def question_from_dict(data: Mapping[str, Any]) -> Question:
     <<rebuild stored open question>>
     <<rebuild stored scale question>>
     <<rebuild stored wordcloud question>>
+    <<rebuild stored ranking question>>
+    <<rebuild stored pin-image question>>
+    <<rebuild stored pin-text question>>
 
     raise ValueError(f"unknown question kind: {kind}")
 @
@@ -883,6 +1772,65 @@ if kind == "wordcloud":
             data.get("use_default_stopwords", True)
         ),
         render=str(data.get("render", "svg")),
+        next=bool(data.get("next", True)),
+    )
+@
+
+Ranking reconstruction coerces [[options]] back to a tuple for the same
+reason multiple-choice does --- a list would make the frozen dataclass
+unhashable.  [[top_n]] is read with [[None]] as its fallback so an older
+or hand-edited store entry that omits it rebuilds as a full ordering, the
+same default the constructor uses.
+
+<<rebuild stored ranking question>>=
+if kind == "ranking":
+    stored_top_n = data.get("top_n")
+    return RankingQuestion(
+        text=str(data["text"]),
+        options=tuple(data["options"]),
+        top_n=None if stored_top_n is None else int(stored_top_n),
+        next=bool(data.get("next", True)),
+    )
+@
+
+Pin-image reconstruction is the payoff of storing the digest instead of
+re-deriving it: rebuilding never opens the image file, so a store copied
+to another machine still serves and aggregates correctly.  The MIME
+fallback only matters for hand-edited entries; anything written by
+[[from_image_bytes]] carries an explicit sniffed type.
+
+<<rebuild stored pin-image question>>=
+if kind == "pinimage":
+    stored_path = data.get("image_path")
+    return PinImageQuestion(
+        text=str(data["text"]),
+        image_sha256=str(data["image_sha256"]),
+        image_mime=str(data.get("image_mime", "image/png")),
+        image_path=None if stored_path is None else str(stored_path),
+        max_pins=int(data.get("max_pins", 1)),
+        allow_comment=bool(data.get("allow_comment", False)),
+        next=bool(data.get("next", True)),
+    )
+@
+
+Pin-text reconstruction keeps the two optional presentation strings
+nullable rather than coercing [[None]] to [["None"]], which would
+otherwise silently turn a prose target into code highlighted with a
+nonsense lexer.
+
+<<rebuild stored pin-text question>>=
+if kind == "pintext":
+    stored_language = data.get("language")
+    stored_html = data.get("content_html")
+    return PinTextQuestion(
+        text=str(data["text"]),
+        content=str(data["content"]),
+        language=(
+            None if stored_language is None else str(stored_language)
+        ),
+        content_html=None if stored_html is None else str(stored_html),
+        max_pins=int(data.get("max_pins", 1)),
+        allow_comment=bool(data.get("allow_comment", False)),
         next=bool(data.get("next", True)),
     )
 @
@@ -1025,6 +1973,48 @@ def test_word_cloud_round_trip_preserves_extra_stop_words_as_tuple():
     }
 @
 
+The pin round trips guard the offline-rebuild property directly: the
+payloads contain digests and cached HTML but reference no files, and the
+normalised persistence shape must reproduce them byte for byte.
+
+<<test functions>>=
+
+def test_pin_image_round_trip_preserves_digest_and_contract():
+    payload = {
+        "kind": "pinimage",
+        "text": "Pin the bug",
+        "image_sha256": "0" * 64,
+        "image_mime": "image/jpeg",
+        "image_path": "figures/code.png",
+        "max_pins": 3,
+        "allow_comment": True,
+    }
+
+    question = question_from_dict(payload)
+
+    assert isinstance(question, PinImageQuestion)
+    assert question.to_dict() == payload | {"next": True}
+@
+
+<<test functions>>=
+
+def test_pin_text_round_trip_preserves_language_and_cached_html():
+    payload = {
+        "kind": "pintext",
+        "text": "Pin the bug",
+        "content": "total =+ x",
+        "language": "python",
+        "content_html": "<pre>total =+ x</pre>",
+        "max_pins": 1,
+        "allow_comment": False,
+    }
+
+    question = question_from_dict(payload)
+
+    assert isinstance(question, PinTextQuestion)
+    assert question.to_dict() == payload | {"next": True}
+@
+
 The [[next]] flag has to survive the store's JSON detour for every question
 type, otherwise a lecturer opting a slide out of the navigation chain would
 silently get the default behaviour back after a server restart.
@@ -1038,6 +2028,9 @@ silently get the default behaviour back after a server restart.
         OpenQuestion("Feedback?", next=False),
         ScaleQuestion("Pace?", next=False),
         WordCloudQuestion("Topic?", next=False),
+        RankingQuestion("Rank these", ("A", "B"), next=False),
+        PinImageQuestion("Pin it", "0" * 64, "image/png", next=False),
+        PinTextQuestion("Pin it", "total =+ x", next=False),
     ],
 )
 def test_question_from_dict_round_trips_an_opt_out_next_flag(question):
@@ -1057,7 +2050,14 @@ the whole persistence shape minus the [[next]] flag.  Open questions do the
 same and additionally drop an unset [[fence]] so historical hashes stay
 byte-for-byte stable even though [[to_dict]] now records explicit defaults.
 Word clouds additionally strip their visualisation fields, keeping existing
-answer logs bound to the same URL prefix while presentation evolves.
+answer logs bound to the same URL prefix while presentation evolves.  Ranking
+questions are the mirror image of that choice: their identity keeps the ordered
+option set and the [[top_n]] cap, because both shape what the respondent is
+asked to order, and only [[next]] is dropped.  Pin questions combine both
+stances: the target content (the image byte digest, the raw text string)
+and the pin contract ([[max_pins]], [[allow_comment]]) are identity, while
+the rendering hints ([[image_path]], [[image_mime]], [[language]],
+[[content_html]]) follow the word-cloud rule and stay out of the hash.
 
 <<functions>>=
 def question_hash(question: Question) -> str:
@@ -1169,6 +2169,20 @@ def test_question_hash_invariant_to_next_flag_across_question_types():
         (
             WordCloudQuestion("Topic?"),
             WordCloudQuestion("Topic?", next=False),
+        ),
+        (
+            RankingQuestion("Rank these", ("A", "B")),
+            RankingQuestion("Rank these", ("A", "B"), next=False),
+        ),
+        (
+            PinImageQuestion("Pin it", "0" * 64, "image/png"),
+            PinImageQuestion(
+                "Pin it", "0" * 64, "image/png", next=False
+            ),
+        ),
+        (
+            PinTextQuestion("Pin it", "total =+ x"),
+            PinTextQuestion("Pin it", "total =+ x", next=False),
         ),
     ]
     for default, opted_out in pairs:

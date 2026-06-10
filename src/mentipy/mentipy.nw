@@ -19,11 +19,23 @@ the small surface we expect PythonTeX users and CLI users to care about.
 @
 
 <<imports>>=
-from mentipy.latex import mc, open_text, question, scale, word_cloud
+from mentipy.latex import (
+    mc,
+    open_text,
+    pin_image,
+    pin_text,
+    question,
+    ranking,
+    scale,
+    word_cloud,
+)
 from mentipy.questions import (
     MCQuestion,
     OpenQuestion,
+    PinImageQuestion,
+    PinTextQuestion,
     Question,
+    RankingQuestion,
     ScaleQuestion,
     WordCloudQuestion,
     question_from_dict,
@@ -46,7 +58,10 @@ __version__ = "0.2"
 __all__ = [
     "MCQuestion",
     "OpenQuestion",
+    "PinImageQuestion",
+    "PinTextQuestion",
     "Question",
+    "RankingQuestion",
     "ScaleQuestion",
     "Store",
     "WordCloudQuestion",
@@ -55,9 +70,12 @@ __all__ = [
     "install_package",
     "mc",
     "open_text",
+    "pin_image",
+    "pin_text",
     "question",
     "question_from_dict",
     "question_hash",
+    "ranking",
     "scale",
     "serve",
     "word_cloud",
@@ -85,9 +103,15 @@ def test_package_facade_reexports_the_public_api():
     assert OpenQuestion.__name__ == "OpenQuestion"
     assert ScaleQuestion.__name__ == "ScaleQuestion"
     assert WordCloudQuestion.__name__ == "WordCloudQuestion"
+    assert RankingQuestion.__name__ == "RankingQuestion"
+    assert PinImageQuestion.__name__ == "PinImageQuestion"
+    assert PinTextQuestion.__name__ == "PinTextQuestion"
     assert callable(mc)
     assert callable(open_text)
+    assert callable(pin_image)
+    assert callable(pin_text)
     assert callable(question)
+    assert callable(ranking)
     assert callable(scale)
     assert callable(word_cloud)
     assert callable(serve)

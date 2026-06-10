@@ -61,6 +61,9 @@ A new question type or top-level helper has to land in several places beyond its
 - Optional public exposure support is packaged as `mentipy[public]`, which installs `miniupnpc` for the UPnP mode; SSH mode stays stdlib-only.
 - Optional denser word-cloud SVG rendering is packaged as `mentipy[wordcloud]`; `render="svg"` falls back to the built-in SVG layout when that extra is not installed.
 - `MENTIPY_CONFIG` overrides the config file location for tests and local runs.
+- Pin-image questions store the lecturer's image bytes content-addressed in a sidecar directory next to the store file (`mentipy.json` → `mentipy-images/<sha256>`, gitignored); the server serves them at `/<prefix>/image` unconditionally — `allow_images` only guards respondent-chosen images in open answers.
+- Pin-text questions with `language="latex"` run pandoc once at registration (`latex.pin_text`) and cache the HTML in the question dict; pandoc is an optional system dependency, and a missing one degrades to highlighted source with a warning. Unit tests monkeypatch the subprocess call, so CI never needs pandoc.
+- The pin form's click-capture script in `server.nw` is the only JavaScript in the project; it interpolates only integer/boolean literals, never user text.
 
 ## Commit hygiene for this repo
 

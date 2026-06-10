@@ -42,10 +42,19 @@ from pygments.util import ClassNotFound
 from mentipy.questions import (
     MCQuestion,
     OpenQuestion,
+    PIN_COMMENT_MAX_CHARS,
+    PIN_QUESTIONS,
+    PinImageQuestion,
+    PinTextQuestion,
+    RankingQuestion,
     ScaleQuestion,
     WordCloudQuestion,
+    bin_pins,
+    pin_heat_color,
+    smooth_pin_grid,
+    sniff_image_mime,
 )
-from mentipy.store import Store
+from mentipy.store import DEFAULT_HEATMAP_BINS, Store
 @
 
 \section{Page shell and shared helpers}
@@ -285,6 +294,44 @@ pre code.highlight {
   margin-left: auto;
 }
 
+.pin-wrap {
+  display: inline-block;
+  margin: 0.5rem 0;
+  max-width: 100%;
+  position: relative;
+}
+.pin-wrap > img,
+.pin-wrap > .pin-content {
+  display: block;
+  margin: 0;
+}
+.pin-wrap > img {
+  max-width: 100%;
+}
+.pin-marker {
+  background: rgba(220, 53, 69, 0.85);
+  border: 1px solid white;
+  border-radius: 50%;
+  cursor: pointer;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  position: absolute;
+  width: 14px;
+}
+.pin-overlay {
+  height: 100%;
+  left: 0;
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  width: 100%;
+}
+#pin-fields input[type="text"] {
+  display: block;
+  margin: 0.5rem 0;
+  width: 100%;
+}
+
 @media (min-width: 40rem) {
   main {
     margin: 2rem auto;
@@ -473,7 +520,11 @@ Open and word-cloud questions both carry text bodies bounded by
 and leave a little multipart framing slack on top.  The slack is
 unnecessary for word-cloud posts (they use plain URL encoding rather
 than multipart), but reusing the same headroom is cheaper than carving
-out a second formula for a few hundred bytes.
+out a second formula for a few hundred bytes.  A pin post carries up to
+[[max_pins]] comment fields plus a few dozen bytes of coordinates and
+field names per pin, so its budget scales with the pin cap --- without
+this arm a generously capped, commented pin form could legitimately
+exceed the floor and get a spurious 413.
 
 <<functions>>=
 
@@ -481,6 +532,8 @@ out a second formula for a few hundred bytes.
 def _max_request_body(question) -> int:
     if isinstance(question, (OpenQuestion, WordCloudQuestion)):
         max_chars = question.max_chars
+    elif isinstance(question, PIN_QUESTIONS):
+        max_chars = question.max_pins * (PIN_COMMENT_MAX_CHARS + 64)
     else:
         max_chars = 0
     return max(
@@ -502,6 +555,32 @@ a hundred tokens from one respondent or treat the whole file body as a
 single token, neither of which matches what authors mean by a
 word-cloud poll.  The arm therefore reads only the textarea value,
 enforces [[max_chars]] directly, and returns the raw string.
+
+Ranking questions do not use the shared [[value]] field at all.  The
+no-JavaScript form gives each option its own rank dropdown named
+[[rank_]] followed by the option index ([[rank_0]], [[rank_1]], and so
+on), so the parser reads one field per option and reassembles the chosen
+positions into the best-first index list the store expects.
+We reject the answer unless the chosen positions are exactly
+$1\ldots m$ with no gaps or repeats: a respondent who put two items at
+\enquote{rank 1} or skipped from 1 to 3 has produced something that is
+not an ordering, and silently renumbering it would record a preference
+they did not express.  A full ranking ([[top_n]] is [[None]]) must fill
+every position; a [[top_n]] poll may stop early but never rank more than
+the cap.
+
+Pin questions arrive as indexed field triples --- [[pin_0_x]],
+[[pin_0_y]], [[pin_0_comment]], then [[pin_1_x]] and so on --- written
+by the form's script.  The parser loops over exactly
+[[range(max_pins)]] indices, which enforces the pin cap by
+construction: a crafted client can post [[pin_999_x]] all it likes, the
+loop never reads it.  Coordinates must parse as floats inside the
+closed unit interval; the interval check doubles as the [[NaN]] and
+infinity rejection because neither satisfies a closed-interval
+comparison.  Comments are only accepted when the question opted in and
+are dropped when empty, mirroring the store's normalisation, so a
+malicious or buggy client cannot smuggle prose into a question that
+never asked for it.
 
 <<functions>>=
 
@@ -564,6 +643,66 @@ def _parse_answer(question, fields: dict[str, list[str]]) -> Any:
         if len(text) > question.max_chars:
             raise ValueError("text answer too long")
         return text
+
+    if isinstance(question, RankingQuestion):
+        option_count = len(question.options)
+        limit = (
+            question.top_n if question.top_n is not None else option_count
+        )
+        ranked = []
+        for index in range(option_count):
+            raw = fields.get(f"rank_{index}", [""])[0].strip()
+            if not raw:
+                continue
+            try:
+                rank = int(raw)
+            except ValueError:
+                raise ValueError("ranking positions must be whole numbers")
+            ranked.append((rank, index))
+        if not ranked:
+            raise ValueError("rank at least one option")
+        if len(ranked) > limit:
+            raise ValueError("you ranked more options than allowed")
+        positions = sorted(rank for rank, _ in ranked)
+        if positions != list(range(1, len(positions) + 1)):
+            raise ValueError(
+                "use each position once, starting at 1 with no gaps"
+            )
+        if question.top_n is None and len(ranked) != option_count:
+            raise ValueError("rank every option")
+        ranked.sort()
+        return [index for _, index in ranked]
+
+    if isinstance(question, PIN_QUESTIONS):
+        pins = []
+        for index in range(question.max_pins):
+            raw_x = fields.get(f"pin_{index}_x", [""])[0].strip()
+            raw_y = fields.get(f"pin_{index}_y", [""])[0].strip()
+            comment = fields.get(
+                f"pin_{index}_comment", [""]
+            )[0].strip()
+            if not raw_x and not raw_y:
+                continue
+            try:
+                x = float(raw_x)
+                y = float(raw_y)
+            except ValueError:
+                raise ValueError("pin coordinates must be numbers")
+            if not (0 <= x <= 1 and 0 <= y <= 1):
+                raise ValueError("pin coordinates must lie in [0, 1]")
+            pin = {"x": round(x, 4), "y": round(y, 4)}
+            if comment:
+                if not question.allow_comment:
+                    raise ValueError(
+                        "this question does not accept pin comments"
+                    )
+                if len(comment) > PIN_COMMENT_MAX_CHARS:
+                    raise ValueError("pin comment too long")
+                pin["comment"] = comment
+            pins.append(pin)
+        if not pins:
+            raise ValueError("place at least one pin")
+        return pins
 
     values = fields.get("value", [])
     if len(values) != 1:
@@ -880,6 +1019,169 @@ def test_parse_answer_requires_exactly_one_scale_value():
         server_module._parse_answer(question, {"value": ["1", "2"]})
 @
 
+Ranking submissions arrive as one [[rank_]] field per option, named with
+the option index.  A valid full ordering reassembles into the best-first
+index list the store records, so position $1$ becomes the first index
+returned.
+
+<<test functions>>=
+def test_parse_answer_reassembles_a_full_ranking_best_first():
+    question = RankingQuestion("Rank these", ("A", "B", "C"))
+
+    answer = server_module._parse_answer(
+        question, {"rank_0": ["2"], "rank_1": ["1"], "rank_2": ["3"]}
+    )
+
+    assert answer == [1, 0, 2]
+@
+
+A ranking is only an ordering if the chosen positions are $1\ldots m$ with
+no gaps or repeats, so a duplicated position is rejected rather than
+silently broken.
+
+<<test functions>>=
+def test_parse_answer_rejects_repeated_ranking_positions():
+    question = RankingQuestion("Rank these", ("A", "B", "C"))
+
+    with pytest.raises(ValueError, match="position"):
+        server_module._parse_answer(
+            question, {"rank_0": ["1"], "rank_1": ["1"], "rank_2": ["2"]}
+        )
+@
+
+A full ranking must cover every option; leaving one blank is an
+incomplete ordering, not a partial one.
+
+<<test functions>>=
+def test_parse_answer_requires_every_option_in_a_full_ranking():
+    question = RankingQuestion("Rank these", ("A", "B", "C"))
+
+    with pytest.raises(ValueError, match="every option"):
+        server_module._parse_answer(
+            question, {"rank_0": ["1"], "rank_1": ["2"], "rank_2": [""]}
+        )
+@
+
+A [[top_n]] poll accepts a short answer but never one longer than the cap.
+
+<<test functions>>=
+def test_parse_answer_honours_the_ranking_top_n_cap():
+    question = RankingQuestion("Rank these", ("A", "B", "C"), top_n=2)
+
+    assert server_module._parse_answer(
+        question, {"rank_0": [""], "rank_1": ["1"], "rank_2": ["2"]}
+    ) == [1, 2]
+
+    with pytest.raises(ValueError, match="more options than allowed"):
+        server_module._parse_answer(
+            question,
+            {"rank_0": ["1"], "rank_1": ["2"], "rank_2": ["3"]},
+        )
+@
+
+The pin parser reassembles the indexed field triples, skips wholly
+absent indices (a removed pin leaves a gap only until the form's script
+rebuilds, but a crafted client may post gaps directly), and rounds
+coordinates to the four decimals the form's script also emits.
+
+<<test functions>>=
+def test_parse_answer_collects_pins_with_optional_comments():
+    question = PinTextQuestion(
+        "Pin the bug", "total =+ x", max_pins=3, allow_comment=True
+    )
+
+    answer = server_module._parse_answer(
+        question,
+        {
+            "pin_0_x": ["0.123456"],
+            "pin_0_y": ["0"],
+            "pin_0_comment": ["here"],
+            "pin_2_x": ["1"],
+            "pin_2_y": ["0.5"],
+            "pin_2_comment": [""],
+        },
+    )
+
+    assert answer == [
+        {"x": 0.1235, "y": 0.0, "comment": "here"},
+        {"x": 1.0, "y": 0.5},
+    ]
+@
+
+Out-of-range, non-numeric and not-a-number coordinates all fail with a
+respondent-readable message; so does an empty submission.
+
+<<test functions>>=
+def test_parse_answer_rejects_bad_pin_coordinates():
+    question = PinTextQuestion("Pin the bug", "total =+ x")
+
+    with pytest.raises(ValueError, match="lie in"):
+        server_module._parse_answer(
+            question, {"pin_0_x": ["1.5"], "pin_0_y": ["0.5"]}
+        )
+    with pytest.raises(ValueError, match="numbers"):
+        server_module._parse_answer(
+            question, {"pin_0_x": ["abc"], "pin_0_y": ["0.5"]}
+        )
+    with pytest.raises(ValueError, match="lie in"):
+        server_module._parse_answer(
+            question, {"pin_0_x": ["nan"], "pin_0_y": ["0.5"]}
+        )
+    with pytest.raises(ValueError, match="at least one pin"):
+        server_module._parse_answer(question, {})
+@
+
+The [[range(max_pins)]] loop is the pin cap: indices beyond the cap are
+never read, so a crafted client cannot exceed the contract however many
+fields it posts.
+
+<<test functions>>=
+def test_parse_answer_ignores_pin_fields_beyond_the_cap():
+    question = PinTextQuestion("Pin the bug", "total =+ x")
+
+    answer = server_module._parse_answer(
+        question,
+        {
+            "pin_0_x": ["0.1"],
+            "pin_0_y": ["0.1"],
+            "pin_1_x": ["0.9"],
+            "pin_1_y": ["0.9"],
+        },
+    )
+
+    assert answer == [{"x": 0.1, "y": 0.1}]
+@
+
+Comments on a question that never allowed them are rejected, and the
+length cap holds even when they are allowed.
+
+<<test functions>>=
+def test_parse_answer_polices_pin_comments():
+    closed = PinTextQuestion("Pin the bug", "total =+ x")
+    with pytest.raises(ValueError, match="does not accept"):
+        server_module._parse_answer(
+            closed,
+            {
+                "pin_0_x": ["0.5"],
+                "pin_0_y": ["0.5"],
+                "pin_0_comment": ["hi"],
+            },
+        )
+
+    open_comments = PinTextQuestion(
+        "Pin the bug", "total =+ x", allow_comment=True
+    )
+    with pytest.raises(ValueError, match="too long"):
+        server_module._parse_answer(
+            open_comments,
+            {
+                "pin_0_x": ["0.5"],
+                "pin_0_y": ["0.5"],
+                "pin_0_comment": ["x" * 281],
+            },
+        )
+@
+
 \section{Rendering question forms}
 
 <<functions>>=
@@ -984,6 +1286,12 @@ def _render_form(store: Store, full_hash: str) -> str:
             "<button type=\"submit\">Submit</button></form>"
         )
 
+    if isinstance(question, RankingQuestion):
+        return _render_ranking_form(question, prefix)
+
+    if isinstance(question, PIN_QUESTIONS):
+        return _render_pin_form(question, prefix)
+
     inputs = "".join(
         f'<label><input type="radio" name="value" value="{value}"> '
         f"{value}</label>"
@@ -1008,6 +1316,226 @@ def _render_form(store: Store, full_hash: str) -> str:
 
 @
 
+The ranking form is the only one that needs no JavaScript yet still
+captures an ordering: each option gets its own position dropdown named to
+match the [[rank_]] fields the parser reads, one per option index.  Plain
+HTML selects keep
+the form usable on a phone and degrade gracefully without scripting, at
+the cost of letting a respondent pick the same position twice --- which is
+exactly why [[_parse_answer]] revalidates the positions server-side rather
+than trusting the widget.  Each dropdown offers a blank entry so an option
+can stay unranked, and the position range stops at [[top_n]] so a capped
+poll never offers a rank a respondent is not allowed to use.  We wrap each
+option in a block-level row so the choices stack vertically without any
+new stylesheet rules.
+
+<<functions>>=
+def _render_ranking_form(question: RankingQuestion, prefix: str) -> str:
+    option_count = len(question.options)
+    limit = (
+        question.top_n if question.top_n is not None else option_count
+    )
+    positions = "".join(
+        f'<option value="{rank}">{rank}</option>'
+        for rank in range(1, limit + 1)
+    )
+    rows = "".join(
+        f'<div class="rank-row">'
+        f'<select name="rank_{index}">'
+        f'<option value="">—</option>{positions}</select> '
+        f"{escape(option)}</div>"
+        for index, option in enumerate(question.options)
+    )
+    if question.top_n is None:
+        instructions = "<p>Give every option a position.</p>"
+    else:
+        instructions = f"<p>Rank your top {question.top_n}.</p>"
+    return (
+        f"<p>{escape(question.text)}</p>"
+        f"{instructions}"
+        f'<form method="post" action="/{prefix}">{rows}'
+        '<button type="submit">Submit</button></form>'
+    )
+@
+
+\subsection{Pin targets and forms}
+
+Both pin forms and both pin results pages show the same \emph{target},
+so its renderer is shared.  For an image question the target is an
+[[<img>]] pointing at the bytes route, which keeps the HTML small and
+lets the browser cache the picture across the form and the results
+page.  For a text question the target depends on the presentation
+fields: a cached pandoc rendering is inserted as-is --- it is the
+lecturer's own slide content passed through pandoc at registration, the
+same trust level as the served image --- otherwise a [[language]] is
+highlighted through the same Pygments path the open-answer renderer
+uses, and plain prose is escaped.  The Pygments helper returns an empty
+string for lexer names it does not know, in which case we fall back to
+an escaped [[<pre>]] so unknown languages still render their content
+safely.  This fallback also covers a [[latex]]-mode question whose
+registration ran without pandoc: Pygments knows a [[latex]] lexer, so
+respondents see highlighted source rather than nothing.
+
+<<functions>>=
+def _render_pin_target(question, prefix: str) -> str:
+    if isinstance(question, PinImageQuestion):
+        return (
+            f'<img class="pin-target" src="/{prefix}/image" alt="">'
+        )
+    if question.content_html:
+        content = question.content_html
+    elif question.language:
+        content = _highlight_code(
+            question.content, question.language, ""
+        ) or f"<pre>{escape(question.content)}</pre>"
+    else:
+        content = f"<p>{escape(question.content)}</p>"
+    return (
+        '<div class="pin-target pin-content">' + content + "</div>"
+    )
+@
+
+The pin form is the first scripted page in mentipy, because capturing a
+click position is the one input no plain HTML control can express.  The
+script stays minimal and framework-free to match the
+standard-library-only server: it records clicks as coordinates
+normalised against [[getBoundingClientRect()]] --- so a pin means the
+same thing on a phone and on the projector --- mirrors them into hidden
+[[pin_<i>_x]]/[[pin_<i>_y]] inputs that POST as an ordinary urlencoded
+form, and draws a marker per pin.  Tapping a marker removes its pin;
+with a single-pin question every click simply moves the pin, which
+saves respondents a remove-then-add dance on the most common
+configuration.  Comment inputs appear per placed pin only when the
+question allows them.  The [[<noscript>]] notice is honest rather than
+graceful: there is no degraded coordinate entry that would be worth a
+respondent's time during a live lecture.
+
+Only the integer pin cap, a boolean and the integer comment cap are
+interpolated into the script --- never any user- or lecturer-authored
+text --- so the page's script-injection surface does not grow with the
+question content.
+
+<<functions>>=
+def _render_pin_form(question, prefix: str) -> str:
+    if question.max_pins == 1:
+        instructions = "<p>Tap the target to place your pin.</p>"
+    else:
+        instructions = (
+            f"<p>Tap the target to place up to {question.max_pins} "
+            "pins; tap a pin to remove it.</p>"
+        )
+    return (
+        f"<p>{escape(question.text)}</p>"
+        f"{instructions}"
+        "<noscript><p>This question needs JavaScript to record "
+        "where you tap.</p></noscript>"
+        f'<form method="post" action="/{prefix}">'
+        '<div class="pin-wrap">'
+        + _render_pin_target(question, prefix)
+        + "</div>"
+        '<div id="pin-fields"></div>'
+        '<button type="submit">Submit</button></form>'
+        + _render_pin_script(question)
+    )
+
+
+def _render_pin_script(question) -> str:
+    return PIN_SCRIPT_TEMPLATE.substitute(
+        max_pins=question.max_pins,
+        allow_comment="true" if question.allow_comment else "false",
+        comment_max=PIN_COMMENT_MAX_CHARS,
+    )
+@
+
+The script keeps one [[pins]] array as the source of truth and rebuilds
+the markers and hidden inputs from it after every change.  Rebuilding
+wholesale instead of patching incrementally keeps the field indices
+contiguous from zero, which is the contract the parser's
+[[range(max_pins)]] loop relies on after a mid-list removal.  The
+per-pin event listeners receive the index as a function parameter, so
+each closure captures its own value rather than the loop variable.
+
+<<constants>>=
+PIN_SCRIPT_TEMPLATE = Template(
+    """<script>
+(function () {
+  var wrap = document.querySelector(".pin-wrap");
+  var target = document.querySelector(".pin-target");
+  var fields = document.getElementById("pin-fields");
+  var maxPins = $max_pins;
+  var allowComment = $allow_comment;
+  var pins = [];
+
+  function addMarker(index) {
+    var marker = document.createElement("span");
+    marker.className = "pin-marker";
+    marker.style.left = (pins[index].x * 100) + "%";
+    marker.style.top = (pins[index].y * 100) + "%";
+    marker.title = "Tap to remove";
+    marker.addEventListener("click", function (event) {
+      event.stopPropagation();
+      pins.splice(index, 1);
+      rebuild();
+    });
+    wrap.appendChild(marker);
+  }
+
+  function addFields(index) {
+    var x = document.createElement("input");
+    x.type = "hidden";
+    x.name = "pin_" + index + "_x";
+    x.value = pins[index].x.toFixed(4);
+    fields.appendChild(x);
+    var y = document.createElement("input");
+    y.type = "hidden";
+    y.name = "pin_" + index + "_y";
+    y.value = pins[index].y.toFixed(4);
+    fields.appendChild(y);
+    if (allowComment) {
+      var comment = document.createElement("input");
+      comment.type = "text";
+      comment.name = "pin_" + index + "_comment";
+      comment.maxLength = $comment_max;
+      comment.placeholder =
+        "Comment on pin " + (index + 1) + " (optional)";
+      comment.value = pins[index].comment || "";
+      comment.addEventListener("input", function (event) {
+        pins[index].comment = event.target.value;
+      });
+      fields.appendChild(comment);
+    }
+  }
+
+  function rebuild() {
+    fields.innerHTML = "";
+    var markers = wrap.querySelectorAll(".pin-marker");
+    for (var i = 0; i < markers.length; i++) {
+      wrap.removeChild(markers[i]);
+    }
+    for (var i = 0; i < pins.length; i++) {
+      addMarker(i);
+      addFields(i);
+    }
+  }
+
+  target.addEventListener("click", function (event) {
+    var rect = target.getBoundingClientRect();
+    var x = (event.clientX - rect.left) / rect.width;
+    var y = (event.clientY - rect.top) / rect.height;
+    x = Math.min(Math.max(x, 0), 1);
+    y = Math.min(Math.max(y, 0), 1);
+    if (maxPins === 1) {
+      pins = [{x: x, y: y}];
+    } else if (pins.length < maxPins) {
+      pins.push({x: x, y: y});
+    }
+    rebuild();
+  });
+})();
+</script>"""
+)
+@
+
 The open-question form keeps both inputs visible because respondents may need
 to pair a short explanation with an uploaded artifact.  We pin the multipart
 encoding and the field names directly on the renderer so the browser and the
@@ -1026,10 +1554,198 @@ def test_open_form_uses_multipart_and_renders_both_inputs(tmp_path):
     assert 'name="file"' in rendered
 @
 
+The ranking form gives each option its own position dropdown.  We pin the
+per-option field names and the absence of any script tag, since the
+no-JavaScript guarantee is the whole point of the dropdown design.
+
+<<test functions>>=
+def test_ranking_form_renders_one_select_per_option_without_js(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(
+        RankingQuestion("Rank these", ("A", "B", "C"))
+    )
+    full_hash = store.resolve(prefix)
+
+    rendered = server_module._render_form(store, full_hash)
+
+    assert rendered.count("<select") == 3
+    assert 'name="rank_0"' in rendered
+    assert 'name="rank_2"' in rendered
+    assert "<script" not in rendered
+@
+
+A capped poll must not offer a position beyond [[top_n]], otherwise the
+form would invite an answer the parser then rejects.
+
+<<test functions>>=
+def test_ranking_form_caps_positions_at_top_n(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(
+        RankingQuestion("Rank these", ("A", "B", "C"), top_n=2)
+    )
+    full_hash = store.resolve(prefix)
+
+    rendered = server_module._render_form(store, full_hash)
+
+    assert '<option value="2">2</option>' in rendered
+    assert '<option value="3">3</option>' not in rendered
+@
+
+The pin-image form must contain all three moving parts: the image tag
+pointing at the bytes route, the capture script, and the honest
+no-JavaScript notice.  Only the pin cap reaches the script, so we also
+pin that the interpolation produced the integer we expect.
+
+<<test functions>>=
+
+PNG_SAMPLE = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+
+
+def test_pin_image_form_renders_image_script_and_noscript(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    question = PinImageQuestion.from_image_bytes(
+        "Pin the bug", PNG_SAMPLE, max_pins=3
+    )
+    prefix = store.register(question)
+    full_hash = store.resolve(prefix)
+
+    rendered = server_module._render_form(store, full_hash)
+
+    assert f'src="/{prefix}/image"' in rendered
+    assert "<script>" in rendered
+    assert "var maxPins = 3;" in rendered
+    assert "<noscript>" in rendered
+@
+
+The pin-text form renders the content as the clickable target.  A code
+language goes through the same Pygments path as open answers, a cached
+pandoc rendering is inserted as-is, and prose is escaped.
+
+<<test functions>>=
+def test_pin_text_form_highlights_code_targets(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    question = PinTextQuestion(
+        "Pin the bug", "total =+ x", language="python"
+    )
+    full_hash = store.resolve(store.register(question))
+
+    rendered = server_module._render_form(store, full_hash)
+
+    assert 'class="pin-target pin-content"' in rendered
+    assert "highlight" in rendered
+    assert "<img" not in rendered
+@
+
+<<test functions>>=
+def test_pin_text_form_inserts_cached_html_and_escapes_prose(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    typeset = PinTextQuestion(
+        "Pin the error",
+        r"\[ x \]",
+        language="latex",
+        content_html="<p><math>x</math></p>",
+    )
+    prose = PinTextQuestion("Pin the claim", "1 < 2 is <obvious>")
+    typeset_hash = store.resolve(store.register(typeset))
+    prose_hash = store.resolve(store.register(prose))
+
+    typeset_form = server_module._render_form(store, typeset_hash)
+    prose_form = server_module._render_form(store, prose_hash)
+
+    assert "<p><math>x</math></p>" in typeset_form
+    assert "&lt;obvious&gt;" in prose_form
+    assert "<obvious>" not in prose_form
+@
+
+Comment inputs are a per-question opt-in, and the script learns about it
+through the one boolean we interpolate.
+
+<<test functions>>=
+def test_pin_form_threads_the_comment_flag_into_the_script(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    with_comments = PinTextQuestion(
+        "Pin it", "total =+ x", allow_comment=True
+    )
+    without = PinTextQuestion("Pin it", "total =+ x")
+    with_hash = store.resolve(store.register(with_comments))
+    without_hash = store.resolve(store.register(without))
+
+    assert "var allowComment = true;" in server_module._render_form(
+        store, with_hash
+    )
+    assert "var allowComment = false;" in server_module._render_form(
+        store, without_hash
+    )
+@
+
+The pin results page shows the dot overlay, the blurred heatmap and the
+escaped comments.  The comment contains markup on purpose: it must come
+back HTML-escaped, never live.  The three pins land two-on-one-cell and
+one-on-another, far enough apart that their smoothed neighbourhoods do
+not overlap, so the cell centres keep the raw 2:1 ratio: the heatmap
+must paint the busy centre fully hot and the single-pin centre with the
+half-way colour of the spectrum ramp.  The per-pin dot overlay is gone
+on purpose, so the absence of any [[<circle>]] is part of the contract.
+
+<<test functions>>=
+def test_pin_results_show_heatmap_and_escaped_comments(
+    tmp_path,
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    question = PinTextQuestion(
+        "Pin the bug", "total =+ x", max_pins=2, allow_comment=True
+    )
+    full_hash = store.resolve(store.register(question))
+    store.record(
+        full_hash,
+        [
+            {"x": 0.25, "y": 0.75, "comment": "<b>bold</b> claim"},
+            {"x": 0.75, "y": 0.25},
+        ],
+    )
+    store.record(full_hash, [{"x": 0.25, "y": 0.75}])
+
+    rendered = server_module._render_results(store, full_hash)
+
+    assert "Total pins: <strong>3</strong>" in rendered
+    assert "<circle" not in rendered
+    assert "feGaussianBlur" in rendered
+    hot = pin_heat_color(1.0)
+    halfway = pin_heat_color(0.5)
+    assert hot == "#dc3545"
+    assert f'fill="{hot}"' in rendered
+    assert f'fill="{halfway}"' in rendered
+    assert "&lt;b&gt;bold&lt;/b&gt; claim" in rendered
+    assert "<b>bold</b>" not in rendered
+@
+
+The ranking results page lists options best-first and labels each with its
+mean rank, so a lecturer reads the room's consensus order top to bottom.
+
+<<test functions>>=
+def test_ranking_results_lists_options_best_first(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(
+        RankingQuestion("Rank these", ("A", "B", "C"))
+    )
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, [2, 0, 1])
+    store.record(full_hash, [2, 1, 0])
+
+    rendered = server_module._render_results(store, full_hash)
+
+    assert rendered.index(">C<") < rendered.index(">A<")
+    assert rendered.index(">C<") < rendered.index(">B<")
+    assert "avg 1.0" in rendered
+@
+
 The word-cloud form test pins the opposite contract: no multipart, no
 file input.  The two complementary tests together protect the parser
 and form from drifting apart --- a future refactor that accidentally
-adds a file picker to word-cloud forms would fail here loudly.
+adds a file picker to word-cloud forms would fail here loudly.  The
+test also pins the [[maxlength]] attribute, so the browser-side limit
+stays in step with the [[max_chars]] bound the store enforces when the
+answer is recorded.
 
 <<test functions>>=
 def test_wordcloud_form_uses_plain_encoding_and_renders_one_textarea(
@@ -1048,6 +1764,12 @@ def test_wordcloud_form_uses_plain_encoding_and_renders_one_textarea(
     assert 'name="value"' in rendered
     assert 'maxlength="200"' in rendered
 @
+
+Together, these form tests pin every contract the answer parser depends
+on: the field names, the encoding, and the bounds each widget advertises
+to the browser.  A change that lets the rendered form and
+[[_parse_answer]] drift apart should fail one of them before it ever
+confuses a respondent.
 
 \section{Rendering results}
 
@@ -1990,6 +2712,222 @@ def test_render_question_nav_wraps_links_in_book_order(tmp_path):
 
 \subsection{Dispatching by question type}
 
+A ranking result is a single bar per option, ordered best-first, where
+the bar length encodes consensus rather than a count: a low mean rank
+means the room agreed the item belongs near the top, so we map a mean of
+$1$ to a full bar and a mean of $N$ to the shortest.  Inverting the mean
+this way lets the same horizontal bar idiom carry \enquote{ranked highest}
+without a reader having to remember that, unlike every other chart on the
+site, a \emph{shorter} bar would be better.  Options that no one ranked
+have no mean, so they render as an empty bar labelled accordingly and sort
+to the end via the store's [[order]].  We reuse the existing bar-chart CSS
+classes directly instead of routing through [[_render_bar_chart]], because
+that helper's count-and-percentage label does not fit a mean-rank summary.
+
+<<functions>>=
+def _render_ranking_stats(
+    question: RankingQuestion, summary: dict[str, Any]
+) -> str:
+    option_count = len(question.options)
+    mean_ranks = summary["mean_ranks"]
+    rank_counts = summary["rank_counts"]
+    rows = []
+    for index in summary["order"]:
+        mean = mean_ranks[index]
+        if mean is None:
+            width = 0.0
+            detail = "not ranked"
+        else:
+            width = (option_count - mean + 1) / option_count * 100
+            detail = f"avg {mean:.1f}, {rank_counts[index]} ranked"
+        rows.append(
+            f'<div class="bar-row">'
+            f'<span class="bar-label">'
+            f'{escape(question.options[index])}</span>'
+            f'<span class="bar-bar">'
+            f'<span class="bar-fill" style="width:{width:.1f}%"></span>'
+            f'</span>'
+            f'<span class="bar-count">{detail}</span>'
+            f'</div>'
+        )
+    return '<div class="bar-chart">' + "".join(rows) + '</div>'
+@
+
+A pin result is spatial, and the page shows it as a single density
+heatmap stretched over the target.  An earlier iteration also drew
+every individual pin as a translucent dot in a second copy of the
+target, but normalising the heatmap against its smoothed peak made the
+dot view redundant --- sparse results now render as fully hot blobs
+exactly where the dots would have been --- and the duplicate target
+doubled the page height for no added information.  The heatmap overlay
+is an SVG stretched via [[preserveAspectRatio="none"]]: the drawing
+coordinates are the answers' normalised coordinates scaled to the
+[[viewBox]], so the overlay lines up with the target at any rendered
+size, which is the whole point of storing normalised pins.
+
+The heatmap follows the shared recipe from the questions module ---
+[[bin_pins]], then [[smooth_pin_grid]], then normalise against the
+\emph{smoothed} peak.  The order matters.  An earlier version
+normalised the raw counts and left all smoothing to an SVG gaussian
+blur, which made sparse results nearly invisible: a lecture's first
+half-dozen scattered pins each occupy a single grid cell, and the blur
+\emph{spreads} that one cell's opacity over its neighbourhood, dimming
+the visible peak to almost nothing.  Smoothing server-side and
+normalising afterwards guarantees the densest spot always renders fully
+hot and fully opaque whether six or six hundred pins arrived; the
+remaining SVG blur only softens the blocky cell edges and is too small
+to wash anything out.
+
+Intensity is encoded twice, as \emph{colour} walking the shared
+blue--green--yellow--red ramp ([[pin_heat_color]]) and as opacity
+fading towards the blob edges, so a hotspot reads as a solid red core
+with a cooler halo over a still-visible target.  The opacity fade is
+deliberately \emph{slower} than linear: alpha compositing already
+de-emphasises low values perceptually, so a linear fade makes the halo
+vanish and shrinks each hotspot back to a dot.  Raising the intensity
+to [[PIN_HEATMAP_OPACITY_GAMMA]] (a square root) lifts the mid-range
+--- a cell at half intensity keeps about 70\,\% opacity --- which is
+what makes the halo visible while the colour ramp stays linear and
+truthful.  Scaling against the busiest cell rather than the pin total
+keeps the map readable at any response count.  Cells below a small
+floor of the peak are skipped --- the kernel tails would otherwise
+emit thousands of imperceptible rects.
+
+The grid resolution is the one knob a lecturer may want to turn, so it
+is a configuration setting ([[mentipy.heatmap_bins]], threaded in from
+the CLI) rather than a constant.  Because the kernel width is fixed in
+\emph{cells}, the resolution controls blob size and smoothing
+together: fewer bins make each hotspot larger and chunkier relative to
+the target, more bins localise pins more sharply at the cost of
+smaller blobs.  The default of 32 cells per side makes a lone pin's
+blob cover roughly a fifth of the target's width --- comfortably
+visible from the back of a room --- while still separating hotspots a
+quarter-target apart.
+
+<<constants>>=
+PIN_HEATMAP_KERNEL = (1.0, 2.0, 4.0, 6.0, 4.0, 2.0, 1.0)
+PIN_HEATMAP_MAX_OPACITY = 0.85
+PIN_HEATMAP_OPACITY_GAMMA = 0.5
+PIN_HEATMAP_FLOOR = 0.05
+@
+
+<<functions>>=
+def _pin_heat_opacity(intensity: float) -> str:
+    """Return the fill opacity for a heatmap cell intensity in [0, 1]."""
+
+    faded = intensity ** PIN_HEATMAP_OPACITY_GAMMA
+    return f"{PIN_HEATMAP_MAX_OPACITY * faded:.2f}"
+@
+
+<<functions>>=
+def _render_pin_heatmap(
+    target: str,
+    pins: list[dict[str, Any]],
+    *,
+    bins: int = DEFAULT_HEATMAP_BINS,
+) -> str:
+    grid = smooth_pin_grid(
+        bin_pins(pins, columns=bins, rows=bins),
+        kernel=PIN_HEATMAP_KERNEL,
+    )
+    peak = max(max(row) for row in grid) or 1.0
+    cells = "".join(
+        f'<rect x="{column}" y="{row}" width="1" height="1" '
+        f'fill="{pin_heat_color(value / peak)}" '
+        f'fill-opacity="{_pin_heat_opacity(value / peak)}"/>'
+        for row, columns in enumerate(grid)
+        for column, value in enumerate(columns)
+        if value / peak >= PIN_HEATMAP_FLOOR
+    )
+    return (
+        '<div class="pin-wrap">'
+        + target
+        + '<svg class="pin-overlay" '
+        f'viewBox="0 0 {bins} {bins}" '
+        'preserveAspectRatio="none">'
+        '<defs><filter id="pin-blur">'
+        '<feGaussianBlur stdDeviation="0.5"/></filter></defs>'
+        '<g filter="url(#pin-blur)">'
+        + cells
+        + "</g></svg></div>"
+    )
+@
+
+The sparse case is the regression this design exists for: one single
+pin --- the emptiest possible result --- must still produce a fully
+hot, fully opaque centre cell surrounded by the kernel's fainter halo,
+because normalisation happens after smoothing rather than before.
+
+<<test functions>>=
+def test_pin_heatmap_renders_a_lone_pin_at_full_intensity():
+    rendered = server_module._render_pin_heatmap(
+        "<img>", [{"x": 0.5, "y": 0.5}]
+    )
+
+    hot = pin_heat_color(1.0)
+    assert f'fill="{hot}" fill-opacity="0.85"' in rendered
+    assert rendered.count("<rect") > 1
+@
+
+The configured resolution must reach the SVG grid: the [[viewBox]] is
+the observable trace of [[heatmap_bins]] surviving the trip from the
+results renderer down to the heatmap.
+
+<<test functions>>=
+def test_results_thread_heatmap_bins_into_the_svg_grid(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    question = PinTextQuestion("Pin the bug", "total =+ x")
+    full_hash = store.resolve(store.register(question))
+    store.record(full_hash, [{"x": 0.5, "y": 0.5}])
+
+    default = server_module._render_results(store, full_hash)
+    coarse = server_module._render_results(
+        store, full_hash, heatmap_bins=16
+    )
+
+    assert 'viewBox="0 0 32 32"' in default
+    assert 'viewBox="0 0 16 16"' in coarse
+@
+
+The stats renderer combines the heatmap with the pin total and the
+collected comments.  Comments are HTML-escaped --- they are respondent
+text, exactly the content the hardening work routes through [[escape]]
+everywhere else.  The pin count headline complements the page-level
+respondent total: a three-pin question with ten respondents and thirty
+pins is healthy, ten respondents and eleven pins tells the lecturer the
+room mostly stopped after one pin.
+
+<<functions>>=
+def _render_pin_stats(
+    question,
+    summary: dict[str, Any],
+    *,
+    heatmap_bins: int = DEFAULT_HEATMAP_BINS,
+) -> str:
+    target = _render_pin_target(question, summary["url_prefix"])
+    parts = [
+        f'<p>Total pins: <strong>{summary["pin_count"]}</strong></p>'
+    ]
+    if summary["pins"]:
+        parts.append(
+            _render_pin_heatmap(
+                target, summary["pins"], bins=heatmap_bins
+            )
+        )
+    comments = [
+        pin["comment"]
+        for pin in summary["pins"]
+        if pin.get("comment")
+    ]
+    if comments:
+        parts.append("<h2>Comments</h2><ul>")
+        parts.extend(
+            f"<li>{escape(comment)}</li>" for comment in comments
+        )
+        parts.append("</ul>")
+    return "".join(parts)
+@
+
 The top-level renderer reads the window-filtered summary from the store
 and dispatches to the per-type helpers.  The window filter sits at the
 top so the lecturer can rescope without scrolling; the total responses
@@ -2001,7 +2939,9 @@ navigation row points: localhost callers land on neighbouring results pages,
 everyone else on the corresponding forms.  The [[allow_images]] keyword is
 threaded straight through to the open-answer renderer so the image policy is
 decided once, by the caller that knows the deployment, rather than rediscovered
-deep in the rendering stack.
+deep in the rendering stack.  [[heatmap_bins]] follows the same route for the
+same reason: it is the configured pin-heatmap resolution, owned by the CLI's
+configuration reading, and the renderer only carries it down to the heatmap.
 
 <<functions>>=
 def _render_results(
@@ -2011,6 +2951,7 @@ def _render_results(
     window: str = "all",
     is_local: bool = False,
     allow_images: bool = False,
+    heatmap_bins: int = DEFAULT_HEATMAP_BINS,
 ) -> str:
     summary = store.results(full_hash, window=window)
     question = store.question(full_hash)
@@ -2052,6 +2993,14 @@ def _render_results(
     elif isinstance(question, WordCloudQuestion):
         parts.append(_render_wordcloud_stats(summary))
         parts.append(_render_wordcloud(question, summary["frequencies"]))
+    elif isinstance(question, RankingQuestion):
+        parts.append(_render_ranking_stats(question, summary))
+    elif isinstance(question, PIN_QUESTIONS):
+        parts.append(
+            _render_pin_stats(
+                question, summary, heatmap_bins=heatmap_bins
+            )
+        )
 
     parts.append(_render_question_nav(store, full_hash, results=is_local))
 
@@ -2147,6 +3096,7 @@ def _build_handler(
     allow_images: bool = False,
     admin_token: str | None = None,
     require_token: bool = False,
+    heatmap_bins: int = DEFAULT_HEATMAP_BINS,
 ):
     class MentipyHandler(BaseHTTPRequestHandler):
         server_version = "mentipy/0.1"
@@ -2162,8 +3112,12 @@ def _build_handler(
 
 The first methods are deliberately mechanical: suppress default request
 logging, check whether an admin-only route comes from localhost, and write
-small UTF-8 responses with explicit lengths.  Keeping these operations as
+small responses with explicit lengths.  Keeping these operations as
 handler-local helpers avoids repeating HTTP header details in every route.
+The byte-level writer exists because the pin-image route serves raw image
+bytes: encoding them through the UTF-8 path would corrupt them, so
+[[_send]] is a thin text wrapper over [[_send_bytes]] and binary routes
+call the latter directly.
 
 Both writers stamp [[Referrer-Policy: no-referrer]] on every response.  The
 admin link carries the token in [[?admin=...]], and a results page may embed a
@@ -2182,15 +3136,14 @@ def log_message(self, *_args):
 def _is_local(self) -> bool:
     return is_local_address(self.client_address[0])
 
-def _send(
+def _send_bytes(
     self,
     status: HTTPStatus,
-    body: str,
+    payload: bytes,
     *,
-    content_type: str = "text/html; charset=utf-8",
+    content_type: str,
     headers: dict[str, str] | None = None,
 ):
-    payload = body.encode("utf-8")
     self.send_response(status)
     self.send_header("Content-Type", content_type)
     self.send_header("Content-Length", str(len(payload)))
@@ -2200,6 +3153,21 @@ def _send(
             self.send_header(name, value)
     self.end_headers()
     self.wfile.write(payload)
+
+def _send(
+    self,
+    status: HTTPStatus,
+    body: str,
+    *,
+    content_type: str = "text/html; charset=utf-8",
+    headers: dict[str, str] | None = None,
+):
+    self._send_bytes(
+        status,
+        body.encode("utf-8"),
+        content_type=content_type,
+        headers=headers,
+    )
 
 def _redirect(self, location: str, *, headers: dict[str, str] | None = None):
     self.send_response(HTTPStatus.SEE_OTHER)
@@ -2359,7 +3327,11 @@ The index and JSON export are presenter-only, the results page is presenter-only
 unless the CLI explicitly enables public results, and ordinary question forms
 are available to anyone who has the URL.  \enquote{Presenter-only} is exactly
 [[_admin_allowed()]]: localhost when running locally, the admin token once a
-tunnel is in play.
+tunnel is in play.  The pin-image bytes route is public like the form it
+belongs to --- the image is the lecturer's own registered slide content,
+not respondent data, so unlike [[allow_images]] (which guards
+\emph{respondent-chosen} image URLs on results pages) there is nothing to
+opt into.
 
 A query-token request is intercepted before any routing: we set the cookie and
 redirect to the de-tokenized URL, so the token is consumed exactly once and no
@@ -2421,6 +3393,9 @@ def _handle_question_get(self, segments: list[str], query: str):
         )
         return
 
+    if len(segments) == 2 and segments[1] == "image":
+        <<serve the registered pin image>>
+
     if len(segments) == 2 and segments[1] == "results":
         if not public_results and not self._admin_allowed():
             self._deny_admin("Results pages are")
@@ -2443,6 +3418,7 @@ def _handle_question_get(self, segments: list[str], query: str):
                     window=window,
                     is_local=self._is_local(),
                     allow_images=allow_images,
+                    heatmap_bins=heatmap_bins,
                 ),
                 refresh=True,
             ),
@@ -2479,6 +3455,40 @@ def _handle_question_get(self, segments: list[str], query: str):
         HTTPStatus.OK,
         _page(title, title, _render_form(store, full_hash)),
     )
+@
+
+Serving the image re-sniffs the stored bytes instead of trusting the
+stored [[image_mime]]: the bytes are the one artefact that cannot lie
+about itself, and re-sniffing keeps a hand-edited store entry from
+relabelling content.  Every failure --- a non-pin question, missing
+sidecar bytes, bytes that no longer sniff as an allowlisted raster
+format --- collapses to the same 404 so a prober learns nothing about
+which step failed.  The response carries
+[[X-Content-Type-Options: nosniff]] so browsers honour the declared
+type instead of running their own content detection, which closes the
+classic disguised-content hole for anything that slips past the
+allowlist in the future.
+
+<<serve the registered pin image>>=
+full_hash = self._resolve(segments[0])
+if full_hash is None:
+    return
+question = store.question(full_hash)
+if not isinstance(question, PinImageQuestion):
+    self.send_error(HTTPStatus.NOT_FOUND)
+    return
+data = store.load_image(question.image_sha256)
+mime = sniff_image_mime(data) if data is not None else None
+if data is None or mime is None:
+    self.send_error(HTTPStatus.NOT_FOUND)
+    return
+self._send_bytes(
+    HTTPStatus.OK,
+    data,
+    content_type=mime,
+    headers={"X-Content-Type-Options": "nosniff"},
+)
+return
 @
 
 Submitting an answer is the only mutating route.  It first limits the request
@@ -2556,6 +3566,7 @@ def create_server(
     allow_images: bool = False,
     admin_token: str | None = None,
     require_token: bool = False,
+    heatmap_bins: int = DEFAULT_HEATMAP_BINS,
 ) -> ThreadingHTTPServer:
     """Return a configured mentipy HTTP server."""
 
@@ -2567,6 +3578,7 @@ def create_server(
             allow_images=allow_images,
             admin_token=admin_token,
             require_token=require_token,
+            heatmap_bins=heatmap_bins,
         ),
     )
 @
@@ -2585,6 +3597,7 @@ def serve(
     allow_images: bool = False,
     admin_token: str | None = None,
     require_token: bool = False,
+    heatmap_bins: int = DEFAULT_HEATMAP_BINS,
 ):
     """Run the mentipy HTTP server until interrupted."""
 
@@ -2596,6 +3609,7 @@ def serve(
         allow_images=allow_images,
         admin_token=admin_token,
         require_token=require_token,
+        heatmap_bins=heatmap_bins,
     )
     try:
         server.serve_forever()
@@ -2760,6 +3774,103 @@ def _running_server(store, *, public_results=False):
         server.shutdown()
         thread.join()
         server.server_close()
+@
+
+[[_request]] decodes every response as UTF-8, which would mangle the
+image route's raw bytes, so the binary surface gets its own helper that
+returns the payload untouched.
+
+<<test functions>>=
+def _request_bytes(port, method, path):
+    connection = http.client.HTTPConnection(
+        "127.0.0.1", port, timeout=5
+    )
+    connection.request(method, path)
+    response = connection.getresponse()
+    payload = response.read()
+    connection.close()
+    return response, payload
+@
+
+The image route must hand back the registered bytes with the sniffed
+content type and the [[nosniff]] header --- byte-for-byte, since a
+browser will paint them.
+
+<<test functions>>=
+def test_image_route_serves_the_registered_bytes(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    question = PinImageQuestion.from_image_bytes(
+        "Pin the bug", PNG_SAMPLE
+    )
+    prefix = store.register(question)
+    store.save_image(PNG_SAMPLE)
+
+    with _running_server(store) as port:
+        response, payload = _request_bytes(
+            port, "GET", f"/{prefix}/image"
+        )
+
+    assert response.status == 200
+    assert response.getheader("Content-Type") == "image/png"
+    assert response.getheader("X-Content-Type-Options") == "nosniff"
+    assert payload == PNG_SAMPLE
+@
+
+Every failure mode --- a question that is not a pin-image, and a
+pin-image whose sidecar bytes are missing --- must collapse to the same
+404 so the route leaks nothing about which check failed.
+
+<<test functions>>=
+def test_image_route_404s_for_non_pin_and_missing_bytes(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    open_prefix = store.register(OpenQuestion("Comment?"))
+    orphan = PinImageQuestion.from_image_bytes(
+        "Pin the bug", PNG_SAMPLE
+    )
+    orphan_prefix = store.register(orphan)
+
+    with _running_server(store) as port:
+        not_pin, _payload = _request_bytes(
+            port, "GET", f"/{open_prefix}/image"
+        )
+        no_bytes, _payload = _request_bytes(
+            port, "GET", f"/{orphan_prefix}/image"
+        )
+
+    assert not_pin.status == 404
+    assert no_bytes.status == 404
+@
+
+A pin submission travels the ordinary urlencoded POST path end to end:
+the indexed fields parse, the store records the normalised pins, and
+the respondent lands on the thanks page.
+
+<<test functions>>=
+def test_pin_post_records_pins_end_to_end(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    question = PinTextQuestion(
+        "Pin the bug", "total =+ x", max_pins=2, allow_comment=True
+    )
+    prefix = store.register(question)
+    full_hash = store.resolve(prefix)
+
+    with _running_server(store) as port:
+        response, _body = _request(
+            port,
+            "POST",
+            f"/{prefix}",
+            body="pin_0_x=0.25&pin_0_y=0.75&pin_0_comment=here",
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded"
+            },
+        )
+
+    assert response.status == 303
+    assert response.getheader("Location") == f"/{prefix}/thanks"
+    [answer] = store.results(full_hash)["answers"]
+    assert answer["value"] == [
+        {"x": 0.25, "y": 0.75, "comment": "here"}
+    ]
 @
 
 We first pin the localhost guard explicitly by faking the client address on the
