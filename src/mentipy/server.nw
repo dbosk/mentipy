@@ -52,7 +52,7 @@ from mentipy.questions import (
     bin_pins,
     sniff_image_mime,
 )
-from mentipy.store import Store
+from mentipy.store import DEFAULT_HEATMAP_BINS, Store
 @
 
 \section{Page shell and shared helpers}
@@ -2817,9 +2817,18 @@ heatmap reads as part of the same palette.  Cells below a small floor
 of the peak are skipped --- the kernel tails would otherwise emit
 thousands of imperceptible rects.
 
+The grid resolution is the one knob a lecturer may want to turn, so it
+is a configuration setting ([[mentipy.heatmap_bins]], threaded in from
+the CLI) rather than a constant.  Because the kernel width is fixed in
+\emph{cells}, the resolution controls blob size and smoothing
+together: fewer bins make each hotspot larger and chunkier relative to
+the target, more bins localise pins more sharply at the cost of
+smaller blobs.  The default of 32 cells per side makes a lone pin's
+blob cover roughly a fifth of the target's width --- comfortably
+visible from the back of a room --- while still separating hotspots a
+quarter-target apart.
+
 <<constants>>=
-PIN_HEATMAP_COLUMNS = 64
-PIN_HEATMAP_ROWS = 64
 PIN_HEATMAP_COLD_RGB = (74, 144, 217)
 PIN_HEATMAP_HOT_RGB = (220, 53, 69)
 PIN_HEATMAP_KERNEL = (1.0, 2.0, 4.0, 6.0, 4.0, 2.0, 1.0)
@@ -2888,14 +2897,13 @@ def _smooth_pin_grid(grid: list[list[int]]) -> list[list[float]]:
 
 <<functions>>=
 def _render_pin_heatmap(
-    target: str, pins: list[dict[str, Any]]
+    target: str,
+    pins: list[dict[str, Any]],
+    *,
+    bins: int = DEFAULT_HEATMAP_BINS,
 ) -> str:
     grid = _smooth_pin_grid(
-        bin_pins(
-            pins,
-            columns=PIN_HEATMAP_COLUMNS,
-            rows=PIN_HEATMAP_ROWS,
-        )
+        bin_pins(pins, columns=bins, rows=bins)
     )
     peak = max(max(row) for row in grid) or 1.0
     cells = "".join(
@@ -2910,7 +2918,7 @@ def _render_pin_heatmap(
         '<div class="pin-wrap">'
         + target
         + '<svg class="pin-overlay" '
-        f'viewBox="0 0 {PIN_HEATMAP_COLUMNS} {PIN_HEATMAP_ROWS}" '
+        f'viewBox="0 0 {bins} {bins}" '
         'preserveAspectRatio="none">'
         '<defs><filter id="pin-blur">'
         '<feGaussianBlur stdDeviation="0.5"/></filter></defs>'
@@ -2936,6 +2944,26 @@ def test_pin_heatmap_renders_a_lone_pin_at_full_intensity():
     assert rendered.count("<rect") > 1
 @
 
+The configured resolution must reach the SVG grid: the [[viewBox]] is
+the observable trace of [[heatmap_bins]] surviving the trip from the
+results renderer down to the heatmap.
+
+<<test functions>>=
+def test_results_thread_heatmap_bins_into_the_svg_grid(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    question = PinTextQuestion("Pin the bug", "total =+ x")
+    full_hash = store.resolve(store.register(question))
+    store.record(full_hash, [{"x": 0.5, "y": 0.5}])
+
+    default = server_module._render_results(store, full_hash)
+    coarse = server_module._render_results(
+        store, full_hash, heatmap_bins=16
+    )
+
+    assert 'viewBox="0 0 32 32"' in default
+    assert 'viewBox="0 0 16 16"' in coarse
+@
+
 The stats renderer combines the two views with the pin total and the
 collected comments.  Comments are HTML-escaped --- they are respondent
 text, exactly the content the hardening work routes through [[escape]]
@@ -2945,7 +2973,12 @@ pins is healthy, ten respondents and eleven pins tells the lecturer the
 room mostly stopped after one pin.
 
 <<functions>>=
-def _render_pin_stats(question, summary: dict[str, Any]) -> str:
+def _render_pin_stats(
+    question,
+    summary: dict[str, Any],
+    *,
+    heatmap_bins: int = DEFAULT_HEATMAP_BINS,
+) -> str:
     target = _render_pin_target(question, summary["url_prefix"])
     parts = [
         f'<p>Total pins: <strong>{summary["pin_count"]}</strong></p>'
@@ -2954,7 +2987,11 @@ def _render_pin_stats(question, summary: dict[str, Any]) -> str:
         parts.append("<h2>Pins</h2>")
         parts.append(_render_pin_overlay(target, summary["pins"]))
         parts.append("<h2>Heatmap</h2>")
-        parts.append(_render_pin_heatmap(target, summary["pins"]))
+        parts.append(
+            _render_pin_heatmap(
+                target, summary["pins"], bins=heatmap_bins
+            )
+        )
     comments = [
         pin["comment"]
         for pin in summary["pins"]
@@ -2980,7 +3017,9 @@ navigation row points: localhost callers land on neighbouring results pages,
 everyone else on the corresponding forms.  The [[allow_images]] keyword is
 threaded straight through to the open-answer renderer so the image policy is
 decided once, by the caller that knows the deployment, rather than rediscovered
-deep in the rendering stack.
+deep in the rendering stack.  [[heatmap_bins]] follows the same route for the
+same reason: it is the configured pin-heatmap resolution, owned by the CLI's
+configuration reading, and the renderer only carries it down to the heatmap.
 
 <<functions>>=
 def _render_results(
@@ -2990,6 +3029,7 @@ def _render_results(
     window: str = "all",
     is_local: bool = False,
     allow_images: bool = False,
+    heatmap_bins: int = DEFAULT_HEATMAP_BINS,
 ) -> str:
     summary = store.results(full_hash, window=window)
     question = store.question(full_hash)
@@ -3034,7 +3074,11 @@ def _render_results(
     elif isinstance(question, RankingQuestion):
         parts.append(_render_ranking_stats(question, summary))
     elif isinstance(question, PIN_QUESTIONS):
-        parts.append(_render_pin_stats(question, summary))
+        parts.append(
+            _render_pin_stats(
+                question, summary, heatmap_bins=heatmap_bins
+            )
+        )
 
     parts.append(_render_question_nav(store, full_hash, results=is_local))
 
@@ -3130,6 +3174,7 @@ def _build_handler(
     allow_images: bool = False,
     admin_token: str | None = None,
     require_token: bool = False,
+    heatmap_bins: int = DEFAULT_HEATMAP_BINS,
 ):
     class MentipyHandler(BaseHTTPRequestHandler):
         server_version = "mentipy/0.1"
@@ -3451,6 +3496,7 @@ def _handle_question_get(self, segments: list[str], query: str):
                     window=window,
                     is_local=self._is_local(),
                     allow_images=allow_images,
+                    heatmap_bins=heatmap_bins,
                 ),
                 refresh=True,
             ),
@@ -3598,6 +3644,7 @@ def create_server(
     allow_images: bool = False,
     admin_token: str | None = None,
     require_token: bool = False,
+    heatmap_bins: int = DEFAULT_HEATMAP_BINS,
 ) -> ThreadingHTTPServer:
     """Return a configured mentipy HTTP server."""
 
@@ -3609,6 +3656,7 @@ def create_server(
             allow_images=allow_images,
             admin_token=admin_token,
             require_token=require_token,
+            heatmap_bins=heatmap_bins,
         ),
     )
 @
@@ -3627,6 +3675,7 @@ def serve(
     allow_images: bool = False,
     admin_token: str | None = None,
     require_token: bool = False,
+    heatmap_bins: int = DEFAULT_HEATMAP_BINS,
 ):
     """Run the mentipy HTTP server until interrupted."""
 
@@ -3638,6 +3687,7 @@ def serve(
         allow_images=allow_images,
         admin_token=admin_token,
         require_token=require_token,
+        heatmap_bins=heatmap_bins,
     )
     try:
         server.serve_forever()

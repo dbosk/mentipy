@@ -73,6 +73,7 @@ PUBLIC_BASE_URL_CONFIG = "mentipy.public_base_url"
 QUESTION_ENVIRONMENT_CONFIG = "mentipy.question_environment"
 SHOW_URL_CONFIG = "mentipy.show_url"
 ALLOW_IMAGES_CONFIG = "mentipy.allow_images"
+HEATMAP_BINS_CONFIG = "mentipy.heatmap_bins"
 
 DEFAULT_BASE_URL = None
 DEFAULT_HOST = "0.0.0.0"
@@ -85,6 +86,7 @@ DEFAULT_MIN_PREFIX = 4
 DEFAULT_QUESTION_ENVIRONMENT = None
 DEFAULT_SHOW_URL = True
 DEFAULT_ALLOW_IMAGES = False
+DEFAULT_HEATMAP_BINS = 32
 
 DEFAULT_SETTINGS = {
     BASE_URL_CONFIG: DEFAULT_BASE_URL,
@@ -100,6 +102,7 @@ DEFAULT_SETTINGS = {
     QUESTION_ENVIRONMENT_CONFIG: DEFAULT_QUESTION_ENVIRONMENT,
     SHOW_URL_CONFIG: DEFAULT_SHOW_URL,
     ALLOW_IMAGES_CONFIG: DEFAULT_ALLOW_IMAGES,
+    HEATMAP_BINS_CONFIG: DEFAULT_HEATMAP_BINS,
 }
 
 STORE_TEMPLATE = {"questions": {}, "answers": {}, "registration_counter": 0}
@@ -167,7 +170,7 @@ def _coerce_setting_value(full_key: str, value: Any) -> Any:
     else:
         parsed = value
 
-    if full_key in (PORT_CONFIG, MIN_PREFIX_CONFIG):
+    if full_key in (PORT_CONFIG, MIN_PREFIX_CONFIG, HEATMAP_BINS_CONFIG):
         if isinstance(parsed, int):
             return parsed
         return value

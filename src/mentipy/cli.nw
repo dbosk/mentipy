@@ -73,6 +73,7 @@ from mentipy.store import (
     QR_DIR_CONFIG,
     QR_FORMAT_CONFIG,
     ALLOW_IMAGES_CONFIG,
+    HEATMAP_BINS_CONFIG,
     QUESTION_ENVIRONMENT_CONFIG,
     SHOW_URL_CONFIG,
     SSH_TUNNEL_CONFIG,
@@ -120,6 +121,10 @@ CONFIG_KEY_HELP = (
     (
         ALLOW_IMAGES_CONFIG,
         "Permit markdown images in free-text answers (off by default).",
+    ),
+    (
+        HEATMAP_BINS_CONFIG,
+        "Pin-results heatmap resolution in grid cells per side.",
     ),
     (SSH_TUNNEL_CONFIG, "SSH endpoint for mentipy serve --public ssh."),
     (STORE_CONFIG, "Default path to mentipy.json."),
@@ -1688,6 +1693,7 @@ def _serve_publicly(
             allow_images=allow_images,
             admin_token=admin_token,
             require_token=require_token,
+            heatmap_bins=get_setting(HEATMAP_BINS_CONFIG),
         )
 @
 
@@ -1840,6 +1846,7 @@ def serve(
             chosen_port,
             public_results=results,
             allow_images=get_setting(ALLOW_IMAGES_CONFIG),
+            heatmap_bins=get_setting(HEATMAP_BINS_CONFIG),
         )
         return
 
@@ -3441,6 +3448,33 @@ def test_serve_command_public_ssh_passes_allow_images_setting(
 
     assert result.exit_code == 0
     assert captured["allow_images"] is True
+
+
+def test_serve_command_passes_heatmap_bins_setting(
+    tmp_path, monkeypatch
+):
+    runner = CliRunner()
+    config_path = tmp_path / "config.json"
+    monkeypatch.setenv("MENTIPY_CONFIG", str(config_path))
+    set_setting("base_url", "http://127.0.0.1:9001")
+    set_setting("store", str(tmp_path / "answers.json"))
+    set_setting("heatmap_bins", "16")
+    captured = {}
+
+    def fake_serve(store, host, port, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("mentipy.cli.serve_http", fake_serve)
+    monkeypatch.setattr(
+        "mentipy.cli.regenerate_qrs", lambda _store, _base_url: 0
+    )
+
+    result = runner.invoke(
+        cli, ["serve"], env={"MENTIPY_CONFIG": str(config_path)}
+    )
+
+    assert result.exit_code == 0
+    assert captured["heatmap_bins"] == 16
 
 
 def test_serve_command_public_ssh_requires_configuration(tmp_path, monkeypatch):
