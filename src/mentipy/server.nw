@@ -1234,7 +1234,10 @@ def test_ranking_results_lists_options_best_first(tmp_path):
 The word-cloud form test pins the opposite contract: no multipart, no
 file input.  The two complementary tests together protect the parser
 and form from drifting apart --- a future refactor that accidentally
-adds a file picker to word-cloud forms would fail here loudly.
+adds a file picker to word-cloud forms would fail here loudly.  The
+test also pins the [[maxlength]] attribute, so the browser-side limit
+stays in step with the [[max_chars]] bound the store enforces when the
+answer is recorded.
 
 <<test functions>>=
 def test_wordcloud_form_uses_plain_encoding_and_renders_one_textarea(
@@ -1253,6 +1256,12 @@ def test_wordcloud_form_uses_plain_encoding_and_renders_one_textarea(
     assert 'name="value"' in rendered
     assert 'maxlength="200"' in rendered
 @
+
+Together, these form tests pin every contract the answer parser depends
+on: the field names, the encoding, and the bounds each widget advertises
+to the browser.  A change that lets the rendered form and
+[[_parse_answer]] drift apart should fail one of them before it ever
+confuses a respondent.
 
 \section{Rendering results}
 
