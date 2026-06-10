@@ -1684,9 +1684,10 @@ def test_pin_form_threads_the_comment_flag_into_the_script(tmp_path):
 The pin results page shows the dot overlay, the blurred heatmap and the
 escaped comments.  The comment contains markup on purpose: it must come
 back HTML-escaped, never live.  The three pins land two-on-one-cell and
-one-on-another, so the heatmap must paint the busy cell fully hot and
-the single-pin cell with the half-way colour --- pinning that intensity
-is encoded as the blue-to-red ramp, not as opacity.
+one-on-another, far enough apart that their smoothed neighbourhoods do
+not overlap, so the cell centres keep the raw 2:1 ratio: the heatmap
+must paint the busy centre fully hot and the single-pin centre with the
+half-way colour of the blue-to-red ramp.
 
 <<test functions>>=
 def test_pin_results_show_overlay_heatmap_and_escaped_comments(
@@ -2786,28 +2787,45 @@ def _render_pin_overlay(
 @
 
 The heatmap bins the raw pins at a finer resolution than the terminal
-renderer ever could, then lets an SVG gaussian blur turn the discrete
-cells into a continuous-looking density surface.  Binning plus blur is
-much cheaper than a real kernel-density estimate and indistinguishable
-at classroom answer counts.  Intensity is encoded as \emph{colour},
-sliding each cell from blue to red as its count approaches the busiest
-cell's --- the conventional cold-to-hot reading of a heatmap --- while
-the opacity stays constant so the target underneath remains equally
-visible everywhere.  Scaling against the busiest cell rather than the
-pin total means the hottest spot is always fully red and the map stays
-readable whether five or five hundred pins arrived.  The endpoint
+renderer ever could, smooths the grid with a small separable kernel,
+and only then normalises: each cell's intensity is its \emph{smoothed}
+value over the smoothed peak.  The order matters.  An earlier version
+normalised the raw counts and left all smoothing to an SVG gaussian
+blur, which made sparse results nearly invisible: a lecture's first
+half-dozen scattered pins each occupy a single $1/64$-width cell, and
+the blur \emph{spreads} that one cell's opacity over its neighbourhood,
+dimming the visible peak to almost nothing.  Smoothing server-side and
+normalising afterwards guarantees the densest spot always renders fully
+hot and fully opaque whether six or six hundred pins arrived; the
+remaining SVG blur only softens the blocky cell edges and is too small
+to wash anything out.
+
+Intensity is encoded twice, as \emph{colour} sliding from blue to red
+--- the conventional cold-to-hot reading of a heatmap --- and as
+opacity fading towards the blob edges, so a hotspot reads as a solid
+red core with a blue halo over a still-visible target.  The opacity
+fade is deliberately \emph{slower} than linear: alpha compositing
+already de-emphasises low values perceptually, so a linear fade makes
+the halo vanish and shrinks each hotspot back to a dot.  Raising the
+intensity to [[PIN_HEATMAP_OPACITY_GAMMA]] (a square root) lifts the
+mid-range --- a cell at half intensity keeps about 70\,\% opacity ---
+which is what makes the halo visible while the colour ramp stays
+linear and truthful.  Scaling against the busiest cell rather than the
+pin total keeps the map readable at any response count.  The endpoint
 colours reuse the site's bar-chart blue and pin-marker red, so the
-heatmap reads as part of the same palette.  Empty cells are skipped
-entirely --- at $64 \times 64$ the grid has 4096 cells and a lecture
-produces a few hundred pins at most, so the sparse encoding keeps the
-page small.
+heatmap reads as part of the same palette.  Cells below a small floor
+of the peak are skipped --- the kernel tails would otherwise emit
+thousands of imperceptible rects.
 
 <<constants>>=
 PIN_HEATMAP_COLUMNS = 64
 PIN_HEATMAP_ROWS = 64
 PIN_HEATMAP_COLD_RGB = (74, 144, 217)
 PIN_HEATMAP_HOT_RGB = (220, 53, 69)
-PIN_HEATMAP_OPACITY = 0.65
+PIN_HEATMAP_KERNEL = (1.0, 2.0, 4.0, 6.0, 4.0, 2.0, 1.0)
+PIN_HEATMAP_MAX_OPACITY = 0.85
+PIN_HEATMAP_OPACITY_GAMMA = 0.5
+PIN_HEATMAP_FLOOR = 0.05
 @
 
 <<functions>>=
@@ -2819,23 +2837,74 @@ def _pin_heat_color(intensity: float) -> str:
         for cold, hot in zip(PIN_HEATMAP_COLD_RGB, PIN_HEATMAP_HOT_RGB)
     )
     return "#" + "".join(f"{channel:02x}" for channel in channels)
+
+
+def _pin_heat_opacity(intensity: float) -> str:
+    """Return the fill opacity for a heatmap cell intensity in [0, 1]."""
+
+    faded = intensity ** PIN_HEATMAP_OPACITY_GAMMA
+    return f"{PIN_HEATMAP_MAX_OPACITY * faded:.2f}"
+@
+
+The convolution is separable --- one horizontal pass, one vertical ---
+and scatter-based: it loops over the non-zero source cells and spreads
+each into its neighbours, rather than gathering at every one of the
+4096 destinations.  Classroom grids are overwhelmingly empty, so the
+work stays proportional to the number of pinned cells.
+
+<<functions>>=
+def _smooth_pin_grid(grid: list[list[int]]) -> list[list[float]]:
+    """Convolve a binned pin grid with the separable heatmap kernel."""
+
+    kernel = PIN_HEATMAP_KERNEL
+    radius = len(kernel) // 2
+    rows = len(grid)
+    columns = len(grid[0])
+
+    horizontal = [[0.0] * columns for _ in range(rows)]
+    for row in range(rows):
+        for column in range(columns):
+            count = grid[row][column]
+            if not count:
+                continue
+            for offset, weight in enumerate(kernel):
+                neighbour = column + offset - radius
+                if 0 <= neighbour < columns:
+                    horizontal[row][neighbour] += count * weight
+
+    smoothed = [[0.0] * columns for _ in range(rows)]
+    for row in range(rows):
+        for column in range(columns):
+            value = horizontal[row][column]
+            if not value:
+                continue
+            for offset, weight in enumerate(kernel):
+                neighbour = row + offset - radius
+                if 0 <= neighbour < rows:
+                    smoothed[neighbour][column] += value * weight
+
+    return smoothed
 @
 
 <<functions>>=
 def _render_pin_heatmap(
     target: str, pins: list[dict[str, Any]]
 ) -> str:
-    grid = bin_pins(
-        pins, columns=PIN_HEATMAP_COLUMNS, rows=PIN_HEATMAP_ROWS
+    grid = _smooth_pin_grid(
+        bin_pins(
+            pins,
+            columns=PIN_HEATMAP_COLUMNS,
+            rows=PIN_HEATMAP_ROWS,
+        )
     )
-    peak = max(max(row) for row in grid) or 1
+    peak = max(max(row) for row in grid) or 1.0
     cells = "".join(
         f'<rect x="{column}" y="{row}" width="1" height="1" '
-        f'fill="{_pin_heat_color(count / peak)}" '
-        f'fill-opacity="{PIN_HEATMAP_OPACITY}"/>'
+        f'fill="{_pin_heat_color(value / peak)}" '
+        f'fill-opacity="{_pin_heat_opacity(value / peak)}"/>'
         for row, columns in enumerate(grid)
-        for column, count in enumerate(columns)
-        if count
+        for column, value in enumerate(columns)
+        if value / peak >= PIN_HEATMAP_FLOOR
     )
     return (
         '<div class="pin-wrap">'
@@ -2844,11 +2913,27 @@ def _render_pin_heatmap(
         f'viewBox="0 0 {PIN_HEATMAP_COLUMNS} {PIN_HEATMAP_ROWS}" '
         'preserveAspectRatio="none">'
         '<defs><filter id="pin-blur">'
-        '<feGaussianBlur stdDeviation="1"/></filter></defs>'
+        '<feGaussianBlur stdDeviation="0.5"/></filter></defs>'
         '<g filter="url(#pin-blur)">'
         + cells
         + "</g></svg></div>"
     )
+@
+
+The sparse case is the regression this design exists for: one single
+pin --- the emptiest possible result --- must still produce a fully
+hot, fully opaque centre cell surrounded by the kernel's fainter halo,
+because normalisation happens after smoothing rather than before.
+
+<<test functions>>=
+def test_pin_heatmap_renders_a_lone_pin_at_full_intensity():
+    rendered = server_module._render_pin_heatmap(
+        "<img>", [{"x": 0.5, "y": 0.5}]
+    )
+
+    hot = server_module._pin_heat_color(1.0)
+    assert f'fill="{hot}" fill-opacity="0.85"' in rendered
+    assert rendered.count("<rect") > 1
 @
 
 The stats renderer combines the two views with the pin total and the
