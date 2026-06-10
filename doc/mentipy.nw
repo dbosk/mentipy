@@ -148,8 +148,10 @@ def latex_pydoc_excerpt():
 
 
 # The pin-on-image example needs an image file.  A generated PNG keeps
-# the repository free of binary assets while staying reproducible: a
-# light canvas with one red block, the obvious thing to pin.
+# the repository free of binary assets while staying reproducible.  We
+# draw a tiny interface mockup -- a navbar, a sidebar with one loud
+# call-to-action button, and a column of body text -- so the example's
+# redesign prompt has recognisable regions to point at.
 import os
 import struct
 import zlib
@@ -164,15 +166,29 @@ def _png_chunk(tag, payload):
     )
 
 
-def write_pin_example_png(path, width=96, height=48):
+def write_pin_example_png(path, width=96, height=60):
+    navbar = (74, 109, 167)
+    sidebar = (217, 217, 227)
+    canvas = (255, 255, 255)
+    body_text = (179, 179, 189)
+    button = (217, 74, 74)
+
+    def pixel(x, y):
+        if y < 10:
+            return navbar
+        if x < 24:
+            if 4 <= x < 20 and 46 <= y < 54:
+                return button
+            return sidebar
+        if 32 <= x < 88 and 16 <= y < 52 and (y - 16) % 8 < 3:
+            return body_text
+        return canvas
+
     rows = b""
     for y in range(height):
         row = b"\x00"
         for x in range(width):
-            if 56 <= x < 72 and 16 <= y < 32:
-                row += b"\xd9\x4a\x4a"
-            else:
-                row += b"\xe9\xe9\xf3"
+            row += bytes(pixel(x, y))
         rows += row
     header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
     with open(path, "wb") as handle:
@@ -730,12 +746,18 @@ contract ([[max_pins]], [[allow_comment]]) --- not the file path ---
 so recompiling the same slides from another directory, or renaming the
 figure file, keeps the URL, the QR code, and every collected pin.
 
+The example image is a small interface mockup (a navbar, a sidebar
+with a loud call-to-action button, a column of text), generated during
+the manual build so the repository carries no binary asset.  It gives
+the prompt distinct regions to disagree about, which is what a pin
+poll is for.
+
 \begin{pyblock}
 from mentipy.latex import pin_image
 
 print(
     pin_image(
-        "Tap the highlighted area you would refactor first.",
+        "Tap the part of this interface you would redesign first.",
         "mentipy-obj/pin-example.png",
         max_pins=2,
         allow_comment=True,
@@ -754,7 +776,7 @@ positional arguments:
 
 \begin{minted}{text}
 mentipy render pin-image \
-  "Tap the highlighted area you would refactor first." \
+  "Tap the part of this interface you would redesign first." \
   mentipy-obj/pin-example.png --max-pins 2 --allow-comment \
   --base-url http://localhost:8080 --qr-dir mentipy-obj --layout article+qr
 \end{minted}
@@ -765,7 +787,7 @@ print(
         [
             "render",
             "pin-image",
-            "Tap the highlighted area you would refactor first.",
+            "Tap the part of this interface you would redesign first.",
             "mentipy-obj/pin-example.png",
             "--max-pins",
             "2",
@@ -815,10 +837,12 @@ The most natural pin target in a programming lecture is often not a
 figure but a piece of code: \enquote{tap the token that causes the
 bug.}  [[pin_text]] takes the target as one raw string, and a
 [[language]] flag decides how both surfaces present it --- a Pygments
-lexer name renders highlighted code on the web form and monospace lines
-on the slide, leaving it unset renders prose.  The string itself is the
-question's identity; [[language]] is presentation, so retagging the
-same snippet keeps its URL and answer pool.
+lexer name renders highlighted code on the web form and a [[minted]]
+listing on the slide (so indentation and highlighting both survive;
+the consuming document must load the [[minted]] package), while
+leaving it unset renders prose.  The string itself is the question's
+identity; [[language]] is presentation, so retagging the same snippet
+keeps its URL and answer pool.
 
 \begin{pyblock}
 from mentipy.latex import pin_text
@@ -833,7 +857,7 @@ print(
     pin_text(
         "Tap the token that causes the bug.",
         snippet,
-        language="python",
+        language="python3",
         base_url="http://localhost:8080",
         qr_dir="mentipy-obj",
         layout="article+qr",
@@ -850,7 +874,7 @@ question still carries the text, not the path:
 
 \begin{minted}{text}
 mentipy render pin-text "Tap the token that causes the bug." \
-  pin-snippet.py --language python \
+  pin-snippet.py --language python3 \
   --base-url http://localhost:8080 --qr-dir mentipy-obj --layout article+qr
 \end{minted}
 
@@ -871,7 +895,7 @@ print(
             "Tap the token that causes the bug.",
             "mentipy-obj/pin-snippet.py",
             "--language",
-            "python",
+            "python3",
             "--base-url",
             "http://localhost:8080",
             "--qr-dir",

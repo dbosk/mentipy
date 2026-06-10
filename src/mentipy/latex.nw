@@ -265,24 +265,28 @@ def _render_pin_image(question: PinImageQuestion) -> str:
 The text body has three presentation modes keyed on [[language]].  The
 [[latex]] mode inserts the content raw, because the content \emph{is}
 LaTeX and the slide is the one surface that can typeset it natively.
-Any other language renders the content as escaped monospace lines: a
-verbatim environment would be the obvious choice, but verbatim is
-fragile when the LaTeX travels through [[\printpythontex]], so we escape
-each line and keep the spacing with explicit control spaces instead.
-Prose content ([[language]] unset) is simply escaped body text.
+Any other language wraps the content in a [[minted]] environment, so
+the slide gets real syntax highlighting with indentation intact, from
+the same Pygments lexer names the web form's highlighter resolves.
+This is safe even though the LaTeX usually travels through
+[[\printpythontex]]: PythonTeX writes printed output to a file that the
+macro [[\input]]s, so catcode-sensitive environments like [[minted]]
+survive where in-macro expansion would break them.  The consuming
+document must load the [[minted]] package (Beamer decks additionally
+need the [[fragile]] frame option); that is part of the helper's
+contract for code targets.  Prose content ([[language]] unset) is
+simply escaped body text.
 
 <<functions>>=
 def _render_pin_text(question: PinTextQuestion) -> str:
     if question.language == "latex":
         target = question.content
     elif question.language:
-        code_lines = [
-            "\\texttt{"
-            + _escape_latex(line).replace(" ", "\\ ")
-            + "}"
-            for line in question.content.splitlines()
-        ]
-        target = "\\\\\n".join(code_lines)
+        target = (
+            f"\\begin{{minted}}{{{question.language}}}\n"
+            + question.content
+            + "\n\\end{minted}"
+        )
     else:
         target = _escape_latex(question.content)
     return f"{target}\n\n{_pin_instruction(question)}"
@@ -1303,7 +1307,8 @@ def test_pin_image_threads_the_pin_contract_into_the_question(
 @
 
 The pin-text wrapper meets the same registration contract, and a code
-[[language]] renders the content as escaped monospace on the slide.
+[[language]] wraps the content in a [[minted]] environment on the
+slide, raw and indentation-preserving.
 
 <<test functions>>=
 
@@ -1315,8 +1320,8 @@ def test_pin_text_registers_the_question_and_references_the_qr(
 
     rendered = pin_text(
         "Pin the bug",
-        "total =+ x",
-        language="python",
+        "if x:\n    total =+ x",
+        language="python3",
         store=store,
         base_url="http://example.test:8080",
         qr_dir=DEFAULT_QR_DIR,
@@ -1327,10 +1332,15 @@ def test_pin_text_registers_the_question_and_references_the_qr(
     question = store.question(entry["hash"])
 
     assert "Pin the bug" in rendered
-    assert "\\texttt{total\\ =+\\ x}" in rendered
+    assert (
+        "\\begin{minted}{python3}\n"
+        "if x:\n"
+        "    total =+ x\n"
+        "\\end{minted}"
+    ) in rendered
     assert f"\\input{{{QR_SUBPATH}/Q-{prefix}.pdf_tex}}" in rendered
     assert question.kind == "pintext"
-    assert question.language == "python"
+    assert question.language == "python3"
 @
 
 The [[latex]] mode must insert the content raw on the slide and cache

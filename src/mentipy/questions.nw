@@ -1327,11 +1327,11 @@ deliberately not markdown, because the same content must also render on
 the LaTeX slide, and a markdown-to-LaTeX translation would make the two
 surfaces drift.  Instead the authoring call labels the string with a
 [[language]]: a Pygments lexer name renders it as highlighted code on
-the web and monospace on the slide, [[None]] renders it as prose, and
-the special value [[latex]] means the string \emph{is} LaTeX --- the
-slide typesets it natively and the authoring helper caches a
-pandoc-converted HTML rendering in [[content_html]] so the stdlib
-server never needs pandoc installed.
+the web and as a [[minted]] listing on the slide, [[None]] renders it
+as prose, and the special value [[latex]] means the string \emph{is}
+LaTeX --- the slide typesets it natively and the authoring helper
+caches a pandoc-converted HTML rendering in [[content_html]] so the
+stdlib server never needs pandoc installed.
 
 For identity the same reasoning as the image applies: the content
 string is the contract, so it is hashed; [[language]] and

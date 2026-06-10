@@ -329,9 +329,6 @@ pre code.highlight {
   stroke: white;
   stroke-width: 0.2;
 }
-.pin-overlay rect {
-  fill: #dc3545;
-}
 #pin-fields input[type="text"] {
   display: block;
   margin: 0.5rem 0;
@@ -1684,9 +1681,12 @@ def test_pin_form_threads_the_comment_flag_into_the_script(tmp_path):
     )
 @
 
-The pin results page shows the dot overlay, the blurred density grid
-and the escaped comments.  The comment contains markup on purpose: it
-must come back HTML-escaped, never live.
+The pin results page shows the dot overlay, the blurred heatmap and the
+escaped comments.  The comment contains markup on purpose: it must come
+back HTML-escaped, never live.  The three pins land two-on-one-cell and
+one-on-another, so the heatmap must paint the busy cell fully hot and
+the single-pin cell with the half-way colour --- pinning that intensity
+is encoded as the blue-to-red ramp, not as opacity.
 
 <<test functions>>=
 def test_pin_results_show_overlay_heatmap_and_escaped_comments(
@@ -1699,15 +1699,24 @@ def test_pin_results_show_overlay_heatmap_and_escaped_comments(
     full_hash = store.resolve(store.register(question))
     store.record(
         full_hash,
-        [{"x": 0.25, "y": 0.75, "comment": "<b>bold</b> claim"}],
+        [
+            {"x": 0.25, "y": 0.75, "comment": "<b>bold</b> claim"},
+            {"x": 0.75, "y": 0.25},
+        ],
     )
     store.record(full_hash, [{"x": 0.25, "y": 0.75}])
 
     rendered = server_module._render_results(store, full_hash)
 
-    assert "Total pins: <strong>2</strong>" in rendered
+    assert "Total pins: <strong>3</strong>" in rendered
     assert '<circle cx="25.00" cy="75.00"' in rendered
+    assert "<h2>Heatmap</h2>" in rendered
     assert "feGaussianBlur" in rendered
+    hot = server_module._pin_heat_color(1.0)
+    halfway = server_module._pin_heat_color(0.5)
+    assert hot == "#dc3545"
+    assert f'fill="{hot}"' in rendered
+    assert f'fill="{halfway}"' in rendered
     assert "&lt;b&gt;bold&lt;/b&gt; claim" in rendered
     assert "<b>bold</b>" not in rendered
 @
@@ -2780,16 +2789,36 @@ The heatmap bins the raw pins at a finer resolution than the terminal
 renderer ever could, then lets an SVG gaussian blur turn the discrete
 cells into a continuous-looking density surface.  Binning plus blur is
 much cheaper than a real kernel-density estimate and indistinguishable
-at classroom answer counts.  Cell opacity is scaled against the busiest
-cell rather than the pin total, so the hottest spot is always fully
-saturated and the map stays readable whether five or five hundred pins
-arrived.  Empty cells are skipped entirely --- at $64 \times 64$ the
-grid has 4096 cells and a lecture produces a few hundred pins at most,
-so the sparse encoding keeps the page small.
+at classroom answer counts.  Intensity is encoded as \emph{colour},
+sliding each cell from blue to red as its count approaches the busiest
+cell's --- the conventional cold-to-hot reading of a heatmap --- while
+the opacity stays constant so the target underneath remains equally
+visible everywhere.  Scaling against the busiest cell rather than the
+pin total means the hottest spot is always fully red and the map stays
+readable whether five or five hundred pins arrived.  The endpoint
+colours reuse the site's bar-chart blue and pin-marker red, so the
+heatmap reads as part of the same palette.  Empty cells are skipped
+entirely --- at $64 \times 64$ the grid has 4096 cells and a lecture
+produces a few hundred pins at most, so the sparse encoding keeps the
+page small.
 
 <<constants>>=
 PIN_HEATMAP_COLUMNS = 64
 PIN_HEATMAP_ROWS = 64
+PIN_HEATMAP_COLD_RGB = (74, 144, 217)
+PIN_HEATMAP_HOT_RGB = (220, 53, 69)
+PIN_HEATMAP_OPACITY = 0.65
+@
+
+<<functions>>=
+def _pin_heat_color(intensity: float) -> str:
+    """Return the hex colour for a heatmap cell intensity in [0, 1]."""
+
+    channels = (
+        round(cold + (hot - cold) * intensity)
+        for cold, hot in zip(PIN_HEATMAP_COLD_RGB, PIN_HEATMAP_HOT_RGB)
+    )
+    return "#" + "".join(f"{channel:02x}" for channel in channels)
 @
 
 <<functions>>=
@@ -2802,7 +2831,8 @@ def _render_pin_heatmap(
     peak = max(max(row) for row in grid) or 1
     cells = "".join(
         f'<rect x="{column}" y="{row}" width="1" height="1" '
-        f'fill-opacity="{count / peak:.2f}"/>'
+        f'fill="{_pin_heat_color(count / peak)}" '
+        f'fill-opacity="{PIN_HEATMAP_OPACITY}"/>'
         for row, columns in enumerate(grid)
         for column, count in enumerate(columns)
         if count
@@ -2838,7 +2868,7 @@ def _render_pin_stats(question, summary: dict[str, Any]) -> str:
     if summary["pins"]:
         parts.append("<h2>Pins</h2>")
         parts.append(_render_pin_overlay(target, summary["pins"]))
-        parts.append("<h2>Density</h2>")
+        parts.append("<h2>Heatmap</h2>")
         parts.append(_render_pin_heatmap(target, summary["pins"]))
     comments = [
         pin["comment"]
