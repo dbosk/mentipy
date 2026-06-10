@@ -22,6 +22,8 @@ the small surface we expect PythonTeX users and CLI users to care about.
 from mentipy.latex import (
     mc,
     open_text,
+    pin_image,
+    pin_text,
     question,
     ranking,
     scale,
@@ -30,6 +32,8 @@ from mentipy.latex import (
 from mentipy.questions import (
     MCQuestion,
     OpenQuestion,
+    PinImageQuestion,
+    PinTextQuestion,
     Question,
     RankingQuestion,
     ScaleQuestion,
@@ -54,6 +58,8 @@ __version__ = "0.2"
 __all__ = [
     "MCQuestion",
     "OpenQuestion",
+    "PinImageQuestion",
+    "PinTextQuestion",
     "Question",
     "RankingQuestion",
     "ScaleQuestion",
@@ -64,6 +70,8 @@ __all__ = [
     "install_package",
     "mc",
     "open_text",
+    "pin_image",
+    "pin_text",
     "question",
     "question_from_dict",
     "question_hash",
@@ -96,8 +104,12 @@ def test_package_facade_reexports_the_public_api():
     assert ScaleQuestion.__name__ == "ScaleQuestion"
     assert WordCloudQuestion.__name__ == "WordCloudQuestion"
     assert RankingQuestion.__name__ == "RankingQuestion"
+    assert PinImageQuestion.__name__ == "PinImageQuestion"
+    assert PinTextQuestion.__name__ == "PinTextQuestion"
     assert callable(mc)
     assert callable(open_text)
+    assert callable(pin_image)
+    assert callable(pin_text)
     assert callable(question)
     assert callable(ranking)
     assert callable(scale)

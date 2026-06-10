@@ -48,12 +48,15 @@ import typerconf
 from mentipy.latex import (
     mc as render_mc_question,
     open_text as render_open_question,
+    pin_image as render_pin_image_question,
+    pin_text as render_pin_text_question,
     ranking as render_ranking_question,
     regenerate_qrs,
     scale as render_scale_question,
     word_cloud as render_word_cloud_question,
 )
 from mentipy.network import resolve_base_url
+from mentipy.questions import bin_pins
 from mentipy.public import PublicExposureError, PublicMode, expose
 from mentipy.server import serve as serve_http
 from mentipy.store import (
@@ -402,7 +405,8 @@ def _latex_reference() -> str:
         Use `mentipy.latex` from PythonTeX or another Python block.
 
         Public helpers
-          from `mentipy.latex` import (mc, open_text, question, ranking,
+          from `mentipy.latex` import (mc, open_text, pin_image,
+                                       pin_text, question, ranking,
                                        scale, word_cloud)
 
           mc(text, options, *, multi=False, next=True, store=None,
@@ -410,6 +414,14 @@ def _latex_reference() -> str:
              environment=None, show_url=None, layout="slide")
           open_text(text, *, max_chars=280, fence=None, next=True,
              store=None, base_url=None, qr_dir=None, qr_format=None,
+             environment=None, show_url=None, layout="slide")
+          pin_image(text, image_path, *, max_pins=1,
+             allow_comment=False, next=True, store=None,
+             base_url=None, qr_dir=None, qr_format=None,
+             environment=None, show_url=None, layout="slide")
+          pin_text(text, content, *, language=None, max_pins=1,
+             allow_comment=False, next=True, store=None,
+             base_url=None, qr_dir=None, qr_format=None,
              environment=None, show_url=None, layout="slide")
           ranking(text, options, *, top_n=None, next=True, store=None,
              base_url=None, qr_dir=None, qr_format=None,
@@ -1143,12 +1155,94 @@ def _render_terminal_ranking_stats(
     console.print(table)
 @
 
+A pin result is spatial, which a terminal can only approximate, so the
+view is a coarse character-cell heatmap plus a table of the commented
+pins.  The grid is $16 \times 8$: terminal cells are roughly twice as
+tall as they are wide, so halving the row count keeps the rendered
+block visually square and the densities undistorted.  Each cell maps
+its count to a density ramp scaled against the busiest cell, with the
+crucial exception that \emph{any} non-empty cell skips the blank
+character --- at lecture scale most cells hold a single pin, and
+rounding those to invisible would blank the whole map.
+
+<<constants>>=
+TERMINAL_HEATMAP_COLUMNS = 16
+TERMINAL_HEATMAP_ROWS = 8
+TERMINAL_HEATMAP_RAMP = " .:-=+*#%@"
+@
+
+<<functions>>=
+def _render_terminal_pin_stats(results: dict, *, console: Console):
+    pins = results["pins"]
+    console.print(f"Pins: {results['pin_count']}")
+    if not pins:
+        console.print("No pins yet.")
+        return
+
+    grid = bin_pins(
+        pins,
+        columns=TERMINAL_HEATMAP_COLUMNS,
+        rows=TERMINAL_HEATMAP_ROWS,
+    )
+    peak = max(max(row) for row in grid) or 1
+    ramp = TERMINAL_HEATMAP_RAMP
+    for row in grid:
+        line = "".join(
+            ramp[1 + int(count / peak * (len(ramp) - 2))]
+            if count else ramp[0]
+            for count in row
+        )
+        console.print(f"|{line}|", highlight=False)
+
+    comments = [pin for pin in pins if pin.get("comment")]
+    if comments:
+        table = Table("x", "y", "Comment")
+        for pin in comments:
+            table.add_row(
+                f"{pin['x']:.2f}", f"{pin['y']:.2f}", pin["comment"]
+            )
+        console.print(table)
+@
+
+A synthetic three-pin summary exercises the headline, the visible
+single-pin cells, and the comment table in one pass.
+
+<<test functions>>=
+def test_terminal_pin_stats_show_heatmap_and_comments():
+    buffer = io.StringIO()
+    console = Console(
+        file=buffer,
+        force_terminal=False,
+        color_system=None,
+        width=80,
+    )
+
+    mentipy.cli._render_terminal_pin_stats(
+        {
+            "pins": [
+                {"x": 0.05, "y": 0.05},
+                {"x": 0.05, "y": 0.05},
+                {"x": 0.95, "y": 0.95, "comment": "here"},
+            ],
+            "pin_count": 3,
+        },
+        console=console,
+    )
+
+    output = buffer.getvalue()
+    assert "Pins: 3" in output
+    assert "@" in output
+    assert output.count("|") >= 16
+    assert "here" in output
+    assert "0.95" in output
+@
+
 The full result renderer is shared by [[view]] and the first frame of
 [[watch]].  It uses the same summary fields as the HTML page:
 multiple-choice mode and option percentages, scale descriptive
 statistics and bucket percentages, word-cloud frequency tables,
-ranking mean ranks, and open-text average answer length before the
-transcript.
+ranking mean ranks, pin heatmaps, and open-text average answer length
+before the transcript.
 
 <<functions>>=
 def _render_results(results: dict, *, console: Console):
@@ -1193,6 +1287,11 @@ def _render_results(results: dict, *, console: Console):
     if question["kind"] == "ranking":
         console.print("\n".join(lines))
         _render_terminal_ranking_stats(question, results, console=console)
+        return
+
+    if question["kind"] in ("pinimage", "pintext"):
+        console.print("\n".join(lines))
+        _render_terminal_pin_stats(results, console=console)
         return
 
     console.print("\n".join(lines))
@@ -2147,6 +2246,197 @@ def test_render_ranking_threads_top_n_into_the_question(tmp_path):
     assert question.top_n == 2
 @
 
+The pin commands mirror the LaTeX helpers' authoring surface: both take
+the prompt and a file path, because both target kinds live in files at
+authoring time --- the image by nature, the text because code snippets
+and LaTeX fragments are painful to pass as shell arguments.  The command
+reads the content file itself and hands the helper a string, keeping the
+helper's API (content, not path) intact for PythonTeX users.
+
+<<cli setup>>=
+@render_cli.command("pin-image")
+def render_pin_image(
+    text: str,
+    image_path: Path,
+    max_pins: int = typer.Option(
+        1,
+        "--max-pins",
+        help="How many pins a respondent may place.",
+    ),
+    allow_comment: bool = typer.Option(
+        False,
+        "--allow-comment",
+        help="Let respondents attach a short comment to each pin.",
+    ),
+    next: bool = NEXT_OPTION,
+    environment: Optional[str] = ENVIRONMENT_OPTION,
+    layout: str = LAYOUT_OPTION,
+    url: Optional[bool] = URL_VISIBILITY_OPTION,
+    base_url: Optional[str] = RENDER_BASE_URL_OPTION,
+    qr_dir: Optional[str] = QR_DIR_OPTION,
+    qr_format: Optional[str] = QR_FORMAT_OPTION,
+    store: Optional[str] = STORE_OPTION,
+):
+    """Render a pin-on-image question as LaTeX."""
+
+    typer.echo(
+        render_pin_image_question(
+            text,
+            image_path,
+            max_pins=max_pins,
+            allow_comment=allow_comment,
+            next=next,
+            **_render_common_kwargs(
+                store=store,
+                environment=environment,
+                show_url=url,
+                base_url=base_url,
+                qr_dir=qr_dir,
+                qr_format=qr_format,
+                layout=layout,
+            ),
+        )
+    )
+@
+
+<<cli setup>>=
+@render_cli.command("pin-text")
+def render_pin_text(
+    text: str,
+    content_file: Path,
+    language: Optional[str] = typer.Option(
+        None,
+        "--language",
+        help=(
+            "Pygments lexer for code targets, or 'latex' for content"
+            " typeset natively on the slide."
+        ),
+    ),
+    max_pins: int = typer.Option(
+        1,
+        "--max-pins",
+        help="How many pins a respondent may place.",
+    ),
+    allow_comment: bool = typer.Option(
+        False,
+        "--allow-comment",
+        help="Let respondents attach a short comment to each pin.",
+    ),
+    next: bool = NEXT_OPTION,
+    environment: Optional[str] = ENVIRONMENT_OPTION,
+    layout: str = LAYOUT_OPTION,
+    url: Optional[bool] = URL_VISIBILITY_OPTION,
+    base_url: Optional[str] = RENDER_BASE_URL_OPTION,
+    qr_dir: Optional[str] = QR_DIR_OPTION,
+    qr_format: Optional[str] = QR_FORMAT_OPTION,
+    store: Optional[str] = STORE_OPTION,
+):
+    """Render a pin-on-text question as LaTeX."""
+
+    typer.echo(
+        render_pin_text_question(
+            text,
+            content_file.read_text(encoding="utf-8"),
+            language=language,
+            max_pins=max_pins,
+            allow_comment=allow_comment,
+            next=next,
+            **_render_common_kwargs(
+                store=store,
+                environment=environment,
+                show_url=url,
+                base_url=base_url,
+                qr_dir=qr_dir,
+                qr_format=qr_format,
+                layout=layout,
+            ),
+        )
+    )
+@
+
+The pin-image test checks the two side effects beyond registration: the
+contract flags reach the stored question, and the image bytes land in
+the store's sidecar under the digest the question carries.
+
+<<test functions>>=
+
+PNG_SAMPLE = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+
+
+def test_render_pin_image_threads_the_contract_and_saves_bytes(
+    tmp_path,
+):
+    runner = CliRunner()
+    store_path = tmp_path / "mentipy.json"
+    image_path = tmp_path / "pin.png"
+    image_path.write_bytes(PNG_SAMPLE)
+
+    result = runner.invoke(
+        cli,
+        [
+            "render",
+            "pin-image",
+            "Pin the bug",
+            str(image_path),
+            "--max-pins",
+            "2",
+            "--allow-comment",
+            "--store",
+            str(store_path),
+            "--base-url",
+            "http://example.test:8080",
+            "--qr-dir",
+            str(tmp_path / DEFAULT_QR_DIR),
+        ],
+    )
+
+    assert result.exit_code == 0
+    store = Store(store_path)
+    [entry] = store.all_questions()
+    question = store.question(entry["hash"])
+    assert question.kind == "pinimage"
+    assert question.max_pins == 2
+    assert question.allow_comment is True
+    assert store.load_image(question.image_sha256) == PNG_SAMPLE
+@
+
+The pin-text test pins the file-reading convention: the stored content
+is the file's text, not its path, and the language flag survives.
+
+<<test functions>>=
+def test_render_pin_text_reads_the_content_file(tmp_path):
+    runner = CliRunner()
+    store_path = tmp_path / "mentipy.json"
+    snippet = tmp_path / "snippet.py"
+    snippet.write_text("total =+ x\n", encoding="utf-8")
+
+    result = runner.invoke(
+        cli,
+        [
+            "render",
+            "pin-text",
+            "Pin the bug",
+            str(snippet),
+            "--language",
+            "python",
+            "--store",
+            str(store_path),
+            "--base-url",
+            "http://example.test:8080",
+            "--qr-dir",
+            str(tmp_path / DEFAULT_QR_DIR),
+        ],
+    )
+
+    assert result.exit_code == 0
+    store = Store(store_path)
+    [entry] = store.all_questions()
+    question = store.question(entry["hash"])
+    assert question.kind == "pintext"
+    assert question.content == "total =+ x\n"
+    assert question.language == "python"
+@
+
 The [[--no-next]] flag is the lecturer's way to suppress the
 \enquote{Next $\rightarrow$} link on the final question of a lecture.  We
 parametrize the test across every render subcommand because the flag has to
@@ -2775,9 +3065,12 @@ def test_latex_command_prints_the_reference_and_all_config_keys():
     result = runner.invoke(cli, ["latex"])
 
     assert result.exit_code == 0
-    assert "from `mentipy.latex` import (mc, open_text, question, ranking" in result.output
+    assert "from `mentipy.latex` import (mc, open_text, pin_image," in result.output
+    assert "pin_text, question, ranking," in result.output
     assert "word_cloud)" in result.output
     assert "ranking(text, options, *, top_n=None, next=True, store=None," in result.output
+    assert "pin_image(text, image_path, *, max_pins=1," in result.output
+    assert "pin_text(text, content, *, language=None, max_pins=1," in result.output
     assert "word_cloud(text, *, max_chars=280, split_words=True," in result.output
     assert "question(question_obj, *, ...)" in result.output
     assert "when it is unset, empty, or auto" in result.output

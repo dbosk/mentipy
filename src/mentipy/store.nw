@@ -22,6 +22,7 @@ from __future__ import annotations
 
 <<imports>>=
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -34,10 +35,13 @@ import typerconf
 from mentipy.questions import (
     MCQuestion,
     OpenQuestion,
+    PIN_QUESTIONS,
+    PIN_COMMENT_MAX_CHARS,
     Question,
     RankingQuestion,
     ScaleQuestion,
     WordCloudQuestion,
+    is_sha256_hex,
     question_from_dict,
     question_hash,
 )
@@ -1187,6 +1191,146 @@ def test_remember_qr_target_deduplicates_repeated_paths(tmp_path):
     assert QR_TARGETS_KEY not in store.all_questions()[0]
 @
 
+\section{Registered images}
+
+Pin-image questions need the registered image bytes available at serving
+time, but the JSON store is the wrong place for them: [[record]] rewrites
+the whole file on every answer, so embedding even a modest photograph
+would multiply the cost of every submission by the image size.  The
+bytes therefore live in a sidecar directory derived from the store path
+--- [[mentipy.json]] gets [[mentipy-images/]] --- so a server that only
+knows the store location can still find them, and copying a store to
+another machine means copying one file and one directory.
+
+The files are content-addressed: each image is stored under its own
+SHA-256 digest, the same digest the question carries as its identity.
+That makes registration idempotent for free (recompiling slides rewrites
+nothing), deduplicates an image shared by several questions, and makes
+concurrent writers harmless --- two processes racing on the same name
+are by construction writing identical bytes.  Orphaned files from
+deleted questions are left in place; they are small, and content
+addressing means a future re-registration of the same image simply
+reclaims them.
+
+<<store methods>>=
+def image_dir(self) -> Path:
+    """Return the sidecar directory for registered image bytes."""
+
+    return self.path.with_name(f"{self.path.stem}-images")
+@
+
+[[save_image]] computes the digest itself rather than trusting a caller,
+so a file name can never disagree with the content it addresses.  The
+write goes through a sibling temporary file and [[os.replace]], the same
+crash-safety pattern as the JSON store: a process dying mid-write leaves
+a stray [[.tmp]] file, never a truncated image served to respondents.
+
+<<store methods>>=
+def save_image(self, data: bytes) -> str:
+    """Store image bytes content-addressed and return their digest."""
+
+    digest = hashlib.sha256(data).hexdigest()
+    target = self.image_dir() / digest
+    if target.exists():
+        return digest
+
+    self.image_dir().mkdir(parents=True, exist_ok=True)
+    temp_path = target.with_name(f"{digest}.tmp")
+    temp_path.write_bytes(data)
+    os.replace(temp_path, target)
+    return digest
+@
+
+The digest argument to [[load_image]] ultimately comes from a stored
+question entry, but a hand-edited store file could put anything there,
+and the digest becomes part of a filesystem path.  Validating the
+64-hex-digit shape before the path join is the path-traversal guard:
+a value like [[../../etc/passwd]] never reaches the filesystem layer.
+Missing files yield [[None]] rather than an exception because the server
+maps both cases to the same 404.
+
+<<store methods>>=
+def load_image(self, sha256: str) -> bytes | None:
+    """Return registered image bytes for ``sha256``, or ``None``."""
+
+    if not is_sha256_hex(sha256):
+        return None
+    target = self.image_dir() / sha256
+    if not target.exists():
+        return None
+    return target.read_bytes()
+@
+
+The round trip pins the content-addressing contract: the returned digest
+names the file, and loading it returns the exact bytes.
+
+<<test functions>>=
+
+PNG_SAMPLE = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+
+
+def test_save_image_round_trips_content_addressed_bytes(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    digest = store.save_image(PNG_SAMPLE)
+
+    assert (tmp_path / "mentipy-images" / digest).exists()
+    assert store.load_image(digest) == PNG_SAMPLE
+@
+
+Saving the same bytes twice must be a no-op, since every slide rebuild
+re-registers every image.
+
+<<test functions>>=
+
+def test_save_image_is_idempotent(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    first = store.save_image(PNG_SAMPLE)
+    second = store.save_image(PNG_SAMPLE)
+
+    assert first == second
+    images = list(store.image_dir().iterdir())
+    assert [path.name for path in images] == [first]
+@
+
+The traversal guard and the missing-file case both collapse to [[None]]
+so the caller cannot tell a probe from a miss --- which is exactly the
+information hiding a 404 should provide.
+
+<<test functions>>=
+
+def test_load_image_rejects_non_hex_names_and_missing_files(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    store.save_image(PNG_SAMPLE)
+
+    assert store.load_image("../../../etc/passwd") is None
+    assert store.load_image("0" * 64) is None
+@
+
+Because the digest is computed from the bytes in both the question and
+the sidecar, registering the same image under two different file names
+must reuse the prefix --- the pin-image version of registration
+idempotence.
+
+<<test functions>>=
+
+def test_register_reuses_the_prefix_for_the_same_image_bytes(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first = PinImageQuestion.from_image_bytes(
+        "Pin the bug", PNG_SAMPLE, image_path="a.png"
+    )
+    second = PinImageQuestion.from_image_bytes(
+        "Pin the bug", PNG_SAMPLE, image_path="b/a.png"
+    )
+
+    prefix = store.register(first)
+
+    assert store.register(second) == prefix
+    rebuilt = store.question(store.resolve(prefix))
+    assert rebuilt.image_path == "b/a.png"
+@
+
 \section{Answer recording}
 
 Answer recording is the only mutating operation after registration, so it is
@@ -1203,7 +1347,9 @@ plain lists so the JSON shape on disk is stable no matter whether a caller
 passed a list or a tuple.  Ranking adds two checks on top of the multi-select
 contract --- a [[top_n]] cap and, for a full ordering, complete coverage of the
 option set --- because for a ranking the \emph{order} of the list is the answer,
-not merely the membership.
+not merely the membership.  Pin answers are lists of coordinate mappings
+bounded by the question's pin cap, with every coordinate confined to the
+normalised $[0, 1]$ square.
 
 The dispatcher walks the question types in increasing surface area.  We make
 each string-typed arm explicit rather than letting one type fall through to
@@ -1230,6 +1376,9 @@ def _normalize_recorded_answer(question: Question, value: Any) -> Any:
 
     if isinstance(question, RankingQuestion):
         <<normalise ranking answer>>
+
+    if isinstance(question, PIN_QUESTIONS):
+        <<normalise pin answer>>
 
     raise TypeError(f"unsupported question type: {type(question).__name__}")
 @
@@ -1359,6 +1508,141 @@ if question.top_n is None and len(indices) != option_count:
     raise ValueError("a full ranking must order every option")
 
 return indices
+@
+
+A pin answer is a list of coordinate mappings, and both pin question
+types share the contract, so one arm dispatches on the [[PIN_QUESTIONS]]
+tuple.  Coordinates are normalised to the rendered target, so the closed
+interval $[0, 1]$ is the entire validity story --- and because neither
+[[NaN]] nor infinity satisfies a closed-interval comparison, the range
+check quietly excludes the float specials without naming them.  We
+re-store coordinates through [[float]] so the JSON shape is stable even
+if a caller passed integers ([[0]] and [[1]] are legal corner pins).
+The key allowlist rejects unknown fields eagerly: anything else stored
+today would become load-bearing surprise data for tomorrow's renderers.
+
+<<normalise pin answer>>=
+if not isinstance(value, (list, tuple)):
+    raise TypeError("pin answers must be stored as a list or tuple")
+if not value:
+    raise ValueError("place at least one pin")
+if len(value) > question.max_pins:
+    raise ValueError("pin answer places more pins than allowed")
+
+pins = []
+for pin in value:
+    if not isinstance(pin, dict):
+        raise TypeError("each pin must be stored as a mapping")
+    if not set(pin) <= {"x", "y", "comment"}:
+        raise ValueError(
+            "pins only carry x, y and an optional comment"
+        )
+    normalized_pin = {}
+    for axis in ("x", "y"):
+        if axis not in pin:
+            raise ValueError(f"each pin needs an {axis} coordinate")
+        coordinate = pin[axis]
+        if type(coordinate) not in (int, float):
+            raise TypeError("pin coordinates must be numbers")
+        if not 0 <= coordinate <= 1:
+            raise ValueError("pin coordinates must lie in [0, 1]")
+        normalized_pin[axis] = float(coordinate)
+    if "comment" in pin:
+        <<normalise pin [[comment]]>>
+    pins.append(normalized_pin)
+
+return pins
+@
+
+Comments are only accepted when the question opted in, because the
+results page renders them back to the lecturer --- a question that never
+asked for prose should never accumulate it.  Empty strings are dropped
+rather than stored: the web form submits a comment input for every pin,
+so an untouched field must not show up as a blank row in the results.
+
+<<normalise pin [[comment]]>>=
+comment = pin["comment"]
+if not isinstance(comment, str):
+    raise TypeError("pin comments must be strings")
+if comment and not question.allow_comment:
+    raise ValueError("this question does not accept pin comments")
+if len(comment) > PIN_COMMENT_MAX_CHARS:
+    raise ValueError("pin comment exceeds the length limit")
+if comment:
+    normalized_pin["comment"] = comment
+@
+
+The accepting test covers both pin types and the corner coordinates, and
+pins the persisted shape --- floats, optional comment present only when
+non-empty.
+
+<<test functions>>=
+
+def test_record_normalises_pin_answers(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    question = PinTextQuestion(
+        "Pin the bug", "total =+ x", max_pins=2, allow_comment=True
+    )
+    full_hash = store.resolve(store.register(question))
+
+    store.record(
+        full_hash,
+        [{"x": 0, "y": 1}, {"x": 0.25, "y": 0.75, "comment": "here"}],
+    )
+
+    answers = store.results(full_hash)["answers"]
+    assert answers[0]["value"] == [
+        {"x": 0.0, "y": 1.0},
+        {"x": 0.25, "y": 0.75, "comment": "here"},
+    ]
+@
+
+Each rejection rule gets exercised once; together they pin the parts of
+the contract the form's JavaScript cannot be trusted to enforce.
+
+<<test functions>>=
+
+def test_record_rejects_invalid_pin_answers(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    question = PinTextQuestion("Pin the bug", "total =+ x")
+    full_hash = store.resolve(store.register(question))
+
+    with pytest.raises(ValueError, match="at least one"):
+        store.record(full_hash, [])
+    with pytest.raises(ValueError, match="more pins"):
+        store.record(full_hash, [{"x": 0.1, "y": 0.1}] * 2)
+    with pytest.raises(ValueError, match="lie in"):
+        store.record(full_hash, [{"x": 1.5, "y": 0.5}])
+    with pytest.raises(ValueError, match="lie in"):
+        store.record(full_hash, [{"x": float("nan"), "y": 0.5}])
+    with pytest.raises(TypeError, match="numbers"):
+        store.record(full_hash, [{"x": True, "y": 0.5}])
+    with pytest.raises(ValueError, match="coordinate"):
+        store.record(full_hash, [{"x": 0.5}])
+    with pytest.raises(ValueError, match="only carry"):
+        store.record(full_hash, [{"x": 0.5, "y": 0.5, "z": 0.5}])
+    with pytest.raises(ValueError, match="does not accept"):
+        store.record(
+            full_hash, [{"x": 0.5, "y": 0.5, "comment": "hi"}]
+        )
+@
+
+The comment length cap applies even when comments are allowed.
+
+<<test functions>>=
+
+def test_record_rejects_over_long_pin_comments(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    question = PinTextQuestion(
+        "Pin the bug", "total =+ x", allow_comment=True
+    )
+    full_hash = store.resolve(store.register(question))
+
+    with pytest.raises(ValueError, match="length limit"):
+        store.record(
+            full_hash,
+            [{"x": 0.5, "y": 0.5, "comment": "x" * 281}],
+        )
 @
 
 <<store methods>>=
@@ -1597,6 +1881,8 @@ def results(self, full_hash: str,
         <<add wordcloud frequencies>>
     elif isinstance(question, RankingQuestion):
         <<add ranking mean ranks>>
+    elif isinstance(question, PIN_QUESTIONS):
+        <<add pin summary>>
 
     return results
 @
@@ -1779,6 +2065,24 @@ results["order"] = sorted(
 )
 @
 
+A pin summary is deliberately raw: the flat list of every pin in the
+window, plus its length.  We considered precomputing a binned heatmap
+here, but binning resolution is presentation --- the terminal wants a
+handful of character cells while the HTML page wants a fine blurred
+grid --- so any grid stored here would couple every renderer to one
+choice.  The flat list is small (each answer carries at most
+[[max_pins]] mappings), already JSON-clean for the export endpoint, and
+each renderer bins it at its native resolution.  [[pin_count]] differs
+from [[total]]: the former counts pins, the latter respondents, and a
+multi-pin question needs both to describe participation.
+
+<<add pin summary>>=
+results["pins"] = [
+    pin for answer in answers for pin in answer["value"]
+]
+results["pin_count"] = len(results["pins"])
+@
+
 The aggregation test keeps the counting contract explicit for the
 dashboard and the watcher.
 
@@ -1839,6 +2143,34 @@ def test_results_ranking_marks_unranked_options(tmp_path):
     assert results["rank_counts"] == [0, 0, 2]
     assert results["order"][0] == 2
     assert set(results["order"]) == {0, 1, 2}
+@
+
+Pin answers flatten into one pool across respondents, so two answers
+with one and two pins respectively must yield a [[pin_count]] of three
+while [[total]] stays at two respondents.
+
+<<test functions>>=
+
+def test_results_flatten_pins_across_answers(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    question = PinTextQuestion(
+        "Pin the bug", "total =+ x", max_pins=2
+    )
+    full_hash = store.resolve(store.register(question))
+    store.record(full_hash, [{"x": 0.1, "y": 0.2}])
+    store.record(
+        full_hash, [{"x": 0.3, "y": 0.4}, {"x": 0.5, "y": 0.6}]
+    )
+
+    results = store.results(full_hash)
+
+    assert results["pin_count"] == 3
+    assert results["total"] == 2
+    assert results["pins"] == [
+        {"x": 0.1, "y": 0.2},
+        {"x": 0.3, "y": 0.4},
+        {"x": 0.5, "y": 0.6},
+    ]
 @
 
 The window filter is the cross-cutting concern, so we test it

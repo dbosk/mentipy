@@ -112,6 +112,10 @@ def render_help_excerpt():
             lines.append(line)
         if line.startswith("  open"):
             lines.append(line)
+        if line.startswith("  pin-image"):
+            lines.append(line)
+        if line.startswith("  pin-text"):
+            lines.append(line)
         if line.startswith("  ranking"):
             lines.append(line)
         if line.startswith("  scale"):
@@ -130,6 +134,10 @@ def latex_pydoc_excerpt():
             lines.append(line)
         if stripped.startswith("open_text("):
             lines.append(line)
+        if stripped.startswith("pin_image("):
+            lines.append(line)
+        if stripped.startswith("pin_text("):
+            lines.append(line)
         if stripped.startswith("ranking("):
             lines.append(line)
         if stripped.startswith("scale("):
@@ -137,6 +145,45 @@ def latex_pydoc_excerpt():
         if stripped.startswith("word_cloud("):
             lines.append(line)
     return "\n".join(lines)
+
+
+# The pin-on-image example needs an image file.  A generated PNG keeps
+# the repository free of binary assets while staying reproducible: a
+# light canvas with one red block, the obvious thing to pin.
+import os
+import struct
+import zlib
+
+
+def _png_chunk(tag, payload):
+    chunk = tag + payload
+    return (
+        struct.pack(">I", len(payload))
+        + chunk
+        + struct.pack(">I", zlib.crc32(chunk))
+    )
+
+
+def write_pin_example_png(path, width=96, height=48):
+    rows = b""
+    for y in range(height):
+        row = b"\x00"
+        for x in range(width):
+            if 56 <= x < 72 and 16 <= y < 32:
+                row += b"\xd9\x4a\x4a"
+            else:
+                row += b"\xe9\xe9\xf3"
+        rows += row
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    with open(path, "wb") as handle:
+        handle.write(b"\x89PNG\r\n\x1a\n")
+        handle.write(_png_chunk(b"IHDR", header))
+        handle.write(_png_chunk(b"IDAT", zlib.compress(rows)))
+        handle.write(_png_chunk(b"IEND", b""))
+
+
+os.makedirs("mentipy-obj", exist_ok=True)
+write_pin_example_png("mentipy-obj/pin-example.png")
 \end{pycode}
 
 \section{Choosing an Authoring Path}
@@ -669,6 +716,209 @@ Included in the document, that output compiles to:
   fresh QR code and URL on the capped slide: changing [[top_n]] mints a new
   question, whereas the word cloud's [[render]] knob keeps the same QR and
   answer pool because it only changes how the same answers are shown.
+}
+
+\subsection{A Pin-on-Image Poll}
+
+A pin poll asks the room to \emph{point}: the form shows the slide's
+image and every respondent taps it to drop a pin, optionally several
+when [[max_pins]] allows.  The results page overlays everyone's pins on
+the image and adds a density heatmap, so the lecturer sees \emph{where}
+the room looked rather than which option it picked.  The question's
+identity is the image \emph{bytes} together with the prompt and the pin
+contract ([[max_pins]], [[allow_comment]]) --- not the file path ---
+so recompiling the same slides from another directory, or renaming the
+figure file, keeps the URL, the QR code, and every collected pin.
+
+\begin{pyblock}
+from mentipy.latex import pin_image
+
+print(
+    pin_image(
+        "Tap the highlighted area you would refactor first.",
+        "mentipy-obj/pin-example.png",
+        max_pins=2,
+        allow_comment=True,
+        base_url="http://localhost:8080",
+        qr_dir="mentipy-obj",
+        layout="article+qr",
+    )
+)
+\end{pyblock}
+
+Rendered in the document, that call becomes:
+\begin{center}\printpythontex\end{center}
+
+The CLI mirrors the helper, taking the prompt and the image path as
+positional arguments:
+
+\begin{minted}{text}
+mentipy render pin-image \
+  "Tap the highlighted area you would refactor first." \
+  mentipy-obj/pin-example.png --max-pins 2 --allow-comment \
+  --base-url http://localhost:8080 --qr-dir mentipy-obj --layout article+qr
+\end{minted}
+
+\begin{pycode}
+print(
+    render_cli(
+        [
+            "render",
+            "pin-image",
+            "Tap the highlighted area you would refactor first.",
+            "mentipy-obj/pin-example.png",
+            "--max-pins",
+            "2",
+            "--allow-comment",
+            "--base-url",
+            "http://localhost:8080",
+            "--qr-dir",
+            "mentipy-obj",
+            "--layout",
+            "article+qr",
+        ]
+    )
+)
+\end{pycode}
+\saveprintpythontex{cli-pin-image}
+
+The command prints the following LaTeX:
+\useprintpythontex[verbatim]{cli-pin-image}
+
+Included in the document, that output compiles to:
+\begin{center}\useprintpythontex{cli-pin-image}\end{center}
+
+\ltnote{%
+  \textbf{Variation pattern}: Generalization across kinds.
+
+  \textbf{What varies}: The question kind, now a spatial one: the answer
+  is a place on the image, not a choice from a list, so this is the first
+  kind whose answer space is not enumerable.
+
+  \textbf{What stays invariant}: The PythonTeX-to-CLI parallel between
+  the [[pin_image]] helper and the [[pin-image]] subcommand, the base
+  URL, the QR directory, and the layout.  Both authoring paths name the
+  \emph{same} image file, and because identity is the image bytes rather
+  than the path, both calls land on one question, one QR code, and one
+  answer pool.
+
+  \textbf{What this reveals}: The identity rule generalises from
+  \enquote{the option set} to \enquote{the content the respondent reacts
+  to}: for pins that content is the picture itself, so the digest of its
+  bytes plays the role the ordered option list plays for [[mc]] and
+  [[ranking]].
+}
+
+\subsection{A Pin-on-Text Poll}
+
+The most natural pin target in a programming lecture is often not a
+figure but a piece of code: \enquote{tap the token that causes the
+bug.}  [[pin_text]] takes the target as one raw string, and a
+[[language]] flag decides how both surfaces present it --- a Pygments
+lexer name renders highlighted code on the web form and monospace lines
+on the slide, leaving it unset renders prose.  The string itself is the
+question's identity; [[language]] is presentation, so retagging the
+same snippet keeps its URL and answer pool.
+
+\begin{pyblock}
+from mentipy.latex import pin_text
+
+snippet = """def total(xs):
+    result = 0
+    for x in xs:
+        result =+ x
+    return result"""
+
+print(
+    pin_text(
+        "Tap the token that causes the bug.",
+        snippet,
+        language="python",
+        base_url="http://localhost:8080",
+        qr_dir="mentipy-obj",
+        layout="article+qr",
+    )
+)
+\end{pyblock}
+
+Rendered in the document, that call becomes:
+\begin{center}\printpythontex\end{center}
+
+Because multi-line snippets are awkward as shell arguments, the CLI
+takes the content as a \emph{file} and reads it for you --- the stored
+question still carries the text, not the path:
+
+\begin{minted}{text}
+mentipy render pin-text "Tap the token that causes the bug." \
+  pin-snippet.py --language python \
+  --base-url http://localhost:8080 --qr-dir mentipy-obj --layout article+qr
+\end{minted}
+
+\begin{pycode}
+with open("mentipy-obj/pin-snippet.py", "w", encoding="utf-8") as f:
+    f.write(
+        "def total(xs):\n"
+        "    result = 0\n"
+        "    for x in xs:\n"
+        "        result =+ x\n"
+        "    return result"
+    )
+print(
+    render_cli(
+        [
+            "render",
+            "pin-text",
+            "Tap the token that causes the bug.",
+            "mentipy-obj/pin-snippet.py",
+            "--language",
+            "python",
+            "--base-url",
+            "http://localhost:8080",
+            "--qr-dir",
+            "mentipy-obj",
+            "--layout",
+            "article+qr",
+        ]
+    )
+)
+\end{pycode}
+\saveprintpythontex{cli-pin-text}
+
+The command prints the following LaTeX:
+\useprintpythontex[verbatim]{cli-pin-text}
+
+Included in the document, that output compiles to:
+\begin{center}\useprintpythontex{cli-pin-text}\end{center}
+
+There is one more presentation mode: passing [[language="latex"]] marks
+the content as LaTeX to be typeset --- a formula, say --- rather than
+shown as source.  The slide then includes the content verbatim, and the
+helper runs [[pandoc]] once at registration to cache an HTML rendering
+for the web form, so the polling server itself never needs pandoc.  If
+pandoc is not installed when the slides compile, the helper warns and
+the form falls back to syntax-highlighted LaTeX source.
+
+\ltnote{%
+  \textbf{Variation pattern}: Contrast within the kind.
+
+  \textbf{What varies}: The pin target's medium: the previous subsection
+  pinned on an image, this one pins on text, and the closing paragraph
+  varies [[language]] across its three modes (lexer name, unset,
+  [[latex]]).  The CLI also varies its content convention --- a file
+  path instead of an inline argument.
+
+  \textbf{What stays invariant}: The whole pin contract: the answer
+  shape, [[max_pins]], [[allow_comment]], the overlay-and-heatmap
+  results view, and the rule that identity is the reacted-to content
+  (here the raw string) while presentation ([[language]]) is not.
+
+  \textbf{What this reveals}: Pin-on-image and pin-on-text are one
+  question kind with two targets, not two kinds: everything a respondent
+  and the store do is shared, and only the rendering of the target
+  differs.  The [[language]] contrast separates content from
+  presentation \emph{within} a single string-valued field family, the
+  same separation the word cloud demonstrated with its visualisation
+  knobs.
 }
 
 \subsection{Sequencing Questions}
