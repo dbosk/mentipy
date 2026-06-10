@@ -56,7 +56,7 @@ from mentipy.latex import (
     word_cloud as render_word_cloud_question,
 )
 from mentipy.network import resolve_base_url
-from mentipy.questions import bin_pins
+from mentipy.questions import bin_pins, pin_heat_color, smooth_pin_grid
 from mentipy.public import PublicExposureError, PublicMode, expose
 from mentipy.server import serve as serve_http
 from mentipy.store import (
@@ -1160,9 +1160,42 @@ def _render_terminal_ranking_stats(
     console.print(table)
 @
 
-A pin result is spatial, which a terminal can only approximate, so the
-view is a coarse character-cell heatmap plus a table of the commented
-pins.  The grid is $16 \times 8$: terminal cells are roughly twice as
+A pin result is spatial, which a terminal can only approximate, and the
+approximation depends on the pin target.  An image cannot be drawn in a
+terminal, so image questions get a coarse character-cell density grid.
+Text questions can do better: the terminal can show the \emph{content
+itself} --- the very thing respondents pinned --- and use font colour
+as the heat channel.  Both views end with the same table of commented
+pins.
+
+<<functions>>=
+def _render_terminal_pin_stats(
+    question: dict, results: dict, *, console: Console
+):
+    pins = results["pins"]
+    console.print(f"Pins: {results['pin_count']}")
+    if not pins:
+        console.print("No pins yet.")
+        return
+
+    if question["kind"] == "pintext":
+        _render_terminal_pin_text_heatmap(
+            question, results, console=console
+        )
+    else:
+        _render_terminal_pin_grid(results, console=console)
+
+    comments = [pin for pin in pins if pin.get("comment")]
+    if comments:
+        table = Table("x", "y", "Comment")
+        for pin in comments:
+            table.add_row(
+                f"{pin['x']:.2f}", f"{pin['y']:.2f}", pin["comment"]
+            )
+        console.print(table)
+@
+
+The image grid is $16 \times 8$: terminal cells are roughly twice as
 tall as they are wide, so halving the row count keeps the rendered
 block visually square and the densities undistorted.  Each cell maps
 its count to a density ramp scaled against the busiest cell, with the
@@ -1177,15 +1210,9 @@ TERMINAL_HEATMAP_RAMP = " .:-=+*#%@"
 @
 
 <<functions>>=
-def _render_terminal_pin_stats(results: dict, *, console: Console):
-    pins = results["pins"]
-    console.print(f"Pins: {results['pin_count']}")
-    if not pins:
-        console.print("No pins yet.")
-        return
-
+def _render_terminal_pin_grid(results: dict, *, console: Console):
     grid = bin_pins(
-        pins,
+        results["pins"],
         columns=TERMINAL_HEATMAP_COLUMNS,
         rows=TERMINAL_HEATMAP_ROWS,
     )
@@ -1198,19 +1225,65 @@ def _render_terminal_pin_stats(results: dict, *, console: Console):
             for count in row
         )
         console.print(f"|{line}|", highlight=False)
+@
 
-    comments = [pin for pin in pins if pin.get("comment")]
-    if comments:
-        table = Table("x", "y", "Comment")
-        for pin in comments:
-            table.add_row(
-                f"{pin['x']:.2f}", f"{pin['y']:.2f}", pin["comment"]
-            )
-        console.print(table)
+The text view recovers character coordinates from the normalised pins.
+The web form normalises clicks against the rendered content box, and
+that box is exactly as wide as the longest line and as tall as the
+line count, so multiplying $x$ by the longest line's length and $y$ by
+the number of lines maps a pin back onto an approximate character
+cell.  The column is approximate --- respondents' font metrics differ
+--- which is why the horizontal kernel spreads heat a couple of
+characters wide, while the row kernel stays nearly a point: the line
+index survives the round trip reliably, and \enquote{which line}
+is usually the question being asked.
+
+Each glyph is then coloured on the shared blue--green--yellow--red
+ramp at its cell's normalised heat; glyphs below a small floor keep
+the default terminal colour.  The content is deliberately \emph{not}
+syntax-highlighted here, unlike on the HTML pages: in the terminal
+the font colour \emph{is} the heat channel, and code colouring would
+fight the density signal on the very glyphs the lecturer is trying to
+read.  Padding each line to the full grid width keeps trailing-space
+pins addressable; the padding glyphs are spaces, so foreground colour
+on them is invisible, which is fine --- they carry no text to point
+at.
+
+<<constants>>=
+TERMINAL_PIN_TEXT_KERNEL = (1.0, 2.0, 4.0, 2.0, 1.0)
+TERMINAL_PIN_TEXT_ROW_KERNEL = (1.0, 4.0, 1.0)
+TERMINAL_PIN_HEAT_FLOOR = 0.05
+@
+
+<<functions>>=
+def _render_terminal_pin_text_heatmap(
+    question: dict, results: dict, *, console: Console
+):
+    content_lines = str(question["content"]).splitlines() or [""]
+    rows = len(content_lines)
+    columns = max(len(line) for line in content_lines) or 1
+    grid = smooth_pin_grid(
+        bin_pins(results["pins"], columns=columns, rows=rows),
+        kernel=TERMINAL_PIN_TEXT_KERNEL,
+        row_kernel=TERMINAL_PIN_TEXT_ROW_KERNEL,
+    )
+    peak = max(max(row) for row in grid) or 1.0
+
+    for row, line in enumerate(content_lines):
+        text = Text()
+        for column, character in enumerate(line.ljust(columns)):
+            intensity = grid[row][column] / peak
+            if intensity < TERMINAL_PIN_HEAT_FLOOR:
+                text.append(character)
+            else:
+                text.append(
+                    character, style=pin_heat_color(intensity)
+                )
+        console.print(text)
 @
 
 A synthetic three-pin summary exercises the headline, the visible
-single-pin cells, and the comment table in one pass.
+single-pin cells of the image grid, and the comment table in one pass.
 
 <<test functions>>=
 def test_terminal_pin_stats_show_heatmap_and_comments():
@@ -1223,6 +1296,7 @@ def test_terminal_pin_stats_show_heatmap_and_comments():
     )
 
     mentipy.cli._render_terminal_pin_stats(
+        {"kind": "pinimage"},
         {
             "pins": [
                 {"x": 0.05, "y": 0.05},
@@ -1240,6 +1314,38 @@ def test_terminal_pin_stats_show_heatmap_and_comments():
     assert output.count("|") >= 16
     assert "here" in output
     assert "0.95" in output
+@
+
+The text view must print the content itself and colour the pinned
+glyph hot.  A truecolor console makes the assertion exact: rich emits
+the hottest ramp colour as the escape sequence for RGB
+$(220, 53, 69)$, and the ANSI-stripped output must still read as the
+original snippet.
+
+<<test functions>>=
+def test_terminal_pin_text_heatmap_colours_the_content():
+    buffer = io.StringIO()
+    console = Console(
+        file=buffer,
+        force_terminal=True,
+        color_system="truecolor",
+        width=80,
+    )
+
+    mentipy.cli._render_terminal_pin_stats(
+        {"kind": "pintext", "content": "def f():\n    return 0"},
+        {
+            "pins": [{"x": 0.99, "y": 0.99, "comment": "this one"}],
+            "pin_count": 1,
+        },
+        console=console,
+    )
+
+    output = buffer.getvalue()
+    assert "def f():" in _without_ansi(output)
+    assert "return 0" in _without_ansi(output)
+    assert "\x1b[38;2;220;53;69m" in output
+    assert "this one" in _without_ansi(output)
 @
 
 The full result renderer is shared by [[view]] and the first frame of
@@ -1296,7 +1402,7 @@ def _render_results(results: dict, *, console: Console):
 
     if question["kind"] in ("pinimage", "pintext"):
         console.print("\n".join(lines))
-        _render_terminal_pin_stats(results, console=console)
+        _render_terminal_pin_stats(question, results, console=console)
         return
 
     console.print("\n".join(lines))

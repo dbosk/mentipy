@@ -1515,6 +1515,161 @@ def test_bin_pins_counts_cells_and_clamps_the_edge():
     assert sum(sum(row) for row in grid) == 3
 @
 
+\subsection{Smoothing and colouring the grid}
+
+Both heatmap renderers follow the same recipe after binning: smooth
+the grid with a small kernel, normalise against the \emph{smoothed}
+peak, and colour each cell on a cold-to-hot ramp.  Normalising after
+smoothing is load-bearing --- it is what keeps a lecture's first
+scattered pins fully visible, because the densest spot always reaches
+intensity $1$ no matter how few pins exist --- so the smoothing step
+lives here beside the binning it completes, rather than being
+reimplemented per renderer.  The kernel is a parameter because the two
+surfaces want different widths: an HTML grid cell is a fine fraction
+of the image, while a terminal character cell is already coarse.
+
+The convolution is separable --- one horizontal pass, one vertical ---
+and scatter-based: it loops over the non-zero source cells and spreads
+each into its neighbours, rather than gathering at every destination.
+Classroom grids are overwhelmingly empty, so the work stays
+proportional to the number of pinned cells.  The vertical pass may use
+its own, typically narrower, kernel: on a square image grid both axes
+are equally uncertain, but on a text grid the column carries
+font-metric error while the line index is reliable, so smearing heat
+across neighbouring lines would only blur a signal that was sharp to
+begin with.
+
+<<functions>>=
+def smooth_pin_grid(
+    grid: list[list[int]],
+    *,
+    kernel: tuple[float, ...],
+    row_kernel: tuple[float, ...] | None = None,
+) -> list[list[float]]:
+    """Convolve a binned pin grid with separable kernels.
+
+    ``kernel`` smooths along the columns of each row; the vertical
+    pass uses ``row_kernel`` when given and ``kernel`` otherwise.
+    """
+
+    radius = len(kernel) // 2
+    rows = len(grid)
+    columns = len(grid[0])
+
+    horizontal = [[0.0] * columns for _ in range(rows)]
+    for row in range(rows):
+        for column in range(columns):
+            count = grid[row][column]
+            if not count:
+                continue
+            for offset, weight in enumerate(kernel):
+                neighbour = column + offset - radius
+                if 0 <= neighbour < columns:
+                    horizontal[row][neighbour] += count * weight
+
+    vertical = row_kernel if row_kernel is not None else kernel
+    vertical_radius = len(vertical) // 2
+    smoothed = [[0.0] * columns for _ in range(rows)]
+    for row in range(rows):
+        for column in range(columns):
+            value = horizontal[row][column]
+            if not value:
+                continue
+            for offset, weight in enumerate(vertical):
+                neighbour = row + offset - vertical_radius
+                if 0 <= neighbour < rows:
+                    smoothed[neighbour][column] += value * weight
+
+    return smoothed
+@
+
+A lone count must spread into a halo whose centre stays the maximum;
+that shape is what the renderers' normalisation step relies on.  With
+an asymmetric row kernel the halo flattens: neighbouring columns heat
+up more than neighbouring rows.
+
+<<test functions>>=
+
+def test_smooth_pin_grid_spreads_a_lone_count_around_its_centre():
+    grid = [[0] * 5 for _ in range(5)]
+    grid[2][2] = 1
+
+    smoothed = smooth_pin_grid(grid, kernel=(1.0, 2.0, 1.0))
+
+    assert smoothed[2][2] == 4.0
+    assert smoothed[2][1] == 2.0
+    assert smoothed[1][1] == 1.0
+    assert smoothed[0][0] == 0.0
+@
+
+<<test functions>>=
+
+def test_smooth_pin_grid_takes_a_narrower_row_kernel():
+    grid = [[0] * 5 for _ in range(5)]
+    grid[2][2] = 1
+
+    smoothed = smooth_pin_grid(
+        grid, kernel=(1.0, 2.0, 1.0), row_kernel=(1.0,)
+    )
+
+    assert smoothed[2][2] == 2.0
+    assert smoothed[2][1] == 1.0
+    assert smoothed[1][2] == 0.0
+@
+
+The colour ramp is shared so the web page and the terminal tell the
+same story, and it walks the whole conventional spectrum --- blue,
+green, yellow, red --- rather than blending the two endpoints
+directly.  A straight blue-to-red blend passes through a murky
+purple-grey at the midpoint, which reads as \emph{less} intense than
+either end; routing through green and yellow keeps perceived intensity
+monotone, which is the entire job of a heatmap ramp.  The cold and hot
+ends pin the site's bar-chart blue and pin-marker red so the heatmap
+still reads as part of the same palette.  Only the \emph{colour} is
+shared --- how a renderer applies it (SVG fill opacity, terminal font
+styling) stays its own business.
+
+<<constants>>=
+PIN_HEAT_STOPS = (
+    (74, 144, 217),
+    (76, 175, 80),
+    (255, 193, 7),
+    (220, 53, 69),
+)
+@
+
+<<functions>>=
+def pin_heat_color(intensity: float) -> str:
+    """Return the cold-to-hot hex colour for an intensity in [0, 1].
+
+    The ramp interpolates piecewise-linearly through blue, green,
+    yellow and red, in that order.
+    """
+
+    position = intensity * (len(PIN_HEAT_STOPS) - 1)
+    index = min(int(position), len(PIN_HEAT_STOPS) - 2)
+    fraction = position - index
+    low = PIN_HEAT_STOPS[index]
+    high = PIN_HEAT_STOPS[index + 1]
+    channels = (
+        round(cold + (hot - cold) * fraction)
+        for cold, hot in zip(low, high)
+    )
+    return "#" + "".join(f"{channel:02x}" for channel in channels)
+@
+
+The thirds land exactly on the inner stops, so the test can pin all
+four spectrum colours without floating-point slack.
+
+<<test functions>>=
+
+def test_pin_heat_color_walks_blue_green_yellow_red():
+    assert pin_heat_color(0.0) == "#4a90d9"
+    assert pin_heat_color(1 / 3) == "#4caf50"
+    assert pin_heat_color(2 / 3) == "#ffc107"
+    assert pin_heat_color(1.0) == "#dc3545"
+@
+
 \section{Canonicalisation}
 
 The rest of the system works on a question union.  The helper that rebuilds a

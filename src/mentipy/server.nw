@@ -50,6 +50,8 @@ from mentipy.questions import (
     ScaleQuestion,
     WordCloudQuestion,
     bin_pins,
+    pin_heat_color,
+    smooth_pin_grid,
     sniff_image_mime,
 )
 from mentipy.store import DEFAULT_HEATMAP_BINS, Store
@@ -323,11 +325,6 @@ pre code.highlight {
   position: absolute;
   top: 0;
   width: 100%;
-}
-.pin-overlay circle {
-  fill: rgba(220, 53, 69, 0.6);
-  stroke: white;
-  stroke-width: 0.2;
 }
 #pin-fields input[type="text"] {
   display: block;
@@ -1687,10 +1684,11 @@ back HTML-escaped, never live.  The three pins land two-on-one-cell and
 one-on-another, far enough apart that their smoothed neighbourhoods do
 not overlap, so the cell centres keep the raw 2:1 ratio: the heatmap
 must paint the busy centre fully hot and the single-pin centre with the
-half-way colour of the blue-to-red ramp.
+half-way colour of the spectrum ramp.  The per-pin dot overlay is gone
+on purpose, so the absence of any [[<circle>]] is part of the contract.
 
 <<test functions>>=
-def test_pin_results_show_overlay_heatmap_and_escaped_comments(
+def test_pin_results_show_heatmap_and_escaped_comments(
     tmp_path,
 ):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
@@ -1710,11 +1708,10 @@ def test_pin_results_show_overlay_heatmap_and_escaped_comments(
     rendered = server_module._render_results(store, full_hash)
 
     assert "Total pins: <strong>3</strong>" in rendered
-    assert '<circle cx="25.00" cy="75.00"' in rendered
-    assert "<h2>Heatmap</h2>" in rendered
+    assert "<circle" not in rendered
     assert "feGaussianBlur" in rendered
-    hot = server_module._pin_heat_color(1.0)
-    halfway = server_module._pin_heat_color(0.5)
+    hot = pin_heat_color(1.0)
+    halfway = pin_heat_color(0.5)
     assert hot == "#dc3545"
     assert f'fill="{hot}"' in rendered
     assert f'fill="{halfway}"' in rendered
@@ -2756,66 +2753,45 @@ def _render_ranking_stats(
     return '<div class="bar-chart">' + "".join(rows) + '</div>'
 @
 
-A pin result is spatial, so the page shows the target twice: once with
-every pin as a translucent dot, once as a density heatmap.  The dots
-answer \enquote{what did individuals say}, the heatmap answers
-\enquote{where is the mass} once dots start occluding each other ---
-with one respondent the two are redundant, with two hundred they are
-different charts.  Both overlays are SVG elements stretched over the
-same target via [[preserveAspectRatio="none"]]: the drawing coordinates
-are the answers' normalised coordinates scaled to the [[viewBox]], so
-the overlay lines up with the target at any rendered size, which is the
-whole point of storing normalised pins.
+A pin result is spatial, and the page shows it as a single density
+heatmap stretched over the target.  An earlier iteration also drew
+every individual pin as a translucent dot in a second copy of the
+target, but normalising the heatmap against its smoothed peak made the
+dot view redundant --- sparse results now render as fully hot blobs
+exactly where the dots would have been --- and the duplicate target
+doubled the page height for no added information.  The heatmap overlay
+is an SVG stretched via [[preserveAspectRatio="none"]]: the drawing
+coordinates are the answers' normalised coordinates scaled to the
+[[viewBox]], so the overlay lines up with the target at any rendered
+size, which is the whole point of storing normalised pins.
 
-<<functions>>=
-def _render_pin_overlay(
-    target: str, pins: list[dict[str, Any]]
-) -> str:
-    circles = "".join(
-        f'<circle cx="{pin["x"] * 100:.2f}" '
-        f'cy="{pin["y"] * 100:.2f}" r="1.2"/>'
-        for pin in pins
-    )
-    return (
-        '<div class="pin-wrap">'
-        + target
-        + '<svg class="pin-overlay" viewBox="0 0 100 100" '
-        'preserveAspectRatio="none">'
-        + circles
-        + "</svg></div>"
-    )
-@
-
-The heatmap bins the raw pins at a finer resolution than the terminal
-renderer ever could, smooths the grid with a small separable kernel,
-and only then normalises: each cell's intensity is its \emph{smoothed}
-value over the smoothed peak.  The order matters.  An earlier version
+The heatmap follows the shared recipe from the questions module ---
+[[bin_pins]], then [[smooth_pin_grid]], then normalise against the
+\emph{smoothed} peak.  The order matters.  An earlier version
 normalised the raw counts and left all smoothing to an SVG gaussian
 blur, which made sparse results nearly invisible: a lecture's first
-half-dozen scattered pins each occupy a single $1/64$-width cell, and
-the blur \emph{spreads} that one cell's opacity over its neighbourhood,
-dimming the visible peak to almost nothing.  Smoothing server-side and
+half-dozen scattered pins each occupy a single grid cell, and the blur
+\emph{spreads} that one cell's opacity over its neighbourhood, dimming
+the visible peak to almost nothing.  Smoothing server-side and
 normalising afterwards guarantees the densest spot always renders fully
 hot and fully opaque whether six or six hundred pins arrived; the
 remaining SVG blur only softens the blocky cell edges and is too small
 to wash anything out.
 
-Intensity is encoded twice, as \emph{colour} sliding from blue to red
---- the conventional cold-to-hot reading of a heatmap --- and as
-opacity fading towards the blob edges, so a hotspot reads as a solid
-red core with a blue halo over a still-visible target.  The opacity
-fade is deliberately \emph{slower} than linear: alpha compositing
-already de-emphasises low values perceptually, so a linear fade makes
-the halo vanish and shrinks each hotspot back to a dot.  Raising the
-intensity to [[PIN_HEATMAP_OPACITY_GAMMA]] (a square root) lifts the
-mid-range --- a cell at half intensity keeps about 70\,\% opacity ---
-which is what makes the halo visible while the colour ramp stays
-linear and truthful.  Scaling against the busiest cell rather than the
-pin total keeps the map readable at any response count.  The endpoint
-colours reuse the site's bar-chart blue and pin-marker red, so the
-heatmap reads as part of the same palette.  Cells below a small floor
-of the peak are skipped --- the kernel tails would otherwise emit
-thousands of imperceptible rects.
+Intensity is encoded twice, as \emph{colour} walking the shared
+blue--green--yellow--red ramp ([[pin_heat_color]]) and as opacity
+fading towards the blob edges, so a hotspot reads as a solid red core
+with a cooler halo over a still-visible target.  The opacity fade is
+deliberately \emph{slower} than linear: alpha compositing already
+de-emphasises low values perceptually, so a linear fade makes the halo
+vanish and shrinks each hotspot back to a dot.  Raising the intensity
+to [[PIN_HEATMAP_OPACITY_GAMMA]] (a square root) lifts the mid-range
+--- a cell at half intensity keeps about 70\,\% opacity --- which is
+what makes the halo visible while the colour ramp stays linear and
+truthful.  Scaling against the busiest cell rather than the pin total
+keeps the map readable at any response count.  Cells below a small
+floor of the peak are skipped --- the kernel tails would otherwise
+emit thousands of imperceptible rects.
 
 The grid resolution is the one knob a lecturer may want to turn, so it
 is a configuration setting ([[mentipy.heatmap_bins]], threaded in from
@@ -2829,8 +2805,6 @@ visible from the back of a room --- while still separating hotspots a
 quarter-target apart.
 
 <<constants>>=
-PIN_HEATMAP_COLD_RGB = (74, 144, 217)
-PIN_HEATMAP_HOT_RGB = (220, 53, 69)
 PIN_HEATMAP_KERNEL = (1.0, 2.0, 4.0, 6.0, 4.0, 2.0, 1.0)
 PIN_HEATMAP_MAX_OPACITY = 0.85
 PIN_HEATMAP_OPACITY_GAMMA = 0.5
@@ -2838,61 +2812,11 @@ PIN_HEATMAP_FLOOR = 0.05
 @
 
 <<functions>>=
-def _pin_heat_color(intensity: float) -> str:
-    """Return the hex colour for a heatmap cell intensity in [0, 1]."""
-
-    channels = (
-        round(cold + (hot - cold) * intensity)
-        for cold, hot in zip(PIN_HEATMAP_COLD_RGB, PIN_HEATMAP_HOT_RGB)
-    )
-    return "#" + "".join(f"{channel:02x}" for channel in channels)
-
-
 def _pin_heat_opacity(intensity: float) -> str:
     """Return the fill opacity for a heatmap cell intensity in [0, 1]."""
 
     faded = intensity ** PIN_HEATMAP_OPACITY_GAMMA
     return f"{PIN_HEATMAP_MAX_OPACITY * faded:.2f}"
-@
-
-The convolution is separable --- one horizontal pass, one vertical ---
-and scatter-based: it loops over the non-zero source cells and spreads
-each into its neighbours, rather than gathering at every one of the
-4096 destinations.  Classroom grids are overwhelmingly empty, so the
-work stays proportional to the number of pinned cells.
-
-<<functions>>=
-def _smooth_pin_grid(grid: list[list[int]]) -> list[list[float]]:
-    """Convolve a binned pin grid with the separable heatmap kernel."""
-
-    kernel = PIN_HEATMAP_KERNEL
-    radius = len(kernel) // 2
-    rows = len(grid)
-    columns = len(grid[0])
-
-    horizontal = [[0.0] * columns for _ in range(rows)]
-    for row in range(rows):
-        for column in range(columns):
-            count = grid[row][column]
-            if not count:
-                continue
-            for offset, weight in enumerate(kernel):
-                neighbour = column + offset - radius
-                if 0 <= neighbour < columns:
-                    horizontal[row][neighbour] += count * weight
-
-    smoothed = [[0.0] * columns for _ in range(rows)]
-    for row in range(rows):
-        for column in range(columns):
-            value = horizontal[row][column]
-            if not value:
-                continue
-            for offset, weight in enumerate(kernel):
-                neighbour = row + offset - radius
-                if 0 <= neighbour < rows:
-                    smoothed[neighbour][column] += value * weight
-
-    return smoothed
 @
 
 <<functions>>=
@@ -2902,13 +2826,14 @@ def _render_pin_heatmap(
     *,
     bins: int = DEFAULT_HEATMAP_BINS,
 ) -> str:
-    grid = _smooth_pin_grid(
-        bin_pins(pins, columns=bins, rows=bins)
+    grid = smooth_pin_grid(
+        bin_pins(pins, columns=bins, rows=bins),
+        kernel=PIN_HEATMAP_KERNEL,
     )
     peak = max(max(row) for row in grid) or 1.0
     cells = "".join(
         f'<rect x="{column}" y="{row}" width="1" height="1" '
-        f'fill="{_pin_heat_color(value / peak)}" '
+        f'fill="{pin_heat_color(value / peak)}" '
         f'fill-opacity="{_pin_heat_opacity(value / peak)}"/>'
         for row, columns in enumerate(grid)
         for column, value in enumerate(columns)
@@ -2939,7 +2864,7 @@ def test_pin_heatmap_renders_a_lone_pin_at_full_intensity():
         "<img>", [{"x": 0.5, "y": 0.5}]
     )
 
-    hot = server_module._pin_heat_color(1.0)
+    hot = pin_heat_color(1.0)
     assert f'fill="{hot}" fill-opacity="0.85"' in rendered
     assert rendered.count("<rect") > 1
 @
@@ -2964,7 +2889,7 @@ def test_results_thread_heatmap_bins_into_the_svg_grid(tmp_path):
     assert 'viewBox="0 0 16 16"' in coarse
 @
 
-The stats renderer combines the two views with the pin total and the
+The stats renderer combines the heatmap with the pin total and the
 collected comments.  Comments are HTML-escaped --- they are respondent
 text, exactly the content the hardening work routes through [[escape]]
 everywhere else.  The pin count headline complements the page-level
@@ -2984,9 +2909,6 @@ def _render_pin_stats(
         f'<p>Total pins: <strong>{summary["pin_count"]}</strong></p>'
     ]
     if summary["pins"]:
-        parts.append("<h2>Pins</h2>")
-        parts.append(_render_pin_overlay(target, summary["pins"]))
-        parts.append("<h2>Heatmap</h2>")
         parts.append(
             _render_pin_heatmap(
                 target, summary["pins"], bins=heatmap_bins
