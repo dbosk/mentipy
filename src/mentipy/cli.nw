@@ -74,6 +74,8 @@ from mentipy.store import (
     QR_FORMAT_CONFIG,
     ALLOW_IMAGES_CONFIG,
     HEATMAP_BINS_CONFIG,
+    DEFAULT_PIN_HEAT,
+    PIN_HEAT_CONFIG,
     QUESTION_ENVIRONMENT_CONFIG,
     SHOW_URL_CONFIG,
     SSH_TUNNEL_CONFIG,
@@ -126,6 +128,10 @@ CONFIG_KEY_HELP = (
         HEATMAP_BINS_CONFIG,
         "Pin-results heatmap resolution in grid cells per side.",
     ),
+    (
+        PIN_HEAT_CONFIG,
+        "Pin-text heat channel in the terminal: background or foreground.",
+    ),
     (SSH_TUNNEL_CONFIG, "SSH endpoint for mentipy serve --public ssh."),
     (STORE_CONFIG, "Default path to mentipy.json."),
     (VENV_CONFIG, "Default virtualenv path used by mentipy init/activate."),
@@ -170,6 +176,10 @@ QR_FORMAT_HELP = (
     f"QR image format. Defaults to config setting {QR_FORMAT_CONFIG}."
 )
 LAYOUT_HELP = "Question layout: slide, article, article+qr, or auto."
+PIN_HEAT_HELP = (
+    "Heat channel for pin-text results: background or foreground. "
+    f"Defaults to config setting {PIN_HEAT_CONFIG}."
+)
 ROOT_HELP_EPILOG = (
     "Copyright (c) 2026 Daniel Bosk\n\n"
     "License: MIT\n\n"
@@ -206,6 +216,7 @@ WATCH_INTERVAL_OPTION = typer.Option(
     2.0,
     help="Refresh interval in seconds.",
 )
+PIN_HEAT_OPTION = typer.Option(None, "--pin-heat", help=PIN_HEAT_HELP)
 EXPORT_FORMAT_OPTION = typer.Option(
     "json",
     help="Output format: json or csv.",
@@ -251,6 +262,7 @@ OPEN_FENCE_CHOICES = (
     "haskell",
 )
 WORD_CLOUD_RENDER_CHOICES = ("svg", "scaled", "table")
+PIN_HEAT_CHOICES = ("background", "foreground")
 @
 
 Fixed-value flags need only prefix filtering over a tiny tuple.  The helper
@@ -282,6 +294,7 @@ instead of silently leaving tab-completion empty.
 LAYOUT_OPTION.autocompletion = _choice_completer(LAYOUT_CHOICES)
 QR_FORMAT_OPTION.autocompletion = _choice_completer(QR_FORMAT_CHOICES)
 EXPORT_FORMAT_OPTION.autocompletion = _choice_completer(EXPORT_FORMAT_CHOICES)
+PIN_HEAT_OPTION.autocompletion = _choice_completer(PIN_HEAT_CHOICES)
 @
 
 <<test functions>>=
@@ -291,6 +304,7 @@ EXPORT_FORMAT_OPTION.autocompletion = _choice_completer(EXPORT_FORMAT_CHOICES)
         (LAYOUT_OPTION, LAYOUT_CHOICES),
         (QR_FORMAT_OPTION, QR_FORMAT_CHOICES),
         (EXPORT_FORMAT_OPTION, EXPORT_FORMAT_CHOICES),
+        (PIN_HEAT_OPTION, PIN_HEAT_CHOICES),
     ],
 )
 def test_shared_options_advertise_choice_completion(option, expected):
@@ -1164,13 +1178,19 @@ A pin result is spatial, which a terminal can only approximate, and the
 approximation depends on the pin target.  An image cannot be drawn in a
 terminal, so image questions get a coarse character-cell density grid.
 Text questions can do better: the terminal can show the \emph{content
-itself} --- the very thing respondents pinned --- and use font colour
-as the heat channel.  Both views end with the same table of commented
-pins.
+itself} --- the very thing respondents pinned --- and use colour as
+the heat channel.  Whether that colour lands on the glyphs or on the
+cells behind them is the [[pin_heat]] choice threaded down from the
+[[view]] and [[watch]] commands.  Both views end with the same table
+of commented pins.
 
 <<functions>>=
 def _render_terminal_pin_stats(
-    question: dict, results: dict, *, console: Console
+    question: dict,
+    results: dict,
+    *,
+    console: Console,
+    pin_heat: str = DEFAULT_PIN_HEAT,
 ):
     pins = results["pins"]
     console.print(f"Pins: {results['pin_count']}")
@@ -1180,7 +1200,7 @@ def _render_terminal_pin_stats(
 
     if question["kind"] == "pintext":
         _render_terminal_pin_text_heatmap(
-            question, results, console=console
+            question, results, console=console, pin_heat=pin_heat
         )
     else:
         _render_terminal_pin_grid(results, console=console)
@@ -1238,16 +1258,20 @@ characters wide, while the row kernel stays nearly a point: the line
 index survives the round trip reliably, and \enquote{which line}
 is usually the question being asked.
 
-Each glyph is then coloured on the shared blue--green--yellow--red
-ramp at its cell's normalised heat; glyphs below a small floor keep
-the default terminal colour.  The content is deliberately \emph{not}
-syntax-highlighted here, unlike on the HTML pages: in the terminal
-the font colour \emph{is} the heat channel, and code colouring would
-fight the density signal on the very glyphs the lecturer is trying to
-read.  Padding each line to the full grid width keeps trailing-space
-pins addressable; the padding glyphs are spaces, so foreground colour
-on them is invisible, which is fine --- they carry no text to point
-at.
+Each pinned cell is then styled on the shared blue--green--yellow--red
+ramp at its normalised heat; cells below a small floor keep the plain
+terminal style.  The heat lands on the cell \emph{background} by
+default: glyphs keep a legible text colour rather than dimming into
+the theme at the cold end of the ramp, and heat over the padding that
+fills each line to the grid width stays visible, so a pin past the
+end of a short line still shows up --- foreground colour on a space
+is invisible.  Foreground mode remains available through
+[[--pin-heat]] or the [[mentipy.pin_heat]] config key for terminals
+and capture pipelines that render background colour poorly.  The
+content is deliberately \emph{not} syntax-highlighted in either mode,
+unlike on the HTML pages: colour \emph{is} the heat channel here, and
+code colouring would fight the density signal on the very glyphs the
+lecturer is trying to read.
 
 <<constants>>=
 TERMINAL_PIN_TEXT_KERNEL = (1.0, 2.0, 4.0, 2.0, 1.0)
@@ -1257,7 +1281,11 @@ TERMINAL_PIN_HEAT_FLOOR = 0.05
 
 <<functions>>=
 def _render_terminal_pin_text_heatmap(
-    question: dict, results: dict, *, console: Console
+    question: dict,
+    results: dict,
+    *,
+    console: Console,
+    pin_heat: str = DEFAULT_PIN_HEAT,
 ):
     content_lines = str(question["content"]).splitlines() or [""]
     rows = len(content_lines)
@@ -1277,9 +1305,41 @@ def _render_terminal_pin_text_heatmap(
                 text.append(character)
             else:
                 text.append(
-                    character, style=pin_heat_color(intensity)
+                    character,
+                    style=_pin_heat_style(intensity, pin_heat),
                 )
         console.print(text)
+@
+
+Rich composes foreground and background from one style string, so the
+two heat channels differ only in what the style helper returns: the
+bare ramp colour, or the ramp colour after [[on]] with a contrasting
+glyph colour in front.  The glyph colour cannot stay the terminal's
+default in background mode --- a light theme's dark text vanishes on
+the blue and red stops, a dark theme's light text on the yellow one
+--- so the helper picks black or white per cell from the perceived
+luminance of the heat colour (the ITU-R BT.601 weights, which rate
+green far brighter than blue).  On this ramp the threshold puts black
+text on the bright yellow mid-ramp and white text on the darker blue,
+green, and red stops.
+
+<<constants>>=
+PIN_HEAT_CONTRAST_LUMINANCE = 150
+@
+
+<<functions>>=
+def _pin_heat_style(intensity: float, pin_heat: str) -> str:
+    color = pin_heat_color(intensity)
+    if pin_heat == "foreground":
+        return color
+    red, green, blue = (
+        int(color[position : position + 2], 16)
+        for position in (1, 3, 5)
+    )
+    luminance = 0.299 * red + 0.587 * green + 0.114 * blue
+    if luminance > PIN_HEAT_CONTRAST_LUMINANCE:
+        return f"#000000 on {color}"
+    return f"#ffffff on {color}"
 @
 
 A synthetic three-pin summary exercises the headline, the visible
@@ -1316,14 +1376,17 @@ def test_terminal_pin_stats_show_heatmap_and_comments():
     assert "0.95" in output
 @
 
-The text view must print the content itself and colour the pinned
-glyph hot.  A truecolor console makes the assertion exact: rich emits
-the hottest ramp colour as the escape sequence for RGB
-$(220, 53, 69)$, and the ANSI-stripped output must still read as the
-original snippet.
+The text view must print the content itself and paint the pinned cell
+hot.  A truecolor console makes the assertion exact: by default rich
+emits the hottest ramp colour as a \emph{background} parameter ---
+[[48;2;]] followed by RGB $(220, 53, 69)$ --- with the white contrast
+glyph in front, and the ANSI-stripped output must still read as the
+original snippet.  The assertions match SGR parameter substrings
+rather than whole escape sequences because rich is free to merge the
+foreground and background into one sequence.
 
 <<test functions>>=
-def test_terminal_pin_text_heatmap_colours_the_content():
+def test_terminal_pin_text_heatmap_paints_the_background():
     buffer = io.StringIO()
     console = Console(
         file=buffer,
@@ -1344,8 +1407,40 @@ def test_terminal_pin_text_heatmap_colours_the_content():
     output = buffer.getvalue()
     assert "def f():" in _without_ansi(output)
     assert "return 0" in _without_ansi(output)
-    assert "\x1b[38;2;220;53;69m" in output
+    assert "48;2;220;53;69" in output
+    assert "38;2;255;255;255" in output
     assert "this one" in _without_ansi(output)
+@
+
+Foreground mode must reproduce the pre-option behaviour exactly: the
+ramp colour moves to the glyphs ([[38;2;]]) and no background heat is
+emitted at all, so a lecturer who opts out gets the old rendering, not
+a hybrid.
+
+<<test functions>>=
+def test_terminal_pin_text_heatmap_can_colour_the_foreground():
+    buffer = io.StringIO()
+    console = Console(
+        file=buffer,
+        force_terminal=True,
+        color_system="truecolor",
+        width=80,
+    )
+
+    mentipy.cli._render_terminal_pin_stats(
+        {"kind": "pintext", "content": "def f():\n    return 0"},
+        {
+            "pins": [{"x": 0.99, "y": 0.99}],
+            "pin_count": 1,
+        },
+        console=console,
+        pin_heat="foreground",
+    )
+
+    output = buffer.getvalue()
+    assert "def f():" in _without_ansi(output)
+    assert "38;2;220;53;69" in output
+    assert "48;2;" not in output
 @
 
 The full result renderer is shared by [[view]] and the first frame of
@@ -1356,7 +1451,12 @@ ranking mean ranks, pin heatmaps, and open-text average answer length
 before the transcript.
 
 <<functions>>=
-def _render_results(results: dict, *, console: Console):
+def _render_results(
+    results: dict,
+    *,
+    console: Console,
+    pin_heat: str = DEFAULT_PIN_HEAT,
+):
     question = results["question"]
     lines = [
         question["text"],
@@ -1402,7 +1502,9 @@ def _render_results(results: dict, *, console: Console):
 
     if question["kind"] in ("pinimage", "pintext"):
         console.print("\n".join(lines))
-        _render_terminal_pin_stats(question, results, console=console)
+        _render_terminal_pin_stats(
+            question, results, console=console, pin_heat=pin_heat
+        )
         return
 
     console.print("\n".join(lines))
@@ -1542,10 +1644,13 @@ def _render_results_snapshot(
     prefix: str,
     *,
     console: Console | None = None,
+    pin_heat: str = DEFAULT_PIN_HEAT,
 ):
     console = console or _result_console()
     full_hash = _resolve_full_hash(store, prefix)
-    _render_results(store.results(full_hash), console=console)
+    _render_results(
+        store.results(full_hash), console=console, pin_heat=pin_heat
+    )
 @
 
 The renderer tests need stored answers with stable timestamps.  These helpers
@@ -2637,6 +2742,24 @@ def list_questions(
     typer.echo(_question_listing(_configured_store(store).all_questions(), full=full))
 @
 
+Both display commands accept a pin-text heat channel.  The flag wins
+over the config key so a lecturer can test the other channel without
+editing persistent settings, and an unrecognised value is rejected
+rather than silently mapped to a default --- the config file is edited
+by hand, so a typo like [[backgrund]] must surface as an error, not as
+a mysteriously wrong colour scheme.
+
+<<functions>>=
+def _pin_heat_mode(value: str | None) -> str:
+    mode = value if value is not None else get_setting(PIN_HEAT_CONFIG)
+    if mode not in PIN_HEAT_CHOICES:
+        raise typer.BadParameter(
+            f"pin heat must be one of {', '.join(PIN_HEAT_CHOICES)},"
+            f" got {mode!r}"
+        )
+    return mode
+@
+
 The view command is the one-shot form of the live display.  The watcher then
 adds only the refresh loop and screen clearing, so the two commands cannot drift
 apart in how they render counts, Markdown, or timestamps.
@@ -2649,10 +2772,15 @@ def view(
         autocompletion=_complete_question_prefix,
     ),
     store: Optional[str] = STORE_OPTION,
+    pin_heat: Optional[str] = PIN_HEAT_OPTION,
 ):
     """Show current results for ``prefix`` in the terminal."""
 
-    _render_results_snapshot(_configured_store(store), prefix)
+    _render_results_snapshot(
+        _configured_store(store),
+        prefix,
+        pin_heat=_pin_heat_mode(pin_heat),
+    )
 @
 
 The one-shot command should render the shared snapshot exactly once.  The sleep
@@ -2683,6 +2811,84 @@ def test_view_command_prints_a_snapshot_once(tmp_path, monkeypatch):
     assert "**important**" not in result.stdout
 @
 
+The heat channel travels flag over config key into the shared
+renderer.  Stubbing [[_render_results_snapshot]] keeps these tests
+about the wiring, not the colours --- the rendering itself is pinned
+by the heatmap tests above.  Setting the config key to the opposite
+channel in the flag test proves precedence rather than coincidence.
+
+<<test functions>>=
+def test_view_pin_heat_flag_wins_over_the_config_key(
+    tmp_path, monkeypatch
+):
+    runner = CliRunner()
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("pin_heat", "foreground")
+    captured = {}
+
+    def fake_snapshot(store, prefix, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(
+        "mentipy.cli._render_results_snapshot", fake_snapshot
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "view",
+            "abcd",
+            "--store",
+            str(tmp_path / "mentipy.json"),
+            "--pin-heat",
+            "background",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["pin_heat"] == "background"
+
+
+def test_view_pin_heat_defaults_to_the_config_key(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("pin_heat", "foreground")
+    captured = {}
+
+    def fake_snapshot(store, prefix, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(
+        "mentipy.cli._render_results_snapshot", fake_snapshot
+    )
+
+    result = runner.invoke(
+        cli,
+        ["view", "abcd", "--store", str(tmp_path / "mentipy.json")],
+    )
+
+    assert result.exit_code == 0
+    assert captured["pin_heat"] == "foreground"
+@
+
+A hand-edited config file is the most likely source of a bad value, so
+the rejection test goes through the config key rather than the flag.
+
+<<test functions>>=
+def test_view_rejects_an_unknown_pin_heat_value(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("pin_heat", "backgrund")
+
+    result = runner.invoke(
+        cli,
+        ["view", "abcd", "--store", str(tmp_path / "mentipy.json")],
+    )
+
+    assert result.exit_code != 0
+    assert "backgrund" in result.output
+@
+
 The watcher intentionally owns the refresh loop rather than pushing that loop
 into the store.  The display policy depends on the question kind.  Aggregate
 questions redraw because their meaning is in changing counts; open questions
@@ -2698,9 +2904,11 @@ def watch(
     ),
     store: Optional[str] = STORE_OPTION,
     interval: float = WATCH_INTERVAL_OPTION,
+    pin_heat: Optional[str] = PIN_HEAT_OPTION,
 ):
     """Show live results for ``prefix`` in the terminal."""
 
+    heat_mode = _pin_heat_mode(pin_heat)
     active_store = _configured_store(store)
     full_hash = _resolve_full_hash(active_store, prefix)
     console = _result_console()
@@ -2737,7 +2945,11 @@ def watch(
         else:
             while True:
                 typer.echo(CLEAR_SCREEN, nl=False)
-                _render_results(active_store.results(full_hash), console=console)
+                _render_results(
+                    active_store.results(full_hash),
+                    console=console,
+                    pin_heat=heat_mode,
+                )
                 time.sleep(interval)
     except KeyboardInterrupt:
         return

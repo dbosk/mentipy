@@ -74,6 +74,7 @@ QUESTION_ENVIRONMENT_CONFIG = "mentipy.question_environment"
 SHOW_URL_CONFIG = "mentipy.show_url"
 ALLOW_IMAGES_CONFIG = "mentipy.allow_images"
 HEATMAP_BINS_CONFIG = "mentipy.heatmap_bins"
+PIN_HEAT_CONFIG = "mentipy.pin_heat"
 
 DEFAULT_BASE_URL = None
 DEFAULT_HOST = "0.0.0.0"
@@ -87,6 +88,7 @@ DEFAULT_QUESTION_ENVIRONMENT = None
 DEFAULT_SHOW_URL = True
 DEFAULT_ALLOW_IMAGES = False
 DEFAULT_HEATMAP_BINS = 32
+DEFAULT_PIN_HEAT = "background"
 
 DEFAULT_SETTINGS = {
     BASE_URL_CONFIG: DEFAULT_BASE_URL,
@@ -103,6 +105,7 @@ DEFAULT_SETTINGS = {
     SHOW_URL_CONFIG: DEFAULT_SHOW_URL,
     ALLOW_IMAGES_CONFIG: DEFAULT_ALLOW_IMAGES,
     HEATMAP_BINS_CONFIG: DEFAULT_HEATMAP_BINS,
+    PIN_HEAT_CONFIG: DEFAULT_PIN_HEAT,
 }
 
 STORE_TEMPLATE = {"questions": {}, "answers": {}, "registration_counter": 0}
@@ -505,6 +508,24 @@ def test_venv_setting_has_a_default_and_round_trip(tmp_path, monkeypatch):
 
     assert get_setting(VENV_CONFIG) == "./course-venv"
     assert list_settings()["venv"] == "./course-venv"
+@
+
+The terminal pin-text heat channel defaults to background colouring, and the
+default lives here rather than in the CLI module so that configuration
+discovery ([[list_settings]]) and the renderer cannot drift apart on what an
+unset key means.
+
+<<test functions>>=
+def test_pin_heat_setting_has_a_default_and_round_trips(tmp_path, monkeypatch):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+
+    assert get_setting(PIN_HEAT_CONFIG) == DEFAULT_PIN_HEAT
+    assert list_settings()["pin_heat"] == "background"
+
+    set_setting("pin_heat", "foreground")
+
+    assert get_setting(PIN_HEAT_CONFIG) == "foreground"
+    assert list_settings()["pin_heat"] == "foreground"
 @
 
 The direct [[typerconf]] command writes scalar [[--set]] values as strings.
