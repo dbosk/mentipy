@@ -11,6 +11,14 @@
 \usepackage{booktabs}
 
 \usepackage{noweb}
+% Caveat about longxref: it typesets "This definition is continued in
+% chunks ..." lists whose line count depends on the page numbers of later
+% chunks.  With many continuations (e.g. <<test functions>>) the list
+% length can feed back into the pagination it describes, so the labels
+% never converge and latexmk reruns forever ("Label(s) may have
+% changed.").  If that happens, adjust the prose near the oscillating
+% page boundary (diff two consecutive .aux files to find it) until the
+% layout has a fixed point again.
 \noweboptions{shift,breakcode,longxref,longchunks}
 
 \usepackage[natbib,style=alphabetic,maxbibnames=99]{biblatex}

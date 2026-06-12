@@ -1063,7 +1063,13 @@ def test_parse_answer_requires_every_option_in_a_full_ranking():
         )
 @
 
-A [[top_n]] poll accepts a short answer but never one longer than the cap.
+A [[top_n]] poll accepts a short answer but never one longer than the
+cap.  The test pins the boundary from both sides: an answer of exactly
+[[top_n]] options must pass, so an off-by-one in the cap check cannot
+reject legitimate full answers, and one more than the cap must fail,
+because the form's position dropdowns stopping at [[top_n]] binds only
+well-behaved browsers---a crafted POST can name any positions it likes,
+so the cap has to be enforced server-side.
 
 <<test functions>>=
 def test_parse_answer_honours_the_ranking_top_n_cap():
