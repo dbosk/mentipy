@@ -33,6 +33,7 @@ from mentipy.questions import (
     MCQuestion,
     OpenQuestion,
     PinImageQuestion,
+    PinQuestion,
     PinTextQuestion,
     Question,
     RankingQuestion,
@@ -59,6 +60,7 @@ __all__ = [
     "MCQuestion",
     "OpenQuestion",
     "PinImageQuestion",
+    "PinQuestion",
     "PinTextQuestion",
     "Question",
     "RankingQuestion",
@@ -106,6 +108,9 @@ def test_package_facade_reexports_the_public_api():
     assert RankingQuestion.__name__ == "RankingQuestion"
     assert PinImageQuestion.__name__ == "PinImageQuestion"
     assert PinTextQuestion.__name__ == "PinTextQuestion"
+    assert issubclass(PinImageQuestion, PinQuestion)
+    assert issubclass(PinTextQuestion, PinQuestion)
+    assert issubclass(PinQuestion, Question)
     assert callable(mc)
     assert callable(open_text)
     assert callable(pin_image)

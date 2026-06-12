@@ -43,8 +43,8 @@ from mentipy.questions import (
     MCQuestion,
     OpenQuestion,
     PIN_COMMENT_MAX_CHARS,
-    PIN_QUESTIONS,
     PinImageQuestion,
+    PinQuestion,
     PinTextQuestion,
     Question,
     RankingQuestion,
@@ -533,7 +533,7 @@ exceed the floor and get a spurious 413.
 def _max_request_body(question) -> int:
     if isinstance(question, (OpenQuestion, WordCloudQuestion)):
         max_chars = question.max_chars
-    elif isinstance(question, PIN_QUESTIONS):
+    elif isinstance(question, PinQuestion):
         max_chars = question.max_pins * (PIN_COMMENT_MAX_CHARS + 64)
     else:
         max_chars = 0
@@ -674,7 +674,7 @@ def _parse_answer(question, fields: dict[str, list[str]]) -> Any:
         ranked.sort()
         return [index for _, index in ranked]
 
-    if isinstance(question, PIN_QUESTIONS):
+    if isinstance(question, PinQuestion):
         pins = []
         for index in range(question.max_pins):
             raw_x = fields.get(f"pin_{index}_x", [""])[0].strip()
@@ -1290,7 +1290,7 @@ def _render_form(store: Store, full_hash: str) -> str:
     if isinstance(question, RankingQuestion):
         return _render_ranking_form(question, prefix)
 
-    if isinstance(question, PIN_QUESTIONS):
+    if isinstance(question, PinQuestion):
         return _render_pin_form(question, prefix)
 
     inputs = "".join(
@@ -2996,7 +2996,7 @@ def _render_results(
         parts.append(_render_wordcloud(question, summary["frequencies"]))
     elif isinstance(question, RankingQuestion):
         parts.append(_render_ranking_stats(question, summary))
-    elif isinstance(question, PIN_QUESTIONS):
+    elif isinstance(question, PinQuestion):
         parts.append(
             _render_pin_stats(
                 question, summary, heatmap_bins=heatmap_bins

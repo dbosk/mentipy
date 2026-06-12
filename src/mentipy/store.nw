@@ -35,8 +35,8 @@ import typerconf
 from mentipy.questions import (
     MCQuestion,
     OpenQuestion,
-    PIN_QUESTIONS,
     PIN_COMMENT_MAX_CHARS,
+    PinQuestion,
     Question,
     RankingQuestion,
     ScaleQuestion,
@@ -1430,7 +1430,7 @@ def _normalize_recorded_answer(question: Question, value: Any) -> Any:
     if isinstance(question, RankingQuestion):
         <<normalise ranking answer>>
 
-    if isinstance(question, PIN_QUESTIONS):
+    if isinstance(question, PinQuestion):
         <<normalise pin answer>>
 
     raise TypeError(f"unsupported question type: {type(question).__name__}")
@@ -1564,8 +1564,9 @@ return indices
 @
 
 A pin answer is a list of coordinate mappings, and both pin question
-types share the contract, so one arm dispatches on the [[PIN_QUESTIONS]]
-tuple.  Coordinates are normalised to the rendered target, so the closed
+types share the contract, so one arm dispatches on the shared
+[[PinQuestion]] base class.  Coordinates are normalised to the rendered
+target, so the closed
 interval $[0, 1]$ is the entire validity story --- and because neither
 [[NaN]] nor infinity satisfies a closed-interval comparison, the range
 check quietly excludes the float specials without naming them.  We
@@ -1934,7 +1935,7 @@ def results(self, full_hash: str,
         <<add wordcloud frequencies>>
     elif isinstance(question, RankingQuestion):
         <<add ranking mean ranks>>
-    elif isinstance(question, PIN_QUESTIONS):
+    elif isinstance(question, PinQuestion):
         <<add pin summary>>
 
     return results

@@ -51,25 +51,38 @@ are purely presentation, so they are dropped before the hash is
 computed and editing either between rebuilds never orphans the
 recorded answers.
 
-The shared fields are declared keyword-only.  Dataclass inheritance
-puts base-class fields first in the positional order, so default-valued
-base fields would force every subclass field to carry a default too and
-[[MCQuestion("Pick one", ("A", "B"))]] would stop working.  Marking
-them [[kw_only]] removes them from the positional order entirely ---
-they can only be passed by name, which is how every caller already
-passes them.
+The prompt [[text]] is shared too: every question type opens with it.
+It lives on the base as an ordinary positional field, which works
+because dataclass inheritance puts base-class positional fields first
+--- exactly where the prompt already sat in every signature.  The
+presentation flags, by contrast, are declared keyword-only: with
+positional defaults on the base, every subclass field would be forced
+to carry a default too and [[MCQuestion("Pick one", ("A", "B"))]]
+would stop working.  Marking them [[kw_only]] removes them from the
+positional order entirely --- they can only be passed by name, which
+is how every caller already passes them.
+
+The [[kind]] tag stays on each subclass because its default differs
+per type.  Declaring it on the base would either wedge it into the
+positional order right after [[text]] or force it keyword-only with a
+meaningless default, so the base merely relies on every subclass
+defining it --- both [[to_dict]] and the kind registry at the end of
+this chapter read it.
 
 <<classes>>=
 @dataclass(frozen=True)
 class Question:
     """Base class for all question types.
 
-    Carries the presentation flags every question shares: ``next``
-    toggles the post-submit navigation link and ``results`` is the
-    tri-state per-question override of the server's public-results
-    flag.  Both stay out of the canonical hash.
+    Carries the prompt ``text`` that every question opens with, plus
+    the presentation flags every question shares: ``next`` toggles
+    the post-submit navigation link and ``results`` is the tri-state
+    per-question override of the server's public-results flag.  The
+    flags stay out of the canonical hash.  Each subclass declares a
+    ``kind`` field whose default is its stable JSON tag.
     """
 
+    text: str
     next: bool = field(default=True, kw_only=True)
     results: bool | None = field(default=None, kw_only=True)
 
@@ -78,10 +91,11 @@ class Question:
 
 \subsection{Shared serialisation}
 
-Serialisation splits along the same line as the fields.  Each subclass
-contributes only its kind-specific persistence fields through
-[[_own_dict]]; the base appends the shared flags so that no question
-type can forget to persist them.  Keeping the shared keys explicit even
+Serialisation splits along the same line as the fields.  The base
+writes the [[kind]] tag and the prompt first, merges each subclass's
+[[_own_dict]] of kind-specific persistence fields, and appends the
+shared flags last, so that no question type can forget to persist
+them.  Keeping the shared keys explicit even
 at their default values is what lets the store treat any extra stored
 key as store-owned metadata during refresh --- in particular, a
 [[results]] override that is later removed from the slide source must
@@ -97,7 +111,8 @@ historical-hash constraints (open questions) override it.
 def to_dict(self) -> dict[str, Any]:
     """Return a JSON-friendly representation of the question."""
 
-    result = self._own_dict()
+    result = {"kind": self.kind, "text": self.text}
+    result.update(self._own_dict())
     result["next"] = self.next
     result["results"] = self.results
     return result
@@ -114,6 +129,27 @@ def _own_dict(self) -> dict[str, Any]:
     raise NotImplementedError
 @
 
+Several tests in this chapter quantify over \emph{every} question type:
+the base-class relationship, the shared-flag round trips, and the
+hash-invariance guarantees.  They share one factory table so that a
+future eighth type cannot join one of those tests and silently miss
+another --- extending the table extends them all.  Each factory accepts
+the shared keyword arguments and forwards them to the constructor.
+
+<<test functions>>=
+QUESTION_FACTORIES = [
+    lambda **kw: MCQuestion("Pick one", ("A", "B"), **kw),
+    lambda **kw: OpenQuestion("Feedback?", **kw),
+    lambda **kw: ScaleQuestion("Pace?", **kw),
+    lambda **kw: WordCloudQuestion("Topic?", **kw),
+    lambda **kw: RankingQuestion("Rank these", ("A", "B"), **kw),
+    lambda **kw: PinImageQuestion(
+        "Pin it", "0" * 64, "image/png", **kw
+    ),
+    lambda **kw: PinTextQuestion("Pin it", "total =+ x", **kw),
+]
+@
+
 [[Question]] used to be a union type alias, so the rest of the system
 already annotates with it; the base class keeps every one of those
 annotations valid while also making [[isinstance]] checks possible.  We
@@ -121,18 +157,10 @@ pin the relationship for every kind so a future question type cannot
 accidentally skip the base class and lose the shared flags.
 
 <<test functions>>=
+
 def test_all_question_kinds_share_the_question_base_class():
-    questions = [
-        MCQuestion("Pick one", ("A", "B")),
-        OpenQuestion("Feedback?"),
-        ScaleQuestion("Pace?"),
-        WordCloudQuestion("Topic?"),
-        RankingQuestion("Rank these", ("A", "B")),
-        PinImageQuestion("Pin it", "0" * 64, "image/png"),
-        PinTextQuestion("Pin it", "total =+ x"),
-    ]
-    for question in questions:
-        assert isinstance(question, Question)
+    for factory in QUESTION_FACTORIES:
+        assert isinstance(factory(), Question)
 @
 
 \section{Multiple Choice}
@@ -149,7 +177,6 @@ persistence fields.
 class MCQuestion(Question):
     """A multiple-choice question."""
 
-    text: str
     options: tuple[str, ...]
     multi: bool = False
     kind: str = "mc"
@@ -160,11 +187,11 @@ class MCQuestion(Question):
 
     def _own_dict(self) -> dict[str, Any]:
         return {
-            "kind": self.kind,
-            "text": self.text,
             "options": list(self.options),
             "multi": self.multi,
         }
+
+    <<mc question methods>>
 @
 
 Let's verify that the constructor rejects the degenerate case with no options:
@@ -222,7 +249,6 @@ class OpenQuestion(Question):
     fenced Markdown.
     """
 
-    text: str
     max_chars: int = 280
     fence: str | None = None
     kind: str = "open"
@@ -276,8 +302,6 @@ open questions that predate the fence field stays byte-for-byte stable.
 <<open question methods>>=
 def _own_dict(self) -> dict[str, Any]:
     return {
-        "kind": self.kind,
-        "text": self.text,
         "max_chars": self.max_chars,
         "fence": self.fence,
     }
@@ -374,7 +398,6 @@ minus the shared flags.
 class ScaleQuestion(Question):
     """A numeric scale question."""
 
-    text: str
     low: int = 1
     high: int = 5
     low_label: str = ""
@@ -387,13 +410,13 @@ class ScaleQuestion(Question):
 
     def _own_dict(self) -> dict[str, Any]:
         return {
-            "kind": self.kind,
-            "text": self.text,
             "low": self.low,
             "high": self.high,
             "low_label": self.low_label,
             "high_label": self.high_label,
         }
+
+    <<scale question methods>>
 @
 
 Again, the validation matters because every later component assumes a proper
@@ -453,7 +476,6 @@ class WordCloudQuestion(Question):
     navigation link and the per-question results visibility.
     """
 
-    text: str
     max_chars: int = 280
     split_words: bool = True
     min_word_length: int = 3
@@ -564,8 +586,6 @@ the same answer pool.
 <<wordcloud question methods>>=
 def _own_dict(self) -> dict[str, Any]:
     return {
-        "kind": self.kind,
-        "text": self.text,
         "max_chars": self.max_chars,
         "split_words": self.split_words,
         "min_word_length": self.min_word_length,
@@ -907,7 +927,6 @@ class RankingQuestion(Question):
     presentation.
     """
 
-    text: str
     options: tuple[str, ...]
     top_n: int | None = None
     kind: str = "ranking"
@@ -979,8 +998,6 @@ what a respondent is asked to do, so all three stay in.
 <<ranking question methods>>=
 def _own_dict(self) -> dict[str, Any]:
     return {
-        "kind": self.kind,
-        "text": self.text,
         "options": list(self.options),
         "top_n": self.top_n,
     }
@@ -1064,20 +1081,59 @@ The comment cap matches the default [[max_chars]] of open and word-cloud
 questions; it is a module constant rather than a per-question field
 because varying it would complicate identity for no authoring benefit.
 
+The contract lives on an intermediate [[PinQuestion]] base rather than
+being repeated per pin type.  That gives the rest of the system a
+single dispatch target --- the store's answer validator and the
+server's form, parser and results renderer all ask
+[[isinstance(question, PinQuestion)]], so adding a third pin target
+means subclassing once instead of hunting down every dispatch site.
+The contract fields are keyword-only for the same reason as the base
+class's flags: positional defaults here would force defaults onto the
+subclasses' target fields.
+
+<<classes>>=
+@dataclass(frozen=True)
+class PinQuestion(Question):
+    """Base class for questions answered by dropping pins.
+
+    Carries the shared pin contract: ``max_pins`` caps how many pins
+    a respondent may place and ``allow_comment`` lets each pin carry
+    a short comment.  Both shape the input contract, so they are part
+    of every pin question's canonical identity.
+    """
+
+    max_pins: int = field(default=1, kw_only=True)
+    allow_comment: bool = field(default=False, kw_only=True)
+
+    <<pin question methods>>
 <<constants>>=
 MAX_PINS_LIMIT = 100
 PIN_COMMENT_MAX_CHARS = 280
 @
 
-<<validate pin contract>>=
-if not 1 <= self.max_pins <= MAX_PINS_LIMIT:
-    raise ValueError(
-        f"max_pins must be between 1 and {MAX_PINS_LIMIT}"
-    )
+The contract validation runs from the base [[__post_init__]]; the pin
+subclasses chain to it with [[super()]] after their own target checks.
+The contract's serialisation lives here too, as a helper the
+subclasses merge into their persistence and identity dictionaries ---
+the contract enters both, unlike the shared presentation flags, which
+the base [[Question]] keeps out of the canonical shape.
+
+<<pin question methods>>=
+def __post_init__(self):
+    if not 1 <= self.max_pins <= MAX_PINS_LIMIT:
+        raise ValueError(
+            f"max_pins must be between 1 and {MAX_PINS_LIMIT}"
+        )
+
+def _pin_contract(self) -> dict[str, Any]:
+    return {
+        "max_pins": self.max_pins,
+        "allow_comment": self.allow_comment,
+    }
 @
 
-The validation chunk is reused verbatim by both pin classes, so one test
-per class is enough to show the shared contract holds on each.
+The base validates the contract once, so one test per subclass is
+enough to show that each chains its [[__post_init__]] correctly.
 
 <<test functions>>=
 
@@ -1178,7 +1234,7 @@ hand to [[\includegraphics]]; it never enters the hash.
 
 <<classes>>=
 @dataclass(frozen=True)
-class PinImageQuestion(Question):
+class PinImageQuestion(PinQuestion):
     """A question whose answers are pins dropped on an image.
 
     An answer is a list of mappings with normalised coordinates
@@ -1191,12 +1247,9 @@ class PinImageQuestion(Question):
     ``from_image_bytes``.
     """
 
-    text: str
     image_sha256: str
     image_mime: str
     image_path: str | None = None
-    max_pins: int = 1
-    allow_comment: bool = False
     kind: str = "pinimage"
 
     <<pin-image question methods>>
@@ -1209,13 +1262,15 @@ a file name for the registered image bytes: a malformed digest would
 either fail the lookup silently or, worse, smuggle path separators into
 a filesystem path.  The MIME check enforces the same allowlist as the
 sniffer so a hand-edited store file cannot relabel stored bytes as a
-type the sniffer would never produce.
+type the sniffer would never produce.  The chained [[super()]] call is
+what runs the inherited pin-contract validation --- dataclasses do not
+chain [[__post_init__]] automatically.
 
 <<pin-image question methods>>=
 def __post_init__(self):
     <<validate pin-image [[image_sha256]]>>
     <<validate pin-image [[image_mime]]>>
-    <<validate pin contract>>
+    super().__post_init__()
 @
 
 <<validate pin-image [[image_sha256]]>>=
@@ -1348,13 +1403,10 @@ pixels.
 <<pin-image question methods>>=
 def _own_dict(self) -> dict[str, Any]:
     return {
-        "kind": self.kind,
-        "text": self.text,
         "image_sha256": self.image_sha256,
         "image_mime": self.image_mime,
         "image_path": self.image_path,
-        "max_pins": self.max_pins,
-        "allow_comment": self.allow_comment,
+        **self._pin_contract(),
     }
 
 def canonical_dict(self) -> dict[str, Any]:
@@ -1364,8 +1416,7 @@ def canonical_dict(self) -> dict[str, Any]:
         "kind": self.kind,
         "text": self.text,
         "image_sha256": self.image_sha256,
-        "max_pins": self.max_pins,
-        "allow_comment": self.allow_comment,
+        **self._pin_contract(),
     }
 @
 
@@ -1416,7 +1467,7 @@ and retagging a snippet keeps its URL and answer pool.
 
 <<classes>>=
 @dataclass(frozen=True)
-class PinTextQuestion(Question):
+class PinTextQuestion(PinQuestion):
     """A question whose answers are pins dropped on rendered text.
 
     The target ``content`` is one raw string.  ``language`` selects
@@ -1430,12 +1481,9 @@ class PinTextQuestion(Question):
     ``results`` are presentation.
     """
 
-    text: str
     content: str
     language: str | None = None
     content_html: str | None = None
-    max_pins: int = 1
-    allow_comment: bool = False
     kind: str = "pintext"
 
     <<pin-text question methods>>
@@ -1448,7 +1496,7 @@ loudness as an empty option set.
 <<pin-text question methods>>=
 def __post_init__(self):
     <<validate pin-text [[content]]>>
-    <<validate pin contract>>
+    super().__post_init__()
 @
 
 <<validate pin-text [[content]]>>=
@@ -1476,13 +1524,10 @@ byte-for-byte cannot orphan collected pins.
 <<pin-text question methods>>=
 def _own_dict(self) -> dict[str, Any]:
     return {
-        "kind": self.kind,
-        "text": self.text,
         "content": self.content,
         "language": self.language,
         "content_html": self.content_html,
-        "max_pins": self.max_pins,
-        "allow_comment": self.allow_comment,
+        **self._pin_contract(),
     }
 
 def canonical_dict(self) -> dict[str, Any]:
@@ -1492,8 +1537,7 @@ def canonical_dict(self) -> dict[str, Any]:
         "kind": self.kind,
         "text": self.text,
         "content": self.content,
-        "max_pins": self.max_pins,
-        "allow_comment": self.allow_comment,
+        **self._pin_contract(),
     }
 @
 
@@ -1518,18 +1562,6 @@ def test_pin_text_canonical_dict_drops_language_html_and_next():
         "max_pins": 2,
         "allow_comment": True,
     }
-@
-
-\subsection{The pin dispatch tuple}
-
-The store's answer validation and the server's form, parser and results
-renderer all treat the two pin types identically; only the target
-rendering differs.  A shared tuple keeps that dispatch in one place ---
-adding a third pin target later means extending this tuple instead of
-hunting down every [[isinstance]] check.
-
-<<classes>>=
-PIN_QUESTIONS = (PinImageQuestion, PinTextQuestion)
 @
 
 \subsection{Binning pins into a density grid}
@@ -1751,50 +1783,85 @@ registry.
 
 \subsection{Rebuilding stored questions}
 
-The dispatcher reads the stored [[kind]] once, then hands each variant to the
-constructor that enforces that variant's invariants.  Unknown kinds fail loudly:
-guessing would make corrupted or future store files look valid.
+Each class rebuilds itself from stored JSON through a [[_from_dict]]
+classmethod, and a registry maps each stable [[kind]] tag to its class.
+The registry is built from the classes' own [[kind]] defaults rather
+than repeating the string literals, so a tag can never drift between
+serialisation and rebuilding.  Adding a question type means one more
+entry in this tuple --- there is no dispatch chain to extend.
+
+<<classes>>=
+QUESTION_KINDS = {
+    question_class.kind: question_class
+    for question_class in (
+        MCQuestion,
+        OpenQuestion,
+        ScaleQuestion,
+        WordCloudQuestion,
+        RankingQuestion,
+        PinImageQuestion,
+        PinTextQuestion,
+    )
+}
+@
+
+The public rebuilder is now only the registry lookup.  Unknown kinds
+still fail loudly: guessing would make corrupted or future store files
+look valid.
 
 <<functions>>=
 def question_from_dict(data: Mapping[str, Any]) -> Question:
     """Rebuild a question object from stored JSON data."""
 
     kind = data["kind"]
+    question_class = QUESTION_KINDS.get(kind)
+    if question_class is None:
+        raise ValueError(f"unknown question kind: {kind}")
+    return question_class._from_dict(data)
+@
 
-    <<rebuild stored multiple-choice question>>
-    <<rebuild stored open question>>
-    <<rebuild stored scale question>>
-    <<rebuild stored wordcloud question>>
-    <<rebuild stored ranking question>>
-    <<rebuild stored pin-image question>>
-    <<rebuild stored pin-text question>>
+The fields shared by every kind are extracted once, on the base class.
+The prompt is coerced back to [[str]], and the tri-state [[results]]
+override needs care: an absent or [[null]] key stays [[None]] ---
+deferring to the server's global flag --- rather than being coerced to
+[[False]], which would silently lock every legacy question out of
+public results.
 
-    raise ValueError(f"unknown question kind: {kind}")
+<<question base methods>>=
+@classmethod
+def _shared_fields(cls, data: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "text": str(data["text"]),
+        "next": bool(data.get("next", True)),
+        "results": (
+            None if data.get("results") is None else bool(data["results"])
+        ),
+    }
+@
+
+The pin base extends the shared extraction with the pin contract, so
+neither pin subclass repeats it.
+
+<<pin question methods>>=
+@classmethod
+def _shared_fields(cls, data: Mapping[str, Any]) -> dict[str, Any]:
+    return super()._shared_fields(data) | {
+        "max_pins": int(data.get("max_pins", 1)),
+        "allow_comment": bool(data.get("allow_comment", False)),
+    }
 @
 
 Multiple-choice options are stored as JSON arrays, but the frozen dataclass uses
 a tuple so callers cannot mutate a registered question after hashing it.
 
-<<rebuild stored multiple-choice question>>=
-if kind == "mc":
-    return MCQuestion(
-        text=str(data["text"]),
+<<mc question methods>>=
+@classmethod
+def _from_dict(cls, data: Mapping[str, Any]) -> "MCQuestion":
+    return cls(
         options=tuple(data["options"]),
         multi=bool(data.get("multi", False)),
-        next=bool(data.get("next", True)),
-        <<rebuild stored [[results]] override>>
+        **cls._shared_fields(data),
     )
-@
-
-The tri-state [[results]] override is read the same way for every kind:
-an absent or [[null]] key stays [[None]] --- deferring to the server's
-global flag --- rather than being coerced to [[False]], which would
-silently lock every legacy question out of public results.
-
-<<rebuild stored [[results]] override>>=
-results=(
-    None if data.get("results") is None else bool(data["results"])
-),
 @
 
 Stored JSON is less typed than the in-memory dataclasses.  We therefore coerce
@@ -1802,30 +1869,28 @@ Stored JSON is less typed than the in-memory dataclasses.  We therefore coerce
 still rebuild into the same [[OpenQuestion]] shape as freshly rendered
 questions.
 
-<<rebuild stored open question>>=
-if kind == "open":
-    return OpenQuestion(
-        text=str(data["text"]),
+<<open question methods>>=
+@classmethod
+def _from_dict(cls, data: Mapping[str, Any]) -> "OpenQuestion":
+    return cls(
         max_chars=int(data.get("max_chars", 280)),
         fence=None if data.get("fence") is None else str(data["fence"]),
-        next=bool(data.get("next", True)),
-        <<rebuild stored [[results]] override>>
+        **cls._shared_fields(data),
     )
 @
 
 Scale reconstruction keeps default bounds and labels here rather than in the
 store so old records inherit the same defaults as newly authored questions.
 
-<<rebuild stored scale question>>=
-if kind == "scale":
-    return ScaleQuestion(
-        text=str(data["text"]),
+<<scale question methods>>=
+@classmethod
+def _from_dict(cls, data: Mapping[str, Any]) -> "ScaleQuestion":
+    return cls(
         low=int(data.get("low", 1)),
         high=int(data.get("high", 5)),
         low_label=str(data.get("low_label", "")),
         high_label=str(data.get("high_label", "")),
-        next=bool(data.get("next", True)),
-        <<rebuild stored [[results]] override>>
+        **cls._shared_fields(data),
     )
 @
 
@@ -1835,10 +1900,10 @@ dataclass's hashability the next time the question takes part in a set
 or dictionary key.  Every presentation field also falls back to its
 class-level default if a hand-edited or older store file omits it.
 
-<<rebuild stored wordcloud question>>=
-if kind == "wordcloud":
-    return WordCloudQuestion(
-        text=str(data["text"]),
+<<wordcloud question methods>>=
+@classmethod
+def _from_dict(cls, data: Mapping[str, Any]) -> "WordCloudQuestion":
+    return cls(
         max_chars=int(data.get("max_chars", 280)),
         split_words=bool(data.get("split_words", True)),
         min_word_length=int(data.get("min_word_length", 3)),
@@ -1847,8 +1912,7 @@ if kind == "wordcloud":
             data.get("use_default_stopwords", True)
         ),
         render=str(data.get("render", "svg")),
-        next=bool(data.get("next", True)),
-        <<rebuild stored [[results]] override>>
+        **cls._shared_fields(data),
     )
 @
 
@@ -1858,15 +1922,14 @@ unhashable.  [[top_n]] is read with [[None]] as its fallback so an older
 or hand-edited store entry that omits it rebuilds as a full ordering, the
 same default the constructor uses.
 
-<<rebuild stored ranking question>>=
-if kind == "ranking":
+<<ranking question methods>>=
+@classmethod
+def _from_dict(cls, data: Mapping[str, Any]) -> "RankingQuestion":
     stored_top_n = data.get("top_n")
-    return RankingQuestion(
-        text=str(data["text"]),
+    return cls(
         options=tuple(data["options"]),
         top_n=None if stored_top_n is None else int(stored_top_n),
-        next=bool(data.get("next", True)),
-        <<rebuild stored [[results]] override>>
+        **cls._shared_fields(data),
     )
 @
 
@@ -1874,20 +1937,18 @@ Pin-image reconstruction is the payoff of storing the digest instead of
 re-deriving it: rebuilding never opens the image file, so a store copied
 to another machine still serves and aggregates correctly.  The MIME
 fallback only matters for hand-edited entries; anything written by
-[[from_image_bytes]] carries an explicit sniffed type.
+[[from_image_bytes]] carries an explicit sniffed type.  The pin
+contract arrives through the pin base's [[_shared_fields]].
 
-<<rebuild stored pin-image question>>=
-if kind == "pinimage":
+<<pin-image question methods>>=
+@classmethod
+def _from_dict(cls, data: Mapping[str, Any]) -> "PinImageQuestion":
     stored_path = data.get("image_path")
-    return PinImageQuestion(
-        text=str(data["text"]),
+    return cls(
         image_sha256=str(data["image_sha256"]),
         image_mime=str(data.get("image_mime", "image/png")),
         image_path=None if stored_path is None else str(stored_path),
-        max_pins=int(data.get("max_pins", 1)),
-        allow_comment=bool(data.get("allow_comment", False)),
-        next=bool(data.get("next", True)),
-        <<rebuild stored [[results]] override>>
+        **cls._shared_fields(data),
     )
 @
 
@@ -1896,21 +1957,18 @@ nullable rather than coercing [[None]] to [["None"]], which would
 otherwise silently turn a prose target into code highlighted with a
 nonsense lexer.
 
-<<rebuild stored pin-text question>>=
-if kind == "pintext":
+<<pin-text question methods>>=
+@classmethod
+def _from_dict(cls, data: Mapping[str, Any]) -> "PinTextQuestion":
     stored_language = data.get("language")
     stored_html = data.get("content_html")
-    return PinTextQuestion(
-        text=str(data["text"]),
+    return cls(
         content=str(data["content"]),
         language=(
             None if stored_language is None else str(stored_language)
         ),
         content_html=None if stored_html is None else str(stored_html),
-        max_pins=int(data.get("max_pins", 1)),
-        allow_comment=bool(data.get("allow_comment", False)),
-        next=bool(data.get("next", True)),
-        <<rebuild stored [[results]] override>>
+        **cls._shared_fields(data),
     )
 @
 
@@ -2105,19 +2163,9 @@ silently get the default behaviour back after a server restart.
 
 <<test functions>>=
 
-@pytest.mark.parametrize(
-    "question",
-    [
-        MCQuestion("Pick one", ("A", "B"), next=False),
-        OpenQuestion("Feedback?", next=False),
-        ScaleQuestion("Pace?", next=False),
-        WordCloudQuestion("Topic?", next=False),
-        RankingQuestion("Rank these", ("A", "B"), next=False),
-        PinImageQuestion("Pin it", "0" * 64, "image/png", next=False),
-        PinTextQuestion("Pin it", "total =+ x", next=False),
-    ],
-)
-def test_question_from_dict_round_trips_an_opt_out_next_flag(question):
+@pytest.mark.parametrize("factory", QUESTION_FACTORIES)
+def test_question_from_dict_round_trips_an_opt_out_next_flag(factory):
+    question = factory(next=False)
     rebuilt = question_from_dict(question.to_dict())
     assert rebuilt.next is False
     assert rebuilt.to_dict() == question.to_dict()
@@ -2132,18 +2180,8 @@ would silently revert the lecturer's choice to the global flag.
 
 @pytest.mark.parametrize("override", [True, False])
 def test_question_from_dict_round_trips_a_results_override(override):
-    questions = [
-        MCQuestion("Pick one", ("A", "B"), results=override),
-        OpenQuestion("Feedback?", results=override),
-        ScaleQuestion("Pace?", results=override),
-        WordCloudQuestion("Topic?", results=override),
-        RankingQuestion("Rank these", ("A", "B"), results=override),
-        PinImageQuestion(
-            "Pin it", "0" * 64, "image/png", results=override
-        ),
-        PinTextQuestion("Pin it", "total =+ x", results=override),
-    ]
-    for question in questions:
+    for factory in QUESTION_FACTORIES:
+        question = factory(results=override)
         rebuilt = question_from_dict(question.to_dict())
         assert rebuilt.results is override
         assert rebuilt.to_dict() == question.to_dict()
@@ -2264,40 +2302,10 @@ would shift to a fresh hash, and the old QR codes would resolve to nothing.
 <<test functions>>=
 
 def test_question_hash_invariant_to_next_flag_across_question_types():
-    pairs = [
-        (
-            MCQuestion("Pick one", ("A", "B")),
-            MCQuestion("Pick one", ("A", "B"), next=False),
-        ),
-        (
-            OpenQuestion("Feedback?"),
-            OpenQuestion("Feedback?", next=False),
-        ),
-        (
-            ScaleQuestion("Pace?"),
-            ScaleQuestion("Pace?", next=False),
-        ),
-        (
-            WordCloudQuestion("Topic?"),
-            WordCloudQuestion("Topic?", next=False),
-        ),
-        (
-            RankingQuestion("Rank these", ("A", "B")),
-            RankingQuestion("Rank these", ("A", "B"), next=False),
-        ),
-        (
-            PinImageQuestion("Pin it", "0" * 64, "image/png"),
-            PinImageQuestion(
-                "Pin it", "0" * 64, "image/png", next=False
-            ),
-        ),
-        (
-            PinTextQuestion("Pin it", "total =+ x"),
-            PinTextQuestion("Pin it", "total =+ x", next=False),
-        ),
-    ]
-    for default, opted_out in pairs:
-        assert question_hash(default) == question_hash(opted_out)
+    for factory in QUESTION_FACTORIES:
+        assert question_hash(factory()) == question_hash(
+            factory(next=False)
+        )
 @
 
 The [[results]] override is presentation in the same sense, and both
@@ -2309,18 +2317,7 @@ URL prefix and orphan the answers already collected for it.
 
 @pytest.mark.parametrize("override", [True, False])
 def test_question_hash_invariant_to_results_overrides(override):
-    factories = [
-        lambda **kw: MCQuestion("Pick one", ("A", "B"), **kw),
-        lambda **kw: OpenQuestion("Feedback?", **kw),
-        lambda **kw: ScaleQuestion("Pace?", **kw),
-        lambda **kw: WordCloudQuestion("Topic?", **kw),
-        lambda **kw: RankingQuestion("Rank these", ("A", "B"), **kw),
-        lambda **kw: PinImageQuestion(
-            "Pin it", "0" * 64, "image/png", **kw
-        ),
-        lambda **kw: PinTextQuestion("Pin it", "total =+ x", **kw),
-    ]
-    for factory in factories:
+    for factory in QUESTION_FACTORIES:
         assert question_hash(factory()) == question_hash(
             factory(results=override)
         )
