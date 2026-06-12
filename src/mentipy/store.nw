@@ -35,8 +35,8 @@ import typerconf
 from mentipy.questions import (
     MCQuestion,
     OpenQuestion,
-    PIN_QUESTIONS,
     PIN_COMMENT_MAX_CHARS,
+    PinQuestion,
     Question,
     RankingQuestion,
     ScaleQuestion,
@@ -877,6 +877,35 @@ def test_register_refresh_preserves_store_owned_metadata_keys(tmp_path):
     assert metadata["render"] == "table"
 @
 
+The tri-state [[results]] override depends on the same subtraction rule
+in a subtler way: the deferring default is [[None]], which JSON stores as
+[[null]].  Because [[to_dict]] keeps the key explicit even then, removing
+an override from the slide source and recompiling must take the question
+back to following the server's global flag --- the [[null]] is recognised
+as question-owned data rather than being misfiled as store metadata that
+would shadow every later edit.
+
+<<test functions>>=
+
+def test_register_refresh_clears_a_stale_results_override(tmp_path):
+    store_path = tmp_path / "mentipy.json"
+    prefix = Store(store_path, min_prefix=4).register(
+        OpenQuestion("Feedback?", results=True)
+    )
+
+    store = Store(store_path, min_prefix=4)
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, "More examples")
+    refreshed_prefix = store.register(OpenQuestion("Feedback?"))
+
+    reloaded = Store(store_path, min_prefix=4)
+    rebuilt = reloaded.question(full_hash)
+
+    assert refreshed_prefix == prefix
+    assert rebuilt.results is None
+    assert reloaded.results(full_hash)["answers"][0]["value"] == "More examples"
+@
+
 Resolution prefers an exact issued prefix, because that is what keeps an old QR
 code valid after a newer question collides on the same early hash characters.
 When there is no such exact reservation, we fall back to Git-style unique full
@@ -1401,7 +1430,7 @@ def _normalize_recorded_answer(question: Question, value: Any) -> Any:
     if isinstance(question, RankingQuestion):
         <<normalise ranking answer>>
 
-    if isinstance(question, PIN_QUESTIONS):
+    if isinstance(question, PinQuestion):
         <<normalise pin answer>>
 
     raise TypeError(f"unsupported question type: {type(question).__name__}")
@@ -1535,8 +1564,9 @@ return indices
 @
 
 A pin answer is a list of coordinate mappings, and both pin question
-types share the contract, so one arm dispatches on the [[PIN_QUESTIONS]]
-tuple.  Coordinates are normalised to the rendered target, so the closed
+types share the contract, so one arm dispatches on the shared
+[[PinQuestion]] base class.  Coordinates are normalised to the rendered
+target, so the closed
 interval $[0, 1]$ is the entire validity story --- and because neither
 [[NaN]] nor infinity satisfies a closed-interval comparison, the range
 check quietly excludes the float specials without naming them.  We
@@ -1905,7 +1935,7 @@ def results(self, full_hash: str,
         <<add wordcloud frequencies>>
     elif isinstance(question, RankingQuestion):
         <<add ranking mean ranks>>
-    elif isinstance(question, PIN_QUESTIONS):
+    elif isinstance(question, PinQuestion):
         <<add pin summary>>
 
     return results
