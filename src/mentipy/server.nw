@@ -46,6 +46,7 @@ from mentipy.questions import (
     PIN_QUESTIONS,
     PinImageQuestion,
     PinTextQuestion,
+    Question,
     RankingQuestion,
     ScaleQuestion,
     WordCloudQuestion,
@@ -3072,6 +3073,54 @@ def handle_error(self, request, client_address):
     super().handle_error(request, client_address)
 @
 
+Whether respondents see a live tally is decided per question.  The
+server-wide [[public_results]] flag (the CLI's [[--results]]) only sets
+the default: a question whose [[results]] field is [[True]] or [[False]]
+overrides it in either direction, so a lecturer can hide one
+bandwagon-prone poll in a deck that otherwise shows live results, or
+expose a single tally on an otherwise private server.  The resolver
+lives at module level rather than inside the handler closure because it
+depends only on its arguments, which keeps both decision points --- the
+post-submit redirect and the results-page gate --- visibly applying the
+same policy.  The override never restricts the lecturer: the admin
+check at each gate is evaluated independently of this resolution.
+
+<<functions>>=
+def _results_public(question: Question, server_default: bool) -> bool:
+    """Return whether respondents may see this question's results.
+
+    The question's tri-state ``results`` override wins when set;
+    ``None`` defers to the server-wide public-results flag.
+    """
+
+    if question.results is None:
+        return server_default
+    return question.results
+@
+
+The resolver is the whole tri-state in four lines, so we pin its truth
+table once and let the route tests focus on the HTTP behaviour.
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    "override, server_default, expected",
+    [
+        (None, False, False),
+        (None, True, True),
+        (True, False, True),
+        (False, True, False),
+    ],
+)
+def test_results_public_resolves_the_tri_state(
+    override, server_default, expected
+):
+    question = MCQuestion("Pick one", ("A", "B"), results=override)
+    assert (
+        server_module._results_public(question, server_default)
+        is expected
+    )
+@
+
 The handler is generated from the store instance.  A closure is the simplest way
 to make every request see the same persistence backend without resorting to
 global state, and it lets the CLI decide whether the live results page should
@@ -3324,14 +3373,23 @@ def _resolve(self, prefix: str) -> str | None:
 
 The [[GET]] routes separate presenter-only surfaces from student-facing ones.
 The index and JSON export are presenter-only, the results page is presenter-only
-unless the CLI explicitly enables public results, and ordinary question forms
-are available to anyone who has the URL.  \enquote{Presenter-only} is exactly
+unless results are public for that question --- the CLI-wide [[--results]]
+default as overridden per question by [[_results_public]] --- and ordinary
+question forms are available to anyone who has the URL.
+\enquote{Presenter-only} is exactly
 [[_admin_allowed()]]: localhost when running locally, the admin token once a
 tunnel is in play.  The pin-image bytes route is public like the form it
 belongs to --- the image is the lecturer's own registered slide content,
 not respondent data, so unlike [[allow_images]] (which guards
 \emph{respondent-chosen} image URLs on results pages) there is nothing to
 opt into.
+
+The per-question override forces the results route to resolve the prefix
+\emph{before} gating: the policy lives on the stored question, so we must
+load it first.  An unauthorised request for an unknown prefix therefore
+gets the resolver's 404 rather than the old 403 --- which discloses
+nothing new, because the public form route already answers 404/300 for
+the same prefixes.
 
 A query-token request is intercepted before any routing: we set the cookie and
 redirect to the de-tokenized URL, so the token is consumed exactly once and no
@@ -3397,12 +3455,15 @@ def _handle_question_get(self, segments: list[str], query: str):
         <<serve the registered pin image>>
 
     if len(segments) == 2 and segments[1] == "results":
-        if not public_results and not self._admin_allowed():
-            self._deny_admin("Results pages are")
-            return
-
         full_hash = self._resolve(segments[0])
         if full_hash is None:
+            return
+
+        question = store.question(full_hash)
+        if not _results_public(
+            question, public_results
+        ) and not self._admin_allowed():
+            self._deny_admin("Results pages are")
             return
 
         title = store.metadata(full_hash)["text"]
@@ -3495,6 +3556,9 @@ Submitting an answer is the only mutating route.  It first limits the request
 body using the question-specific cap, then chooses the parser from the content
 type, delegates semantic validation to [[_parse_answer()]], records one answer,
 and redirects to either the private thanks page or the public results page.
+The redirect target applies the same per-question policy as the results
+gate itself --- sending a respondent to a page that would then deny them
+would only trade a thanks page for an error page.
 
 <<mentipy handler post routes>>=
 def do_POST(self):
@@ -3542,7 +3606,7 @@ def do_POST(self):
 
     store.record(full_hash, value)
     prefix = store.metadata(full_hash)["url_prefix"]
-    if public_results:
+    if _results_public(question, public_results):
         self._redirect(f"/{prefix}/results")
         return
     self._redirect(f"/{prefix}/thanks")
@@ -4311,6 +4375,117 @@ def test_public_results_mode_redirects_to_results_and_allows_remote_view(
         server.shutdown()
         thread.join()
         server.server_close()
+@
+
+A question can opt \emph{into} public results on an otherwise private
+server.  The override must drive both decision points --- the post-submit
+redirect and the page gate --- and a sibling question without the
+override on the same server pins that the global default still governs
+unspecified questions.
+
+<<test functions>>=
+def test_question_results_override_opens_results_on_a_private_server(
+    tmp_path,
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    shown = store.register(
+        MCQuestion("Pick one", ("A", "B"), results=True)
+    )
+    default = store.register(MCQuestion("Pick two", ("A", "B")))
+    server = create_server(store, host="127.0.0.1", port=0)
+    server.RequestHandlerClass._is_local = lambda self: False
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        port = server.server_address[1]
+        form_headers = {
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+        response, _body = _request(
+            port, "POST", f"/{shown}", body="value=1",
+            headers=form_headers,
+        )
+        assert response.status == 303
+        assert response.getheader("Location") == f"/{shown}/results"
+
+        response, body = _request(port, "GET", f"/{shown}/results")
+        assert response.status == 200
+        assert "Total responses" in body
+
+        response, _body = _request(
+            port, "POST", f"/{default}", body="value=1",
+            headers=form_headers,
+        )
+        assert response.status == 303
+        assert response.getheader("Location") == f"/{default}/thanks"
+
+        response, body = _request(port, "GET", f"/{default}/results")
+        assert response.status == 403
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+@
+
+The opposite override hides one tally on a public-results server: the
+respondent lands on the thanks page and a direct request for the results
+page is refused.
+
+<<test functions>>=
+def test_question_results_opt_out_hides_results_on_a_public_server(
+    tmp_path,
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(
+        MCQuestion("Pick one", ("A", "B"), results=False)
+    )
+    server = create_server(
+        store, host="127.0.0.1", port=0, public_results=True
+    )
+    server.RequestHandlerClass._is_local = lambda self: False
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        port = server.server_address[1]
+        response, _body = _request(
+            port,
+            "POST",
+            f"/{prefix}",
+            body="value=1",
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded"
+            },
+        )
+        assert response.status == 303
+        assert response.getheader("Location") == f"/{prefix}/thanks"
+
+        response, body = _request(port, "GET", f"/{prefix}/results")
+        assert response.status == 403
+        assert "Results pages are only available on localhost" in body
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+@
+
+The lecturer is unaffected by an opt-out: the admin gate is evaluated
+independently of the per-question policy, so a local request still sees
+the tally of a hidden question.
+
+<<test functions>>=
+def test_question_results_opt_out_keeps_admin_access(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(
+        MCQuestion("Pick one", ("A", "B"), results=False)
+    )
+
+    with _running_server(store, public_results=True) as port:
+        response, body = _request(port, "GET", f"/{prefix}/results")
+
+    assert response.status == 200
+    assert "Total responses" in body
 @
 
 Behind an SSH tunnel the loopback test is meaningless, so we pin the dangerous

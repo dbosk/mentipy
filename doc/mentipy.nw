@@ -955,7 +955,10 @@ question is not the first in the lecture, that same row also shows
 \enquote{$\leftarrow$ Previous} on the left.  The flag defaults to true
 and is presentation only --- it does not affect the canonical hash, so
 flipping it between recompiles does not orphan any answers already
-collected.
+collected.  It is one of two presentation flags shared by every helper:
+the other, [[results]], overrides the server's [[--results]] default for
+a single question and is described in
+\cref{sec:serving-and-recompiling}.
 
 The default is what the lecturer almost always wants: a respondent who
 just submitted an answer can step to the next question without
@@ -1238,6 +1241,7 @@ Rendered in the document, that call becomes:
 }
 
 \section{Serving and Recompiling}
+\label{sec:serving-and-recompiling}
 
 Compiling the LaTeX is only half of the workflow.  Once the questions have been
 registered, [[mentipy serve]] starts the polling server that students answer.
@@ -1276,6 +1280,43 @@ The polling server is intentionally simple.  Anyone with the URL can submit
 answers and, if [[--results]] is enabled, watch the live results page.  That is
 useful for lectures, but it means the public URL should be treated like a shared
 room link rather than a private admin interface.
+
+The [[--results]] flag only sets the default.  Every question helper
+accepts a [[results]] keyword that overrides it for that question alone:
+[[results=False]] keeps one tally hidden from respondents even when the
+server runs with [[--results]] --- the classic case is a quiz question
+where an early visible majority would anchor the remaining answers ---
+while [[results=True]] exposes a single tally on an otherwise private
+server.  Omitting the keyword (or passing [[None]]) follows the server
+flag, so the flag continues to control exactly the questions that do not
+decide for themselves.
+
+\begin{minted}{python}
+from mentipy.latex import mc
+
+print(
+    mc(
+        "Which call is tail recursive?",
+        ["fact(n-1) * n", "acc * n; fact(n-1, acc)"],
+        results=False,  # hide the tally until everyone answered
+    )
+)
+\end{minted}
+
+The override lives in the slide source rather than on the command line
+because it is a property of the question: which polls must stay hidden
+does not change with how the server happens to be launched that day.
+Like [[next]], it is presentation only --- it never enters the canonical
+hash, so adding or removing it between recompiles keeps the question's
+URL and collected answers --- and it never locks the lecturer out: local
+and admin-token access to the results page is checked independently of
+the override.  The CLI mirrors the keyword with [[--results]] and
+[[--no-results]] on every [[mentipy render]] subcommand:
+
+\begin{minted}{text}
+mentipy render mc "Which call is tail recursive?" \
+  "fact(n-1) * n" "acc * n; fact(n-1, acc)" --no-results
+\end{minted}
 
 QR codes are generated when the document compiles, not when the server starts.
 If [[mentipy.base_url]] is unset, the compile-time pass uses the current LAN

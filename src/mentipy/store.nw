@@ -877,6 +877,35 @@ def test_register_refresh_preserves_store_owned_metadata_keys(tmp_path):
     assert metadata["render"] == "table"
 @
 
+The tri-state [[results]] override depends on the same subtraction rule
+in a subtler way: the deferring default is [[None]], which JSON stores as
+[[null]].  Because [[to_dict]] keeps the key explicit even then, removing
+an override from the slide source and recompiling must take the question
+back to following the server's global flag --- the [[null]] is recognised
+as question-owned data rather than being misfiled as store metadata that
+would shadow every later edit.
+
+<<test functions>>=
+
+def test_register_refresh_clears_a_stale_results_override(tmp_path):
+    store_path = tmp_path / "mentipy.json"
+    prefix = Store(store_path, min_prefix=4).register(
+        OpenQuestion("Feedback?", results=True)
+    )
+
+    store = Store(store_path, min_prefix=4)
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, "More examples")
+    refreshed_prefix = store.register(OpenQuestion("Feedback?"))
+
+    reloaded = Store(store_path, min_prefix=4)
+    rebuilt = reloaded.question(full_hash)
+
+    assert refreshed_prefix == prefix
+    assert rebuilt.results is None
+    assert reloaded.results(full_hash)["answers"][0]["value"] == "More examples"
+@
+
 Resolution prefers an exact issued prefix, because that is what keeps an old QR
 code valid after a newer question collides on the same early hash characters.
 When there is no such exact reservation, we fall back to Git-style unique full

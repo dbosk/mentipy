@@ -45,6 +45,17 @@ without scanning another QR code.  It is purely presentation, so
 [[canonical_dict]] drops it before the hash is computed and editing the value
 between rebuilds never orphans the recorded answers.
 
+The [[results]] flag is the second presentation field every question type
+shares, and unlike [[next]] it is a tri-state.  [[None]] (the default)
+leaves the decision about showing live results to respondents with the
+server's global [[--results]] flag; [[True]] and [[False]] override that
+flag for this question alone.  The override lets a lecturer keep one
+poll's tally hidden until everyone has answered --- avoiding the
+bandwagon effect of a visible majority --- while the rest of the deck
+still shows live results.  Like [[next]] it never enters the hash, so
+flipping it between rebuilds keeps the URL prefix and the collected
+answers.
+
 <<classes>>=
 @dataclass(frozen=True)
 class MCQuestion:
@@ -54,6 +65,7 @@ class MCQuestion:
     options: tuple[str, ...]
     multi: bool = False
     next: bool = True
+    results: bool | None = None
     kind: str = "mc"
 
     def __post_init__(self):
@@ -69,6 +81,7 @@ class MCQuestion:
             "options": list(self.options),
             "multi": self.multi,
             "next": self.next,
+            "results": self.results,
         }
         return result
 
@@ -77,6 +90,7 @@ class MCQuestion:
 
         result = self.to_dict()
         result.pop("next", None)
+        result.pop("results", None)
         return result
 @
 
@@ -88,9 +102,12 @@ def test_mc_question_requires_options():
         MCQuestion("Which one?", ())
 @
 
-The persistence shape keeps [[next]] explicit even at its default value.  That
-lets the store refresh question data without guessing whether an absent key
-belongs to the question or to store-owned metadata.
+The persistence shape keeps [[next]] and [[results]] explicit even at their
+default values.  That lets the store refresh question data without guessing
+whether an absent key belongs to the question or to store-owned metadata ---
+in particular, a [[results]] override that is later removed from the slide
+source must be able to revert to the deferring [[None]] on the next
+recompile.
 
 <<test functions>>=
 
@@ -101,6 +118,7 @@ def test_mc_question_to_dict_includes_a_default_next_flag():
         "options": ["A", "B"],
         "multi": False,
         "next": True,
+        "results": None,
     }
 
 
@@ -118,10 +136,9 @@ The fence hint also belongs here, but it has to be a single CommonMark info
 word: whitespace or backticks would change the structure of the generated fence
 rather than just its language tag.  We omit the hint from the canonical JSON
 when it is unset so existing open-question hashes stay byte-for-byte stable.
-The shared [[next]] flag enables the \enquote{Next $\rightarrow$} link in the
-response flow; like every presentation field it is stripped by
-[[canonical_dict]] before hashing, so flipping it does not orphan the recorded
-answers.
+The shared [[next]] and [[results]] flags shape the response flow; like every
+presentation field they are stripped by [[canonical_dict]] before hashing, so
+flipping either does not orphan the recorded answers.
 
 <<classes>>=
 @dataclass(frozen=True)
@@ -136,6 +153,7 @@ class OpenQuestion:
     max_chars: int = 280
     fence: str | None = None
     next: bool = True
+    results: bool | None = None
     kind: str = "open"
 
     <<open question methods>>
@@ -180,9 +198,9 @@ if self.fence is not None and (
 
 The persistence shape records every question-owned field explicitly.  That lets
 the store treat any extra stored key as store-owned metadata during refresh.
-[[canonical_dict]] still strips the presentation-only [[next]] flag and omits
-an unset [[fence]] so the hash of historical open questions stays byte-for-byte
-stable.
+[[canonical_dict]] still strips the presentation-only [[next]] and [[results]]
+flags and omits an unset [[fence]] so the hash of historical open questions
+stays byte-for-byte stable.
 
 <<open question methods>>=
 def to_dict(self) -> dict[str, Any]:
@@ -194,6 +212,7 @@ def to_dict(self) -> dict[str, Any]:
         "max_chars": self.max_chars,
         "fence": self.fence,
         "next": self.next,
+        "results": self.results,
     }
     return result
 
@@ -202,6 +221,7 @@ def canonical_dict(self) -> dict[str, Any]:
 
     result = self.to_dict()
     result.pop("next", None)
+    result.pop("results", None)
     if result["fence"] is None:
         result.pop("fence")
     return result
@@ -240,6 +260,7 @@ def test_open_question_to_dict_includes_default_fields():
         "max_chars": 280,
         "fence": None,
         "next": True,
+        "results": None,
     }
 @
 
@@ -255,12 +276,13 @@ def test_open_question_to_dict_includes_a_configured_fence():
         "max_chars": 280,
         "fence": "python",
         "next": True,
+        "results": None,
     }
 @
 
 A [[next=False]] open question must surface the opt-out in [[to_dict]] so it
-persists across server restarts, while [[canonical_dict]] still hides both the
-presentation-only [[next]] flag and an unset [[fence]].
+persists across server restarts, while [[canonical_dict]] still hides the
+presentation-only [[next]] and [[results]] flags and an unset [[fence]].
 
 <<test functions>>=
 
@@ -269,6 +291,7 @@ def test_open_question_to_dict_records_an_opt_out_next_flag():
     assert payload["next"] is False
     canonical = OpenQuestion("Q").canonical_dict()
     assert "next" not in canonical
+    assert "results" not in canonical
     assert "fence" not in canonical
 @
 
@@ -278,7 +301,8 @@ Scale questions represent the common
 \enquote{rate this from one to five} style
 interaction.  The labels are optional, but the range must be sensible.  As with
 the other question types, the shared [[next]] flag toggles the
-\enquote{Next $\rightarrow$} link and never enters the hash.
+\enquote{Next $\rightarrow$} link, the shared [[results]] tri-state overrides
+the server's global results visibility, and neither enters the hash.
 
 <<classes>>=
 @dataclass(frozen=True)
@@ -291,6 +315,7 @@ class ScaleQuestion:
     low_label: str = ""
     high_label: str = ""
     next: bool = True
+    results: bool | None = None
     kind: str = "scale"
 
     def __post_init__(self):
@@ -308,6 +333,7 @@ class ScaleQuestion:
             "low_label": self.low_label,
             "high_label": self.high_label,
             "next": self.next,
+            "results": self.results,
         }
         return result
 
@@ -316,6 +342,7 @@ class ScaleQuestion:
 
         result = self.to_dict()
         result.pop("next", None)
+        result.pop("results", None)
         return result
 @
 
@@ -338,7 +365,9 @@ identity payload.
 def test_scale_question_to_dict_records_an_opt_out_next_flag():
     payload = ScaleQuestion("Pace?", next=False).to_dict()
     assert payload["next"] is False
-    assert "next" not in ScaleQuestion("Pace?").canonical_dict()
+    canonical = ScaleQuestion("Pace?").canonical_dict()
+    assert "next" not in canonical
+    assert "results" not in canonical
 @
 
 \section{Word Clouds}
@@ -369,8 +398,9 @@ class WordCloudQuestion:
     ``extra_stop_words``, ``use_default_stopwords``, ``render``) are
     presentation hints: they do not affect the question's canonical
     identity, so editing them and recompiling preserves the existing
-    answer pool.  The shared ``next`` flag is presentation in the
-    same sense---it only controls the post-submit navigation link.
+    answer pool.  The shared ``next`` and ``results`` flags are
+    presentation in the same sense---they only control the post-submit
+    navigation link and the per-question results visibility.
     """
 
     text: str
@@ -381,6 +411,7 @@ class WordCloudQuestion:
     use_default_stopwords: bool = True
     render: str = "svg"
     next: bool = True
+    results: bool | None = None
     kind: str = "wordcloud"
 
     <<wordcloud question methods>>
@@ -494,6 +525,7 @@ def to_dict(self) -> dict[str, Any]:
         "use_default_stopwords": self.use_default_stopwords,
         "render": self.render,
         "next": self.next,
+        "results": self.results,
     }
     return result
 
@@ -536,14 +568,16 @@ def test_word_cloud_to_dict_includes_all_fields():
         "use_default_stopwords": False,
         "render": "table",
         "next": True,
+        "results": None,
     }
 @
 
 The canonical dictionary is the central guarantee of this question type:
 no matter how the presentation evolves, two word clouds with the same
 prompt and character limit share an identity.  We deliberately vary every
-presentation field at once, including the new [[next]] flag, so any one of
-them slipping into the canonical payload would break this assertion.
+presentation field at once, including the shared [[next]] and [[results]]
+flags, so any one of them slipping into the canonical payload would break
+this assertion.
 
 <<test functions>>=
 
@@ -556,6 +590,7 @@ def test_word_cloud_canonical_dict_excludes_presentation_fields():
         extra_stop_words=("foo",),
         use_default_stopwords=False,
         next=False,
+        results=False,
     )
 
     assert question.canonical_dict() == {
@@ -811,7 +846,7 @@ that many favourites, which keeps a long option list approachable.  Both
 the form and the answer recorder treat [[top_n]] as a hard cap on how
 many ranks a respondent may assign, so --- like the option set itself ---
 it shapes the input contract and must enter the canonical identity.  Only
-the shared [[next]] flag is presentation.
+the shared [[next]] and [[results]] flags are presentation.
 
 <<classes>>=
 @dataclass(frozen=True)
@@ -823,13 +858,15 @@ class RankingQuestion:
     many items a respondent ranks: ``None`` asks for a full ordering of
     every option, while an integer asks for only that many favourites.
     Like the option set, ``top_n`` shapes the input contract, so it is
-    part of the canonical identity; only ``next`` is presentation.
+    part of the canonical identity; only ``next`` and ``results`` are
+    presentation.
     """
 
     text: str
     options: tuple[str, ...]
     top_n: int | None = None
     next: bool = True
+    results: bool | None = None
     kind: str = "ranking"
 
     <<ranking question methods>>
@@ -891,9 +928,10 @@ def test_ranking_question_rejects_out_of_range_top_n():
 The persistence shape keeps [[top_n]] explicit, even at its [[None]]
 default, so the store can refresh a ranking question without guessing
 whether an absent key means \enquote{full ordering} or \enquote{this is
-store metadata}.  [[canonical_dict]] strips only [[next]]: the prompt,
-the ordered option set, and [[top_n]] all shape what a respondent is
-asked to do, so all three stay in the identity.
+store metadata}.  [[canonical_dict]] strips only the shared [[next]] and
+[[results]] flags: the prompt, the ordered option set, and [[top_n]] all
+shape what a respondent is asked to do, so all three stay in the
+identity.
 
 <<ranking question methods>>=
 def to_dict(self) -> dict[str, Any]:
@@ -905,6 +943,7 @@ def to_dict(self) -> dict[str, Any]:
         "options": list(self.options),
         "top_n": self.top_n,
         "next": self.next,
+        "results": self.results,
     }
 
 def canonical_dict(self) -> dict[str, Any]:
@@ -912,6 +951,7 @@ def canonical_dict(self) -> dict[str, Any]:
 
     result = self.to_dict()
     result.pop("next", None)
+    result.pop("results", None)
     return result
 @
 
@@ -928,6 +968,7 @@ def test_ranking_question_to_dict_includes_top_n():
         "options": ["A", "B", "C"],
         "top_n": None,
         "next": True,
+        "results": None,
     }
     partial = RankingQuestion(
         "Rank these", ("A", "B", "C"), top_n=2
@@ -935,15 +976,16 @@ def test_ranking_question_to_dict_includes_top_n():
     assert partial["top_n"] == 2
 @
 
-The canonical dictionary keeps [[top_n]] but drops [[next]], which is the
-inverse of the word-cloud guarantee: there the visualisation never enters
-identity, here the answer-shaping cap always does.
+The canonical dictionary keeps [[top_n]] but drops [[next]] and
+[[results]], which is the inverse of the word-cloud guarantee: there the
+visualisation never enters identity, here the answer-shaping cap always
+does.
 
 <<test functions>>=
 
 def test_ranking_canonical_dict_keeps_top_n_but_drops_next():
     question = RankingQuestion(
-        "Rank these", ("A", "B", "C"), top_n=2, next=False
+        "Rank these", ("A", "B", "C"), top_n=2, next=False, results=True
     )
 
     assert question.canonical_dict() == {
@@ -1113,8 +1155,9 @@ class PinImageQuestion:
     optional short ``comment``.  The identity is the image *bytes*
     (via ``image_sha256``) together with the pin contract
     (``max_pins``, ``allow_comment``); the stored ``image_path`` and
-    ``image_mime`` are presentation.  Build instances from raw bytes
-    with ``from_image_bytes``.
+    ``image_mime`` are presentation, as are the shared ``next`` and
+    ``results`` flags.  Build instances from raw bytes with
+    ``from_image_bytes``.
     """
 
     text: str
@@ -1124,6 +1167,7 @@ class PinImageQuestion:
     max_pins: int = 1
     allow_comment: bool = False
     next: bool = True
+    results: bool | None = None
     kind: str = "pinimage"
 
     <<pin-image question methods>>
@@ -1203,6 +1247,7 @@ def from_image_bytes(
     max_pins: int = 1,
     allow_comment: bool = False,
     next: bool = True,
+    results: bool | None = None,
 ) -> "PinImageQuestion":
     """Build a pin-image question from raw image bytes.
 
@@ -1225,6 +1270,7 @@ def from_image_bytes(
         max_pins=max_pins,
         allow_comment=allow_comment,
         next=next,
+        results=results,
     )
 @
 
@@ -1281,6 +1327,7 @@ def to_dict(self) -> dict[str, Any]:
         "max_pins": self.max_pins,
         "allow_comment": self.allow_comment,
         "next": self.next,
+        "results": self.results,
     }
 
 def canonical_dict(self) -> dict[str, Any]:
@@ -1306,6 +1353,7 @@ def test_pin_image_canonical_dict_drops_path_mime_and_next():
         max_pins=3,
         allow_comment=True,
         next=False,
+        results=False,
     )
 
     assert question.canonical_dict() == {
@@ -1351,8 +1399,8 @@ class PinTextQuestion:
     ``content_html`` for the web form).  Answers share the pin-image
     shape: mappings with normalised ``x`` and ``y`` in [0, 1] and an
     optional ``comment``.  Identity is the prompt, the content string
-    and the pin contract; ``language``, ``content_html`` and ``next``
-    are presentation.
+    and the pin contract; ``language``, ``content_html``, ``next`` and
+    ``results`` are presentation.
     """
 
     text: str
@@ -1362,6 +1410,7 @@ class PinTextQuestion:
     max_pins: int = 1
     allow_comment: bool = False
     next: bool = True
+    results: bool | None = None
     kind: str = "pintext"
 
     <<pin-text question methods>>
@@ -1412,6 +1461,7 @@ def to_dict(self) -> dict[str, Any]:
         "max_pins": self.max_pins,
         "allow_comment": self.allow_comment,
         "next": self.next,
+        "results": self.results,
     }
 
 def canonical_dict(self) -> dict[str, Any]:
@@ -1437,6 +1487,7 @@ def test_pin_text_canonical_dict_drops_language_html_and_next():
         max_pins=2,
         allow_comment=True,
         next=False,
+        results=True,
     )
 
     assert question.canonical_dict() == {
@@ -1721,7 +1772,19 @@ if kind == "mc":
         options=tuple(data["options"]),
         multi=bool(data.get("multi", False)),
         next=bool(data.get("next", True)),
+        <<rebuild stored [[results]] override>>
     )
+@
+
+The tri-state [[results]] override is read the same way for every kind:
+an absent or [[null]] key stays [[None]] --- deferring to the server's
+global flag --- rather than being coerced to [[False]], which would
+silently lock every legacy question out of public results.
+
+<<rebuild stored [[results]] override>>=
+results=(
+    None if data.get("results") is None else bool(data["results"])
+),
 @
 
 Stored JSON is less typed than the in-memory dataclasses.  We therefore coerce
@@ -1736,6 +1799,7 @@ if kind == "open":
         max_chars=int(data.get("max_chars", 280)),
         fence=None if data.get("fence") is None else str(data["fence"]),
         next=bool(data.get("next", True)),
+        <<rebuild stored [[results]] override>>
     )
 @
 
@@ -1751,6 +1815,7 @@ if kind == "scale":
         low_label=str(data.get("low_label", "")),
         high_label=str(data.get("high_label", "")),
         next=bool(data.get("next", True)),
+        <<rebuild stored [[results]] override>>
     )
 @
 
@@ -1773,6 +1838,7 @@ if kind == "wordcloud":
         ),
         render=str(data.get("render", "svg")),
         next=bool(data.get("next", True)),
+        <<rebuild stored [[results]] override>>
     )
 @
 
@@ -1790,6 +1856,7 @@ if kind == "ranking":
         options=tuple(data["options"]),
         top_n=None if stored_top_n is None else int(stored_top_n),
         next=bool(data.get("next", True)),
+        <<rebuild stored [[results]] override>>
     )
 @
 
@@ -1810,6 +1877,7 @@ if kind == "pinimage":
         max_pins=int(data.get("max_pins", 1)),
         allow_comment=bool(data.get("allow_comment", False)),
         next=bool(data.get("next", True)),
+        <<rebuild stored [[results]] override>>
     )
 @
 
@@ -1832,6 +1900,7 @@ if kind == "pintext":
         max_pins=int(data.get("max_pins", 1)),
         allow_comment=bool(data.get("allow_comment", False)),
         next=bool(data.get("next", True)),
+        <<rebuild stored [[results]] override>>
     )
 @
 
@@ -1858,6 +1927,7 @@ def test_mc_question_round_trip():
         "options": ["Great", "OK", "Boring"],
         "multi": True,
         "next": True,
+        "results": None,
     }
 @
 
@@ -1881,6 +1951,7 @@ def test_open_question_round_trip_without_fence():
         "max_chars": 140,
         "fence": None,
         "next": True,
+        "results": None,
     }
 @
 
@@ -1905,6 +1976,7 @@ def test_open_question_round_trip_with_fence():
         "max_chars": 5000,
         "fence": "python",
         "next": True,
+        "results": None,
     }
 @
 
@@ -1934,6 +2006,7 @@ def test_scale_question_round_trip():
         "low_label": "slow",
         "high_label": "fast",
         "next": True,
+        "results": None,
     }
 @
 
@@ -1970,6 +2043,7 @@ def test_word_cloud_round_trip_preserves_extra_stop_words_as_tuple():
         "use_default_stopwords": False,
         "render": "table",
         "next": True,
+        "results": None,
     }
 @
 
@@ -1993,7 +2067,7 @@ def test_pin_image_round_trip_preserves_digest_and_contract():
     question = question_from_dict(payload)
 
     assert isinstance(question, PinImageQuestion)
-    assert question.to_dict() == payload | {"next": True}
+    assert question.to_dict() == payload | {"next": True, "results": None}
 @
 
 <<test functions>>=
@@ -2012,7 +2086,7 @@ def test_pin_text_round_trip_preserves_language_and_cached_html():
     question = question_from_dict(payload)
 
     assert isinstance(question, PinTextQuestion)
-    assert question.to_dict() == payload | {"next": True}
+    assert question.to_dict() == payload | {"next": True, "results": None}
 @
 
 The [[next]] flag has to survive the store's JSON detour for every question
@@ -2039,6 +2113,32 @@ def test_question_from_dict_round_trips_an_opt_out_next_flag(question):
     assert rebuilt.to_dict() == question.to_dict()
 @
 
+The [[results]] override must survive the same detour, and both
+non-default states matter: [[False]] hides a tally the server would show,
+[[True]] shows one the server would hide.  Losing either across a restart
+would silently revert the lecturer's choice to the global flag.
+
+<<test functions>>=
+
+@pytest.mark.parametrize("override", [True, False])
+def test_question_from_dict_round_trips_a_results_override(override):
+    questions = [
+        MCQuestion("Pick one", ("A", "B"), results=override),
+        OpenQuestion("Feedback?", results=override),
+        ScaleQuestion("Pace?", results=override),
+        WordCloudQuestion("Topic?", results=override),
+        RankingQuestion("Rank these", ("A", "B"), results=override),
+        PinImageQuestion(
+            "Pin it", "0" * 64, "image/png", results=override
+        ),
+        PinTextQuestion("Pin it", "total =+ x", results=override),
+    ]
+    for question in questions:
+        rebuilt = question_from_dict(question.to_dict())
+        assert rebuilt.results is override
+        assert rebuilt.to_dict() == question.to_dict()
+@
+
 \subsection{Hashing canonical JSON}
 
 The canonical hash uses sorted JSON keys so that it depends on the meaning of
@@ -2046,7 +2146,8 @@ the question, not on the incidental order in which Python produced a mapping.
 
 Every question type now exposes a [[canonical_dict]] method that returns the
 identity-only payload.  For multiple-choice and scale questions the identity is
-the whole persistence shape minus the [[next]] flag.  Open questions do the
+the whole persistence shape minus the shared presentation flags ([[next]] and
+[[results]]).  Open questions do the
 same and additionally drop an unset [[fence]] so historical hashes stay
 byte-for-byte stable even though [[to_dict]] now records explicit defaults.
 Word clouds additionally strip their visualisation fields, keeping existing
@@ -2187,6 +2288,32 @@ def test_question_hash_invariant_to_next_flag_across_question_types():
     ]
     for default, opted_out in pairs:
         assert question_hash(default) == question_hash(opted_out)
+@
+
+The [[results]] override is presentation in the same sense, and both
+non-default states must hash identically to the deferring default ---
+otherwise hiding a single question's tally mid-lecture would mint a new
+URL prefix and orphan the answers already collected for it.
+
+<<test functions>>=
+
+@pytest.mark.parametrize("override", [True, False])
+def test_question_hash_invariant_to_results_overrides(override):
+    factories = [
+        lambda **kw: MCQuestion("Pick one", ("A", "B"), **kw),
+        lambda **kw: OpenQuestion("Feedback?", **kw),
+        lambda **kw: ScaleQuestion("Pace?", **kw),
+        lambda **kw: WordCloudQuestion("Topic?", **kw),
+        lambda **kw: RankingQuestion("Rank these", ("A", "B"), **kw),
+        lambda **kw: PinImageQuestion(
+            "Pin it", "0" * 64, "image/png", **kw
+        ),
+        lambda **kw: PinTextQuestion("Pin it", "total =+ x", **kw),
+    ]
+    for factory in factories:
+        assert question_hash(factory()) == question_hash(
+            factory(results=override)
+        )
 @
 
 The test root is intentionally small: the interesting details live next to the
