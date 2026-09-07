@@ -177,6 +177,16 @@ QUESTION_RESULTS_HELP = (
     "--no-results hides it even on a --results server. Omit both to "
     "follow the server flag."
 )
+LOCK_HELP = (
+    "Pace respondents with your slides: a question opens for them when "
+    "you open its results page, and /active redirects to the current "
+    "one. Use --no-lock to serve every question at once."
+)
+QUESTION_LOCK_HELP = (
+    "Wait for the lecturer to open this question's results page before "
+    "respondents can answer it. Use --no-lock on a question that shares "
+    "a slide with the one before it, so it opens together with it."
+)
 BASE_URL_HELP = (
     "Override the configured base URL from config setting "
     f"{BASE_URL_CONFIG}. Use 'auto' to resolve the current LAN address."
@@ -202,6 +212,7 @@ STORE_OPTION = typer.Option(None, help=STORE_HELP)
 VENV_OPTION = typer.Option(None, help=VENV_HELP)
 PUBLIC_OPTION = typer.Option(False, "--public", help=PUBLIC_HELP)
 RESULTS_OPTION = typer.Option(False, "--results", help=RESULTS_HELP)
+LOCK_OPTION = typer.Option(True, "--lock/--no-lock", help=LOCK_HELP)
 ENVIRONMENT_OPTION = typer.Option(None, "--env", help=ENVIRONMENT_HELP)
 LAYOUT_OPTION = typer.Option("slide", "--layout", help=LAYOUT_HELP)
 URL_VISIBILITY_OPTION = typer.Option(
@@ -218,6 +229,11 @@ RESULTS_VISIBILITY_OPTION = typer.Option(
     None,
     "--results/--no-results",
     help=QUESTION_RESULTS_HELP,
+)
+QUESTION_LOCK_OPTION = typer.Option(
+    True,
+    "--lock/--no-lock",
+    help=QUESTION_LOCK_HELP,
 )
 RENDER_BASE_URL_OPTION = typer.Option(
     None,
@@ -384,6 +400,15 @@ def _format_index_hint(public_url: str, host: str, port: int) -> str:
     )
 
 
+def _format_lock_hint(public_url: str) -> str:
+    active_url = public_url.rstrip("/") + "/active"
+    return (
+        "Questions open for respondents as you open their results pages "
+        "(open the first one before showing its slide).\n"
+        f"Latecomers can use {active_url}; --no-lock serves everything."
+    )
+
+
 def _index_host(host: str) -> str:
     try:
         address = ipaddress.ip_address(host)
@@ -444,34 +469,35 @@ def _latex_reference() -> str:
                                        scale, word_cloud)
 
           mc(text, options, *, multi=False, next=True, results=None,
-             store=None, base_url=None, qr_dir=None, qr_format=None,
-             environment=None, show_url=None, layout="slide")
+             lock=True, store=None, base_url=None, qr_dir=None,
+             qr_format=None, environment=None, show_url=None,
+             layout="slide")
           open_text(text, *, max_chars=280, fence=None, next=True,
-             results=None, store=None, base_url=None, qr_dir=None,
-             qr_format=None, environment=None, show_url=None,
-             layout="slide")
-          pin_image(text, image_path, *, max_pins=1,
-             allow_comment=False, next=True, results=None, store=None,
-             base_url=None, qr_dir=None, qr_format=None,
-             environment=None, show_url=None, layout="slide")
-          pin_text(text, content, *, language=None, max_pins=1,
-             allow_comment=False, next=True, results=None, store=None,
-             base_url=None, qr_dir=None, qr_format=None,
-             environment=None, show_url=None, layout="slide")
-          ranking(text, options, *, top_n=None, next=True,
-             results=None, store=None, base_url=None, qr_dir=None,
-             qr_format=None, environment=None, show_url=None,
-             layout="slide")
-          scale(text, *, low=1, high=5, low_label="", high_label="",
-             next=True, results=None, store=None, base_url=None,
+             results=None, lock=True, store=None, base_url=None,
              qr_dir=None, qr_format=None, environment=None,
              show_url=None, layout="slide")
+          pin_image(text, image_path, *, max_pins=1,
+             allow_comment=False, next=True, results=None, lock=True,
+             store=None, base_url=None, qr_dir=None, qr_format=None,
+             environment=None, show_url=None, layout="slide")
+          pin_text(text, content, *, language=None, max_pins=1,
+             allow_comment=False, next=True, results=None, lock=True,
+             store=None, base_url=None, qr_dir=None, qr_format=None,
+             environment=None, show_url=None, layout="slide")
+          ranking(text, options, *, top_n=None, next=True,
+             results=None, lock=True, store=None, base_url=None,
+             qr_dir=None, qr_format=None, environment=None,
+             show_url=None, layout="slide")
+          scale(text, *, low=1, high=5, low_label="", high_label="",
+             next=True, results=None, lock=True, store=None,
+             base_url=None, qr_dir=None, qr_format=None,
+             environment=None, show_url=None, layout="slide")
           word_cloud(text, *, max_chars=280, split_words=True,
              min_word_length=3, extra_stop_words=(),
              use_default_stopwords=True, render="svg", next=True,
-             results=None, store=None, base_url=None, qr_dir=None,
-             qr_format=None, environment=None, show_url=None,
-             layout="slide")
+             results=None, lock=True, store=None, base_url=None,
+             qr_dir=None, qr_format=None, environment=None,
+             show_url=None, layout="slide")
           question(question_obj, *, ...) renders a prebuilt Question
              object and is the lower-level helper behind them.
 
@@ -487,6 +513,13 @@ def _latex_reference() -> str:
             the server flag.  The lecturer's local/admin access is
             never blocked.  Presentation-only; does not affect the
             question's canonical hash.
+          lock: pace this question with the slides.  lock=True (the
+            default) keeps it locked for respondents until you open
+            its results page while `mentipy serve` runs with the lock
+            on; lock=False opens it as soon as the question before it
+            in the deck is open, for questions that share a slide
+            with their predecessor.  Presentation-only; does not
+            affect the question's canonical hash.
 
         Shared keyword arguments
           store: defaults to config key {STORE_CONFIG}
@@ -1899,6 +1932,7 @@ def _serve_publicly(
     *,
     public: PublicMode,
     results: bool,
+    lock: bool,
 ):
     admin_token, require_token = _admin_token_policy(public)
     allow_images = get_setting(ALLOW_IMAGES_CONFIG)
@@ -1920,6 +1954,8 @@ def _serve_publicly(
             )
         elif not results:
             typer.echo(_format_index_hint(public_url, chosen_host, chosen_port))
+        if lock:
+            typer.echo(_format_lock_hint(public_url))
 
         serve_http(
             active_store,
@@ -1930,6 +1966,7 @@ def _serve_publicly(
             admin_token=admin_token,
             require_token=require_token,
             heatmap_bins=get_setting(HEATMAP_BINS_CONFIG),
+            lock=lock,
         )
 @
 
@@ -2023,7 +2060,12 @@ otherwise the current bind port is used to resolve a LAN-style URL and refresh
 the QR artifacts that LaTeX will later include.  When the lecturer is not using
 [[--results]], we also print the root index URL on both the respondent-facing
 address and the reachable local bind address so the presenter can open the
-local results hub directly.
+local results hub directly.  With the lecturer-paced gate on --- the default
+--- we also print how questions open and the [[/active]] URL, because a
+lecturer who has not read the manual will otherwise hear \enquote{it says
+locked} from the room without knowing that opening the results page is the
+fix.  The gate is a flag rather than a config key because pacing is a
+per-lecture decision, like [[--results]], not a per-machine one.
 
 <<cli setup>>=
 @cli.command(context_settings={"allow_extra_args": True})
@@ -2034,6 +2076,7 @@ def serve(
     store: Optional[str] = STORE_OPTION,
     public: bool = PUBLIC_OPTION,
     results: bool = RESULTS_OPTION,
+    lock: bool = LOCK_OPTION,
 ):
     """Run the local polling server.
 
@@ -2066,6 +2109,8 @@ def serve(
                         chosen_port,
                     )
                 )
+            if lock:
+                typer.echo(_format_lock_hint(configured_base))
         else:
             resolved = resolve_base_url(configured_base, chosen_port)
             count = regenerate_qrs(active_store, resolved)
@@ -2076,6 +2121,8 @@ def serve(
             )
             if not results:
                 typer.echo(_format_index_hint(resolved, chosen_host, chosen_port))
+            if lock:
+                typer.echo(_format_lock_hint(resolved))
         serve_http(
             active_store,
             chosen_host,
@@ -2083,6 +2130,7 @@ def serve(
             public_results=results,
             allow_images=get_setting(ALLOW_IMAGES_CONFIG),
             heatmap_bins=get_setting(HEATMAP_BINS_CONFIG),
+            lock=lock,
         )
         return
 
@@ -2092,6 +2140,7 @@ def serve(
         chosen_port,
         public=public_mode,
         results=results,
+        lock=lock,
     )
 @
 
@@ -2110,6 +2159,7 @@ def render_mc(
     multi: bool = typer.Option(False, "--multi", help="Allow multiple answers."),
     next: bool = NEXT_OPTION,
     results: Optional[bool] = RESULTS_VISIBILITY_OPTION,
+    lock: bool = QUESTION_LOCK_OPTION,
     environment: Optional[str] = ENVIRONMENT_OPTION,
     layout: str = LAYOUT_OPTION,
     url: Optional[bool] = URL_VISIBILITY_OPTION,
@@ -2127,6 +2177,7 @@ def render_mc(
             multi=multi,
             next=next,
             results=results,
+            lock=lock,
             **_render_common_kwargs(
                 store=store,
                 environment=environment,
@@ -2158,6 +2209,7 @@ def render_open(
     ),
     next: bool = NEXT_OPTION,
     results: Optional[bool] = RESULTS_VISIBILITY_OPTION,
+    lock: bool = QUESTION_LOCK_OPTION,
     environment: Optional[str] = ENVIRONMENT_OPTION,
     layout: str = LAYOUT_OPTION,
     url: Optional[bool] = URL_VISIBILITY_OPTION,
@@ -2175,6 +2227,7 @@ def render_open(
             fence=fence,
             next=next,
             results=results,
+            lock=lock,
             **_render_common_kwargs(
                 store=store,
                 environment=environment,
@@ -2288,6 +2341,7 @@ def render_scale(
     high_label: str = typer.Option("", "--high-label", help="Label for the high endpoint."),
     next: bool = NEXT_OPTION,
     results: Optional[bool] = RESULTS_VISIBILITY_OPTION,
+    lock: bool = QUESTION_LOCK_OPTION,
     environment: Optional[str] = ENVIRONMENT_OPTION,
     layout: str = LAYOUT_OPTION,
     url: Optional[bool] = URL_VISIBILITY_OPTION,
@@ -2307,6 +2361,7 @@ def render_scale(
             high_label=high_label,
             next=next,
             results=results,
+            lock=lock,
             **_render_common_kwargs(
                 store=store,
                 environment=environment,
@@ -2373,6 +2428,7 @@ def render_word_cloud(
     ),
     next: bool = NEXT_OPTION,
     results: Optional[bool] = RESULTS_VISIBILITY_OPTION,
+    lock: bool = QUESTION_LOCK_OPTION,
     environment: Optional[str] = ENVIRONMENT_OPTION,
     layout: str = LAYOUT_OPTION,
     url: Optional[bool] = URL_VISIBILITY_OPTION,
@@ -2394,6 +2450,7 @@ def render_word_cloud(
             render=render,
             next=next,
             results=results,
+            lock=lock,
             **_render_common_kwargs(
                 store=store,
                 environment=environment,
@@ -2470,6 +2527,7 @@ def render_ranking(
     ),
     next: bool = NEXT_OPTION,
     results: Optional[bool] = RESULTS_VISIBILITY_OPTION,
+    lock: bool = QUESTION_LOCK_OPTION,
     environment: Optional[str] = ENVIRONMENT_OPTION,
     layout: str = LAYOUT_OPTION,
     url: Optional[bool] = URL_VISIBILITY_OPTION,
@@ -2487,6 +2545,7 @@ def render_ranking(
             top_n=top_n,
             next=next,
             results=results,
+            lock=lock,
             **_render_common_kwargs(
                 store=store,
                 environment=environment,
@@ -2563,6 +2622,7 @@ def render_pin_image(
     ),
     next: bool = NEXT_OPTION,
     results: Optional[bool] = RESULTS_VISIBILITY_OPTION,
+    lock: bool = QUESTION_LOCK_OPTION,
     environment: Optional[str] = ENVIRONMENT_OPTION,
     layout: str = LAYOUT_OPTION,
     url: Optional[bool] = URL_VISIBILITY_OPTION,
@@ -2581,6 +2641,7 @@ def render_pin_image(
             allow_comment=allow_comment,
             next=next,
             results=results,
+            lock=lock,
             **_render_common_kwargs(
                 store=store,
                 environment=environment,
@@ -2619,6 +2680,7 @@ def render_pin_text(
     ),
     next: bool = NEXT_OPTION,
     results: Optional[bool] = RESULTS_VISIBILITY_OPTION,
+    lock: bool = QUESTION_LOCK_OPTION,
     environment: Optional[str] = ENVIRONMENT_OPTION,
     layout: str = LAYOUT_OPTION,
     url: Optional[bool] = URL_VISIBILITY_OPTION,
@@ -2638,6 +2700,7 @@ def render_pin_text(
             allow_comment=allow_comment,
             next=next,
             results=results,
+            lock=lock,
             **_render_common_kwargs(
                 store=store,
                 environment=environment,
@@ -2787,6 +2850,49 @@ def test_render_commands_thread_no_next_into_the_stored_question(
     [entry] = Store(store_path).all_questions()
     question = Store(store_path).question(entry["hash"])
     assert question.next is False
+@
+
+The [[--no-lock]] flag has the same delivery contract, and it matters on
+every kind: the QR-less second question on a slide can be a scale, a
+word cloud or a ranking just as well as a poll.
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param(["render", "mc", "Pick one", "A", "B"], id="mc"),
+        pytest.param(["render", "open", "Comment?"], id="open"),
+        pytest.param(["render", "scale", "Pace?"], id="scale"),
+        pytest.param(["render", "word-cloud", "Topic?"], id="word_cloud"),
+        pytest.param(
+            ["render", "ranking", "Rank these", "A", "B"], id="ranking"
+        ),
+    ],
+)
+def test_render_commands_thread_no_lock_into_the_stored_question(
+    tmp_path, argv
+):
+    runner = CliRunner()
+    store_path = tmp_path / "mentipy.json"
+
+    result = runner.invoke(
+        cli,
+        [
+            *argv,
+            "--no-lock",
+            "--store",
+            str(store_path),
+            "--base-url",
+            "http://example.test:8080",
+            "--qr-dir",
+            str(tmp_path / DEFAULT_QR_DIR),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    [entry] = Store(store_path).all_questions()
+    question = Store(store_path).question(entry["hash"])
+    assert question.lock is False
 @
 
 
@@ -3485,6 +3591,8 @@ def test_latex_command_prints_the_reference_and_all_config_keys():
     assert "results=None" in result.output
     assert "Per-question keyword arguments" in result.output
     assert "results: override `mentipy serve --results`" in result.output
+    assert "lock=True" in result.output
+    assert "lock: pace this question with the slides" in result.output
     for key, _description in CONFIG_KEY_HELP:
         assert key in result.output
 @
@@ -3566,6 +3674,38 @@ def test_serve_command_passes_public_results_flag(tmp_path, monkeypatch):
     assert called["path"] == tmp_path / "answers.json"
     assert called["public_results"] is True
     assert "Open the question index at:" not in result.stdout
+@
+
+The lecturer-paced gate is on unless [[--no-lock]] is given, and it
+reaches the server as [[lock]].  The hint naming [[/active]] is printed
+exactly when the gate is on, so the terminal explains the waiting page
+to a lecturer who never read the manual.
+
+<<test functions>>=
+def test_serve_command_passes_the_lock_flag(tmp_path, monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("base_url", "http://example.test:8080")
+    captured = {}
+
+    def fake_serve(store, host, port, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("mentipy.cli.serve_http", fake_serve)
+    monkeypatch.setattr(
+        "mentipy.cli.regenerate_qrs", lambda _store, _base_url: 0
+    )
+    store_args = ["--store", str(tmp_path / "answers.json")]
+
+    locked = runner.invoke(cli, ["serve", *store_args])
+    assert locked.exit_code == 0
+    assert captured["lock"] is True
+    assert "http://example.test:8080/active" in locked.stdout
+
+    unlocked = runner.invoke(cli, ["serve", *store_args, "--no-lock"])
+    assert unlocked.exit_code == 0
+    assert captured["lock"] is False
+    assert "/active" not in unlocked.stdout
 @
 
 When the base URL is automatic or unset, starting the local server must refresh
@@ -3847,6 +3987,38 @@ def test_serve_command_public_ssh_passes_allow_images_setting(
 
     assert result.exit_code == 0
     assert captured["allow_images"] is True
+
+
+def test_serve_command_public_ssh_passes_the_lock_flag(
+    tmp_path, monkeypatch
+):
+    runner = CliRunner()
+    config_path = tmp_path / "config.json"
+    monkeypatch.setenv("MENTIPY_CONFIG", str(config_path))
+    set_setting("ssh_tunnel", "alice@example.test:9000")
+    captured = {}
+
+    @contextmanager
+    def fake_expose(mode, local_port, *, ssh_endpoint=None):
+        yield "http://example.test:9000"
+
+    def fake_serve(store, host, port, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("mentipy.cli.expose", fake_expose)
+    monkeypatch.setattr(
+        "mentipy.cli.regenerate_qrs", lambda _store, _base_url: 0
+    )
+    monkeypatch.setattr("mentipy.cli.serve_http", fake_serve)
+
+    result = runner.invoke(
+        cli,
+        ["serve", "--public", "ssh", "--port", "8080", "--no-lock"],
+        env={"MENTIPY_CONFIG": str(config_path)},
+    )
+
+    assert result.exit_code == 0
+    assert captured["lock"] is False
 
 
 def test_serve_command_passes_heatmap_bins_setting(
