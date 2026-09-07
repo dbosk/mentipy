@@ -28,6 +28,7 @@ import logging
 import os
 import secrets
 import sys
+import threading
 from socketserver import ThreadingMixIn
 from string import Template
 from typing import Any
@@ -279,7 +280,8 @@ pre code.highlight {
 }
 
 .prev-link,
-.next-link {
+.next-link,
+.retry-link {
   background: #4a90d9;
   border-radius: 3px;
   color: white;
@@ -288,12 +290,23 @@ pre code.highlight {
   text-decoration: none;
 }
 .prev-link:hover,
-.next-link:hover {
+.next-link:hover,
+.retry-link:hover {
   background: #3a7dc0;
 }
 .next-link {
   margin-left: auto;
 }
+
+.status {
+  border-radius: 3px;
+  font-size: 0.85em;
+  margin-left: 0.5rem;
+  padding: 0.1rem 0.4rem;
+}
+.status-active { background: #4a90d9; color: white; }
+.status-open { background: #dfeee0; color: #1f5c2a; }
+.status-locked { background: #eee; color: #555; }
 
 .pin-wrap {
   display: inline-block;
@@ -358,7 +371,9 @@ REFRESH_SECONDS = 2
 @
 
 The helper functions collect the logic that would otherwise be repeated across
-multiple routes.
+multiple routes.  [[_page]] takes the refresh interval as a parameter because
+the lecturer's live tally and a respondent's waiting page want different
+polling rates; the default is the tally's.
 
 <<functions>>=
 def is_local_address(address: str) -> bool:
@@ -367,11 +382,18 @@ def is_local_address(address: str) -> bool:
     return address in {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
 
 
-def _page(title: str, heading: str, body: str, *, refresh: bool = False) -> str:
+def _page(
+    title: str,
+    heading: str,
+    body: str,
+    *,
+    refresh: bool = False,
+    refresh_seconds: int = REFRESH_SECONDS,
+) -> str:
     refresh_tag = ""
     if refresh:
         refresh_tag = (
-            f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">'
+            f'<meta http-equiv="refresh" content="{refresh_seconds}">'
         )
 
     return PAGE_TEMPLATE.substitute(
@@ -1191,18 +1213,36 @@ def test_parse_answer_polices_pin_comments():
 
 \section{Rendering question forms}
 
+The index is the lecturer's control panel: one line per registered
+question with its form and results links.  When the server paces the
+room it also carries the gate's verdict for each question --- active,
+open or locked --- computed by the [[LectureProgress]] tracker from the
+routing section, so the label can never disagree with what a respondent
+gets.  Clicking a question's results link is also how the lecturer opens
+it, which makes the index the natural place to read the lecture's state.
+A tracker-less call renders the plain list, which is what a server
+running with [[--no-lock]] shows.
+
 <<functions>>=
 
 
-def _render_index(store: Store) -> str:
+def _render_index(
+    store: Store, progress: LectureProgress | None = None
+) -> str:
     items = []
+    deck = store.all_questions()
 
-    for entry in store.all_questions():
+    for entry in deck:
+        status = ""
+        if progress is not None:
+            label = progress.status(entry["hash"], deck)
+            status = f' <span class="status status-{label}">{label}</span>'
         items.append(
             "<li>"
             f'<a href="/{entry["url_prefix"]}"><code>{entry["url_prefix"]}</code></a> '
             f'{escape(entry["text"])} '
             f'(<a href="/{entry["url_prefix"]}/results">results</a>)'
+            f"{status}"
             "</li>"
         )
 
@@ -1239,6 +1279,27 @@ def test_render_index_handles_empty_store(tmp_path):
         server_module._render_index(store)
         == "<p>No questions have been registered yet.</p>"
     )
+@
+
+The labels come from the tracker's [[status]], which has its own tests
+in the routing section, so this test only pins the wiring: the labelled
+index lists the questions in deck order with the verdict each one
+deserves, and an index rendered without a tracker carries no labels.
+
+<<test functions>>=
+def test_render_index_labels_questions_when_given_progress(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    store.register(OpenQuestion("Warm-up?"))
+    second = store.register(MCQuestion("Pick one", ("A", "B")))
+    store.register(OpenQuestion("Follow-up?", lock=False))
+    progress = LectureProgress()
+    progress.open(store.resolve(second))
+
+    rendered = server_module._render_index(store, progress)
+
+    assert rendered.index("status-locked") < rendered.index("status-active")
+    assert rendered.index("status-active") < rendered.index("status-open")
+    assert "status" not in server_module._render_index(store)
 @
 
 The form renderer mirrors the parser's input policy.  Open questions keep both
@@ -3127,10 +3188,390 @@ def test_results_public_resolves_the_tri_state(
     )
 @
 
+\subsection{Lecturer-paced progression}
+
+Respondents can outrun the slides.  The \enquote{Next $\rightarrow$}
+link exists so nobody has to scan another QR code, but it also lets a
+fast respondent answer the whole deck while the lecturer is still
+discussing the first tally.  The gate in this subsection paces the room:
+a question is served to respondents only once the lecturer has reached
+it.
+
+The lecturer's own browser is the signal.  There is no slide-change hook
+to listen to, but the lecturer already navigates to a question's results
+page when the class reaches it --- that page is what gets projected ---
+so an admin request for [[/<prefix>/results]] is read as \enquote{we are
+here now}.  Nothing else opens a question: viewing the form as admin
+does not, and a respondent viewing a public tally does not.  This holds
+for the first question too.  Its results page has to be open while the
+room answers anyway, and treating the head of the deck specially would
+tie the gate to the store's ordering, which a stray [[mentipy render]]
+in the middle of a lecture can reshuffle.
+
+Progress is session state, not question state, so it lives in memory in
+the handler closure rather than in [[mentipy.json]].  A [[GET]] must not
+mutate the store, the same deck given again next term must start
+locked, and there is nothing to clean up: restarting the server forgets
+the progress, and the lecturer's results tab --- which refreshes itself
+every [[REFRESH_SECONDS]] --- reopens the current question on its next
+request.
+
+Opening is a set, not a position.  If the lecturer jumps from the third
+question to the sixth, the fourth and fifth stay locked: those slides
+were skipped, and respondents should skip them too.  Within the set the
+tracker also remembers which question was opened most recently; that is
+what [[/active]] redirects to, and it moves only on a \emph{new}
+opening.  A results tab left open on an earlier question keeps
+refreshing, and if every refresh counted, [[/active]] would flip between
+two questions twice a second.
+
+The per-question [[lock]] flag relaxes the rule for questions that share
+a slide with their predecessor and have no QR code of their own.  A
+[[lock=False]] question is open whenever the question before it in the
+deck is open, so a block of such questions opens together with the first
+question on the slide and stays closed with it when the lecturer skips
+the slide.  A [[lock=False]] question with no predecessor is simply
+open.
+
+\enquote{Before it in the deck} means the store's full registration
+order --- the order the index page lists, orphans from earlier builds
+included --- and not the navigation row's live suffix.  The live suffix
+exists to keep dropped slides out of the \enquote{Next $\rightarrow$}
+chain; for pacing it would be a liability.  Re-registering one existing
+question --- a single re-run PythonTeX block, or a [[mentipy render]] in
+a terminal while the server runs --- moves that question to the end of
+the store and pushes everything before it out of the live suffix.
+Pacing on the live suffix would then have to decide what an orphan is,
+and either answer opens or closes questions the lecturer never touched.
+Pacing on the full order changes at most the predecessor of the moved
+question and of the one after it, so a re-render can never open a
+question the lecturer has not reached; the one thing it can do is close
+a [[lock=False]] block whose opened predecessor was the question moved.
+A question from an earlier build that is on no slide any more is simply
+a locked question nobody opens.
+
+The tracker takes that sequence as data rather than a [[Store]].  Every
+locked request already resolves its prefix through the store; the gate
+must not add a JSON read per step of a [[lock=False]] chain on top of
+that, and a store-free tracker is testable as pure data.  The rows of
+[[Store.all_questions()]] carry exactly what is needed --- the hash and
+the [[lock]] flag, in order --- and position lookup is a linear scan
+because the sequence is a lecture's worth of questions, not a database.
+
+<<functions>>=
+def _deck_index(deck: list[dict[str, Any]], full_hash: str) -> int | None:
+    for index, entry in enumerate(deck):
+        if entry["hash"] == full_hash:
+            return index
+    return None
+<<classes>>=
+class LectureProgress:
+    """Track which questions the lecturer has opened this run.
+
+    ``open`` records an admin results view; ``is_open`` applies the
+    pacing rule to one question given the deck as the rows of
+    ``Store.all_questions()``; ``active_hash`` names the question
+    ``/active`` redirects to.  The tracker holds no store reference,
+    so it is shared safely between request threads.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._opened: dict[str, None] = {}
+        self._active: str | None = None
+
+    <<lecture progress methods>>
+@
+
+Opening is idempotent and reports whether it changed anything, which is
+what keeps a refreshing tab from moving the active question.
+
+<<lecture progress methods>>=
+def open(self, full_hash: str) -> bool:
+    """Record that the lecturer opened ``full_hash``.
+
+    Returns ``True`` on a new opening and ``False`` on a repeat; only
+    a new opening moves the active question.
+    """
+
+    with self._lock:
+        if full_hash in self._opened:
+            return False
+        self._opened[full_hash] = None
+        self._active = full_hash
+        return True
+@
+
+The rule walks backwards from the requested question.  Each step is
+either a question the lecturer opened (open, stop), a question that
+waits for the lecturer (locked, stop), or a [[lock=False]] question
+whose fate is its predecessor's (step back).  Reaching the front of the
+sequence on a [[lock=False]] question means nothing was waiting on the
+way, so it is open.  A hash that is not in the deck at all --- the store
+was replaced under a running server --- is open only if the lecturer
+opened it.  The opened set is copied under the lock so the walk itself
+runs without holding it.
+
+<<lecture progress methods>>=
+def is_open(self, full_hash: str, deck: list[dict[str, Any]]) -> bool:
+    """Return whether respondents may see ``full_hash`` right now."""
+
+    with self._lock:
+        opened = set(self._opened)
+    index = _deck_index(deck, full_hash)
+    if index is None:
+        return full_hash in opened
+    while True:
+        entry = deck[index]
+        if entry["hash"] in opened:
+            return True
+        if entry.get("lock", True):
+            return False
+        if index == 0:
+            return True
+        index -= 1
+@
+
+[[/active]] follows the most recent new opening.  Before the lecturer
+has opened anything there is nothing to point at, and the tracker says
+so rather than guessing at a first question: the store's first entry may
+well be an orphan from last term's deck.
+
+<<lecture progress methods>>=
+def active_hash(self) -> str | None:
+    """Return the most recently opened hash, or ``None``."""
+
+    with self._lock:
+        return self._active
+@
+
+The waiting page needs to know whether the lecture has moved
+\emph{past} a locked question, which is a position comparison against
+the active question.  Before any opening nothing is past anything, and
+an active question that is no longer in the deck is past nothing either.
+
+<<lecture progress methods>>=
+def moved_past(self, full_hash: str, deck: list[dict[str, Any]]) -> bool:
+    """Return whether a later question than ``full_hash`` is active."""
+
+    with self._lock:
+        active = self._active
+    if active is None:
+        return False
+    active_index = _deck_index(deck, active)
+    index = _deck_index(deck, full_hash)
+    if active_index is None or index is None:
+        return False
+    return active_index > index
+@
+
+The admin index labels every question with the same rule, so the
+lecturer can see at a glance why a [[lock=False]] block is or is not
+open and which question [[/active]] points at.  A fresh server shows
+every question as locked.
+
+<<lecture progress methods>>=
+def status(self, full_hash: str, deck: list[dict[str, Any]]) -> str:
+    """Return ``active``, ``open`` or ``locked`` for ``full_hash``."""
+
+    if full_hash == self.active_hash():
+        return "active"
+    if self.is_open(full_hash, deck):
+        return "open"
+    return "locked"
+@
+
+The tracker is pure data, so its tests build the deck by hand and never
+touch a store.  The first contract is the strict one: nothing is open
+until the lecturer opens it, and opening is a set --- the second
+question stays locked when the first and third are opened.
+
+<<test functions>>=
+def _deck(*entries):
+    return [
+        {"hash": full_hash, "lock": lock} for full_hash, lock in entries
+    ]
+
+
+def test_lecture_progress_starts_with_every_question_locked():
+    progress = LectureProgress()
+    deck = _deck(("q1", True), ("q2", True))
+
+    assert progress.is_open("q1", deck) is False
+    assert progress.is_open("q2", deck) is False
+
+
+def test_lecture_progress_opens_only_what_the_lecturer_visited():
+    progress = LectureProgress()
+    deck = _deck(("q1", True), ("q2", True), ("q3", True))
+
+    assert progress.open("q1") is True
+    assert progress.open("q3") is True
+
+    assert progress.is_open("q1", deck) is True
+    assert progress.is_open("q2", deck) is False
+    assert progress.is_open("q3", deck) is True
+@
+
+A [[lock=False]] chain follows its predecessor and breaks at the first
+question that waits; a [[lock=False]] head of deck is open outright; a
+hash the deck does not contain is open only once opened.
+
+<<test functions>>=
+def test_lecture_progress_unlocked_questions_follow_their_predecessor():
+    progress = LectureProgress()
+    deck = _deck(
+        ("q1", True), ("q2", False), ("q3", False), ("q4", True)
+    )
+
+    assert progress.is_open("q3", deck) is False
+    progress.open("q1")
+    assert progress.is_open("q2", deck) is True
+    assert progress.is_open("q3", deck) is True
+    assert progress.is_open("q4", deck) is False
+
+
+def test_lecture_progress_unlocked_head_is_open():
+    progress = LectureProgress()
+
+    assert progress.is_open("q1", _deck(("q1", False))) is True
+
+
+def test_lecture_progress_unknown_hash_is_open_only_once_opened():
+    progress = LectureProgress()
+    deck = _deck(("q1", True))
+
+    assert progress.is_open("old", deck) is False
+    progress.open("old")
+    assert progress.is_open("old", deck) is True
+@
+
+Re-registering one question moves it to the end of the deck.  The rule
+must not open anything in response: the questions that used to follow
+it, and the questions before it, keep their state.
+
+<<test functions>>=
+def test_lecture_progress_reordering_the_deck_opens_nothing():
+    progress = LectureProgress()
+    before = _deck(("q1", True), ("q2", True), ("q3", True), ("q4", True))
+    after = _deck(("q1", True), ("q2", True), ("q4", True), ("q3", True))
+    progress.open("q1")
+
+    assert [progress.is_open(f"q{i}", before) for i in range(1, 5)] == [
+        True, False, False, False,
+    ]
+    assert [progress.is_open(f"q{i}", after) for i in range(1, 5)] == [
+        True, False, False, False,
+    ]
+@
+
+The active question is [[None]] until something is opened, follows new
+openings, and --- the regression that matters most --- stays put when an
+already-open question is opened again by a refreshing tab.
+
+<<test functions>>=
+def test_lecture_progress_active_follows_new_openings_only():
+    progress = LectureProgress()
+
+    assert progress.active_hash() is None
+    progress.open("q2")
+    progress.open("q3")
+    assert progress.active_hash() == "q3"
+
+    assert progress.open("q2") is False
+    assert progress.active_hash() == "q3"
+@
+
+\enquote{Moved past} is strictly \enquote{a later question is active},
+and the status labels are the rule seen from the index.
+
+<<test functions>>=
+def test_lecture_progress_moved_past_means_a_later_question_is_active():
+    progress = LectureProgress()
+    deck = _deck(("q1", True), ("q2", True), ("q3", True))
+
+    assert progress.moved_past("q2", deck) is False
+    progress.open("q1")
+    assert progress.moved_past("q2", deck) is False
+    progress.open("q3")
+    assert progress.moved_past("q2", deck) is True
+
+
+def test_lecture_progress_status_labels_follow_the_rule():
+    progress = LectureProgress()
+    deck = _deck(("q1", True), ("q2", True), ("q3", False))
+
+    assert progress.status("q1", deck) == "locked"
+    progress.open("q2")
+    assert progress.status("q1", deck) == "locked"
+    assert progress.status("q2", deck) == "active"
+    assert progress.status("q3", deck) == "open"
+@
+
+The waiting page is a normal page, not an error: a phone browser
+replaces a short error body with its own, and this page is meant to be
+read.  It refreshes itself so the form appears without a tap once the
+lecturer moves on, but more slowly than the tally --- a whole room
+polling a rejection every two seconds is load for nothing --- and it
+offers a \enquote{Try again} link for browsers that throttle background
+refreshes.  The prompt is never echoed: the point of the page is that
+the question is not shown yet.
+
+The page also has to decide whether to offer [[/active]].  A respondent
+who just answered the current question and clicked \enquote{Next
+$\rightarrow$} is \emph{ahead} of the lecture; sending them to
+[[/active]] would bounce them back to the question they just answered.
+Only when the lecturer has opened a later question --- the slide was
+skipped --- does the link help, so the caller passes that fact in along
+with the message.  The same body serves [[/active]] itself before the
+lecture has started, which is why the message is a parameter.
+
+<<constants>>=
+LOCKED_REFRESH_SECONDS = 5
+<<functions>>=
+def _render_waiting_body(
+    message: str, self_path: str, *, onward: bool = False
+) -> str:
+    retry = (
+        f'<a class="retry-link" href="{escape(self_path)}">Try again</a>'
+    )
+    forward = ""
+    if onward:
+        forward = (
+            '<a class="next-link" href="/active">Current question →</a>'
+        )
+    return (
+        f"<p>{escape(message)}</p>"
+        f'<nav class="question-nav">{retry}{forward}</nav>'
+    )
+@
+
+The self link must be present in both shapes and the [[/active]] link in
+exactly one of them; a page that always offered [[/active]] would send
+the respondent who is ahead of the room back to the question they just
+answered.
+
+<<test functions>>=
+def test_render_waiting_body_offers_active_only_when_asked():
+    waiting = server_module._render_waiting_body("Wait.", "/abcd")
+    assert "<p>Wait.</p>" in waiting
+    assert 'href="/abcd"' in waiting
+    assert "/active" not in waiting
+
+    skipped = server_module._render_waiting_body(
+        "Moved on.", "/abcd", onward=True
+    )
+    assert 'href="/abcd"' in skipped
+    assert 'href="/active"' in skipped
+@
+
 The handler is generated from the store instance.  A closure is the simplest way
 to make every request see the same persistence backend without resorting to
 global state, and it lets the CLI decide whether the live results page should
-stay local-only or be shown to respondents after they submit.
+stay local-only or be shown to respondents after they submit.  [[lock]]
+switches the lecturer-paced gate, and the [[LectureProgress]] tracker is
+created once per handler class --- that is, once per server --- which is
+what makes it session state shared by every request thread.
 
 The closure also carries the access policy for the presenter-only routes.  The
 default policy trusts the loopback address, which is correct when the server is
@@ -3152,7 +3593,10 @@ def _build_handler(
     admin_token: str | None = None,
     require_token: bool = False,
     heatmap_bins: int = DEFAULT_HEATMAP_BINS,
+    lock: bool = True,
 ):
+    progress = LectureProgress()
+
     class MentipyHandler(BaseHTTPRequestHandler):
         server_version = "mentipy/0.1"
 
@@ -3377,6 +3821,55 @@ def _resolve(self, prefix: str) -> str | None:
     return None
 @
 
+The lecturer-paced gate is the third resolution failure mode.  A
+respondent asking for a question the lecturer has not reached gets the
+waiting page, and the route sees [[None]] exactly as it would for an
+unknown or ambiguous prefix, so every respondent-facing route keeps its
+single early return.  Admin requests pass unconditionally --- the gate
+paces respondents, it never restricts the lecturer --- and so does
+everything when the server runs with [[--no-lock]].  The live sequence
+is read once and reused for both the openness check and the
+\enquote{moved past} decision.
+
+The routes that reveal a question go through this resolver: the form,
+the pin image and the results page.  The thanks page and the answer
+[[POST]] deliberately do not.  Both can only be reached after the form
+was served, and by then the answer exists; refusing the [[POST]] would
+throw away what the respondent typed, and refusing the thanks page would
+tell them the answer was not recorded when it was.  The response is
+marked uncacheable because the same URL serves the real form a moment
+later, and the \enquote{Try again} link repeats the full request path,
+query string included, so a time-scoped results view keeps its window.
+
+<<mentipy handler prefix resolution>>=
+def _resolve_for_respondent(self, prefix: str) -> str | None:
+    full_hash = self._resolve(prefix)
+    if full_hash is None or not lock or self._admin_allowed():
+        return full_hash
+
+    deck = store.all_questions()
+    if progress.is_open(full_hash, deck):
+        return full_hash
+
+    moved_past = progress.moved_past(full_hash, deck)
+    if moved_past:
+        message = "The lecture has moved past this question."
+    else:
+        message = "The lecturer has not opened this question yet."
+    self._send(
+        HTTPStatus.OK,
+        _page(
+            "Locked",
+            "Not yet",
+            _render_waiting_body(message, self.path, onward=moved_past),
+            refresh=True,
+            refresh_seconds=LOCKED_REFRESH_SECONDS,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+    return None
+@
+
 The [[GET]] routes separate presenter-only surfaces from student-facing ones.
 The index and JSON export are presenter-only, the results page is presenter-only
 unless results are public for that question --- the CLI-wide [[--results]]
@@ -3388,7 +3881,13 @@ tunnel is in play.  The pin-image bytes route is public like the form it
 belongs to --- the image is the lecturer's own registered slide content,
 not respondent data, so unlike [[allow_images]] (which guards
 \emph{respondent-chosen} image URLs on results pages) there is nothing to
-opt into.
+opt into.  All three routes that reveal a question to respondents ---
+form, image and results --- resolve through [[_resolve_for_respondent]],
+so the lecturer-paced gate covers them uniformly, and the results route
+is where an admin visit marks the question open.  It does so even when
+the server runs with [[--no-lock]]: the gate and the index labels are
+what the flag switches off, while [[/active]] keeps following the
+lecturer.
 
 The per-question override forces the results route to resolve the prefix
 \emph{before} gating: the policy lives on the stored question, so we must
@@ -3430,7 +3929,11 @@ def do_GET(self):
 
         self._send(
             HTTPStatus.OK,
-            _page("Questions", "Questions", _render_index(store)),
+            _page(
+                "Questions",
+                "Questions",
+                _render_index(store, progress if lock else None),
+            ),
         )
         return
 
@@ -3438,6 +3941,9 @@ def do_GET(self):
     if not segments:
         self.send_error(HTTPStatus.NOT_FOUND)
         return
+
+    if segments[0] == "active":
+        <<redirect to the active question>>
 
     self._handle_question_get(segments, parsed.query)
 
@@ -3461,7 +3967,7 @@ def _handle_question_get(self, segments: list[str], query: str):
         <<serve the registered pin image>>
 
     if len(segments) == 2 and segments[1] == "results":
-        full_hash = self._resolve(segments[0])
+        full_hash = self._resolve_for_respondent(segments[0])
         if full_hash is None:
             return
 
@@ -3471,6 +3977,9 @@ def _handle_question_get(self, segments: list[str], query: str):
         ) and not self._admin_allowed():
             self._deny_admin("Results pages are")
             return
+
+        if self._admin_allowed():
+            progress.open(full_hash)
 
         title = store.metadata(full_hash)["text"]
         window = _parse_window(query)
@@ -3513,7 +4022,7 @@ def _handle_question_get(self, segments: list[str], query: str):
         self.send_error(HTTPStatus.NOT_FOUND)
         return
 
-    full_hash = self._resolve(segments[0])
+    full_hash = self._resolve_for_respondent(segments[0])
     if full_hash is None:
         return
 
@@ -3522,6 +4031,48 @@ def _handle_question_get(self, segments: list[str], query: str):
         HTTPStatus.OK,
         _page(title, title, _render_form(store, full_hash)),
     )
+@
+
+[[/active]] is the one path that is neither the index nor a prefix.  It
+is resolved after the token interception --- a tokenised
+[[/active?admin=...]] must first shed its token like every other URL ---
+and it rewrites only the first segment, so [[/active/results?window=day]]
+lands on the current question's results page with its window intact.
+The name cannot collide with a question: prefixes are hexadecimal, and
+[[active]] is not.
+
+Before the lecturer has opened anything there is nothing to redirect to,
+and the same is true when the opened question has left the store --- a
+lecturer who resets the poll by deleting [[mentipy.json]] mid-session.
+Respondents will type this URL, so neither case may end in a stdlib
+error page or a dropped connection; both get the self-refreshing waiting
+page, and a latecomer's phone turns into the first question by itself
+once the lecturer opens it.
+
+<<redirect to the active question>>=
+active = progress.active_hash()
+try:
+    prefix = store.metadata(active)["url_prefix"] if active else None
+except KeyError:
+    prefix = None
+if prefix is None:
+    self._send(
+        HTTPStatus.OK,
+        _page(
+            "Not yet",
+            "Not yet",
+            _render_waiting_body("The lecture has not started yet.", "/active"),
+            refresh=True,
+            refresh_seconds=LOCKED_REFRESH_SECONDS,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+    return
+location = "/" + "/".join([prefix, *segments[1:]])
+if parsed.query:
+    location += "?" + parsed.query
+self._redirect(location)
+return
 @
 
 Serving the image re-sniffs the stored bytes instead of trusting the
@@ -3537,7 +4088,7 @@ classic disguised-content hole for anything that slips past the
 allowlist in the future.
 
 <<serve the registered pin image>>=
-full_hash = self._resolve(segments[0])
+full_hash = self._resolve_for_respondent(segments[0])
 if full_hash is None:
     return
 question = store.question(full_hash)
@@ -3621,7 +4172,8 @@ def do_POST(self):
 Creating the server is intentionally a thin wrapper around the threaded server
 class and the generated handler.  That keeps port binding visible to callers
 such as the CLI while preserving the store, the [[public_results]] policy, the
-image policy, and the admin-token policy inside the handler closure.  These
+image policy, the admin-token policy, and the [[lock]] policy inside the
+handler closure.  These
 policies are passed in rather than read from configuration here so the server
 stays agnostic about where its settings come from---the CLI owns that decision.
 
@@ -3637,6 +4189,7 @@ def create_server(
     admin_token: str | None = None,
     require_token: bool = False,
     heatmap_bins: int = DEFAULT_HEATMAP_BINS,
+    lock: bool = True,
 ) -> ThreadingHTTPServer:
     """Return a configured mentipy HTTP server."""
 
@@ -3649,6 +4202,7 @@ def create_server(
             admin_token=admin_token,
             require_token=require_token,
             heatmap_bins=heatmap_bins,
+            lock=lock,
         ),
     )
 @
@@ -3668,6 +4222,7 @@ def serve(
     admin_token: str | None = None,
     require_token: bool = False,
     heatmap_bins: int = DEFAULT_HEATMAP_BINS,
+    lock: bool = True,
 ):
     """Run the mentipy HTTP server until interrupted."""
 
@@ -3680,6 +4235,7 @@ def serve(
         admin_token=admin_token,
         require_token=require_token,
         heatmap_bins=heatmap_bins,
+        lock=lock,
     )
     try:
         server.serve_forever()
@@ -3782,7 +4338,13 @@ def test_server_delegates_unexpected_errors_to_superclass(
 @
 
 The tests use a real ephemeral TCP port so that they exercise the routing stack
-instead of a mocked version of it.
+instead of a mocked version of it.  Every test request comes from
+[[127.0.0.1]], so a test that wants to be a student overrides
+[[_is_local]] on the handler class --- a class created per server, so
+nothing leaks between tests.  [[remote=True]] does that for the whole
+test; passing a mutable [[{"remote": False}]] lets one test act as the
+lecturer first and as the students afterwards on the same server, by
+flipping the flag between requests.
 
 <<test functions>>=
 @pytest.fixture
@@ -3827,13 +4389,21 @@ def _request(port, method, path, body=None, headers=None):
 
 
 @contextmanager
-def _running_server(store, *, public_results=False):
+def _running_server(
+    store, *, public_results=False, lock=True, remote=False
+):
     server = create_server(
         store,
         host="127.0.0.1",
         port=0,
         public_results=public_results,
+        lock=lock,
     )
+    if remote is not False:
+        switch = remote if isinstance(remote, dict) else {"remote": True}
+        server.RequestHandlerClass._is_local = (
+            lambda self: not switch["remote"]
+        )
     thread = threading.Thread(
         target=server.serve_forever, daemon=True
     )
@@ -4306,12 +4876,15 @@ def test_post_rejects_malformed_multipart(live_server_open):
 
 The results page replaces the old admin route, but it still stays local-only by
 default so a live lecture does not accidentally expose intermediate tallies.
+The four results-policy tests that follow run with the lecturer-paced
+gate off ([[lock=False]]), so that only the results policy is under
+test; the gate has its own tests further down.
 
 <<test functions>>=
 def test_results_routes_stay_local_by_default(tmp_path):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(MCQuestion("Pick one", ("A", "B")))
-    server = create_server(store, host="127.0.0.1", port=0)
+    server = create_server(store, host="127.0.0.1", port=0, lock=False)
     server.RequestHandlerClass._is_local = lambda self: False
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -4349,6 +4922,7 @@ def test_public_results_mode_redirects_to_results_and_allows_remote_view(
         host="127.0.0.1",
         port=0,
         public_results=True,
+        lock=False,
     )
     server.RequestHandlerClass._is_local = lambda self: False
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -4398,7 +4972,7 @@ def test_question_results_override_opens_results_on_a_private_server(
         MCQuestion("Pick one", ("A", "B"), results=True)
     )
     default = store.register(MCQuestion("Pick two", ("A", "B")))
-    server = create_server(store, host="127.0.0.1", port=0)
+    server = create_server(store, host="127.0.0.1", port=0, lock=False)
     server.RequestHandlerClass._is_local = lambda self: False
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -4447,7 +5021,7 @@ def test_question_results_opt_out_hides_results_on_a_public_server(
         MCQuestion("Pick one", ("A", "B"), results=False)
     )
     server = create_server(
-        store, host="127.0.0.1", port=0, public_results=True
+        store, host="127.0.0.1", port=0, public_results=True, lock=False
     )
     server.RequestHandlerClass._is_local = lambda self: False
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -4492,6 +5066,278 @@ def test_question_results_opt_out_keeps_admin_access(tmp_path):
 
     assert response.status == 200
     assert "Total responses" in body
+@
+
+The lecturer-paced gate is on by default, and until the lecturer opens a
+question's results page a respondent gets the waiting page instead of
+the form.  The page must carry the self link and the slower refresh tag,
+must not be cached (the same URL serves the form later), and must not
+leak the prompt.  With the lecture not yet past this question there is
+no [[/active]] link either: it would point back at the same question.
+
+<<test functions>>=
+def test_locked_question_shows_the_waiting_page_to_respondents(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Secret prompt", ("A", "B")))
+
+    with _running_server(store, remote=True) as port:
+        response, body = _request(port, "GET", f"/{prefix}")
+
+    assert response.status == 200
+    assert response.getheader("Cache-Control") == "no-store"
+    assert f'content="{LOCKED_REFRESH_SECONDS}"' in body
+    assert f'href="/{prefix}"' in body
+    assert "Try again" in body
+    assert "Secret prompt" not in body
+    assert "/active" not in body
+@
+
+An admin results view opens the question for everyone; an admin visit to
+the form does not.  The switch lets one test play both roles on the same
+server: the lecturer first, from the local address, then the students.
+
+<<test functions>>=
+def test_admin_results_view_opens_the_question_for_respondents(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+    client = {"remote": False}
+
+    with _running_server(store, remote=client) as port:
+        response, body = _request(port, "GET", f"/{prefix}")
+        assert response.status == 200
+        assert "Pick one" in body
+
+        client["remote"] = True
+        _response, body = _request(port, "GET", f"/{prefix}")
+        assert "Try again" in body
+
+        client["remote"] = False
+        response, _body = _request(port, "GET", f"/{prefix}/results")
+        assert response.status == 200
+
+        client["remote"] = True
+        response, body = _request(port, "GET", f"/{prefix}")
+
+    assert response.status == 200
+    assert "Pick one" in body
+    assert "Try again" not in body
+@
+
+Skipping is a decision.  When the lecturer opens the first and third
+question, the second stays locked, and its waiting page now offers
+[[/active]] because the lecture has moved past it.
+
+<<test functions>>=
+def test_skipped_question_stays_locked_and_offers_active(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first = store.register(MCQuestion("Q1", ("A", "B")))
+    second = store.register(MCQuestion("Q2", ("A", "B")))
+    third = store.register(MCQuestion("Q3", ("A", "B")))
+    client = {"remote": False}
+
+    with _running_server(store, remote=client) as port:
+        _request(port, "GET", f"/{first}/results")
+        _request(port, "GET", f"/{third}/results")
+        client["remote"] = True
+        response, body = _request(port, "GET", f"/{second}")
+        active, _body = _request(port, "GET", "/active")
+
+    assert response.status == 200
+    assert "Try again" in body
+    assert 'href="/active"' in body
+    assert active.status == 303
+    assert active.getheader("Location") == f"/{third}"
+@
+
+The gate covers every route that reveals the question.  A public-results
+server must not show a locked question's tally, and the pin image must
+not be fetchable ahead of its form.
+
+<<test functions>>=
+def test_locked_question_gates_results_and_image(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    image = PinImageQuestion.from_image_bytes("Pin it", PNG_SAMPLE)
+    prefix = store.register(image)
+    store.save_image(PNG_SAMPLE)
+
+    with _running_server(store, public_results=True, remote=True) as port:
+        results, results_body = _request(port, "GET", f"/{prefix}/results")
+        picture, picture_body = _request(port, "GET", f"/{prefix}/image")
+
+    assert results.status == 200
+    assert "Total responses" not in results_body
+    assert "Try again" in results_body
+    assert picture.status == 200
+    assert "Try again" in picture_body
+@
+
+The answer [[POST]] and the thanks page are deliberately outside the
+gate: a respondent who loaded the form while the question was open must
+be able to finish even if the server restarted in between.
+
+<<test functions>>=
+def test_locked_question_still_records_answers_and_thanks(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+
+    with _running_server(store, remote=True) as port:
+        response, _body = _request(
+            port,
+            "POST",
+            f"/{prefix}",
+            body="value=1",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        assert response.status == 303
+        assert response.getheader("Location") == f"/{prefix}/thanks"
+        thanks, body = _request(port, "GET", f"/{prefix}/thanks")
+
+    assert thanks.status == 200
+    assert "your answer was recorded" in body
+    assert store.results(store.resolve(prefix))["total"] == 1
+@
+
+A [[lock=False]] question opens with its predecessor over HTTP too: once
+the lecturer opens the first question, the second and third follow, and
+the fourth --- which waits by default --- does not.
+
+<<test functions>>=
+def test_unlocked_questions_open_with_their_predecessor(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first = store.register(MCQuestion("Q1", ("A", "B")))
+    second = store.register(MCQuestion("Q2", ("A", "B"), lock=False))
+    third = store.register(MCQuestion("Q3", ("A", "B"), lock=False))
+    fourth = store.register(MCQuestion("Q4", ("A", "B")))
+    client = {"remote": False}
+
+    with _running_server(store, remote=client) as port:
+        _request(port, "GET", f"/{first}/results")
+        client["remote"] = True
+        bodies = {
+            prefix: _request(port, "GET", f"/{prefix}")[1]
+            for prefix in (second, third, fourth)
+        }
+
+    assert "Q2" in bodies[second]
+    assert "Q3" in bodies[third]
+    assert "Try again" in bodies[fourth]
+@
+
+[[/active]] is the latecomer's entry point.  Before any opening it is a
+waiting page, afterwards a redirect to the most recently opened
+question that keeps whatever follows it --- suffix and query string ---
+so a bookmarked [[/active/results?window=day]] keeps working.
+
+<<test functions>>=
+def test_active_waits_and_then_redirects_to_the_current_question(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    store.register(MCQuestion("Q1", ("A", "B")))
+    second = store.register(MCQuestion("Q2", ("A", "B")))
+
+    with _running_server(store) as port:
+        before, body = _request(port, "GET", "/active")
+        _request(port, "GET", f"/{second}/results")
+        after, _body = _request(port, "GET", "/active/results?window=day")
+
+    assert before.status == 200
+    assert "The lecture has not started yet." in body
+    assert 'href="/active"' in body
+    assert after.status == 303
+    assert after.getheader("Location") == f"/{second}/results?window=day"
+@
+
+Resetting the poll mid-session --- deleting the store file and
+registering afresh --- leaves the tracker pointing at a hash the store
+no longer has.  [[/active]] must fall back to waiting rather than crash,
+and must follow the next opening in the new store.
+
+<<test functions>>=
+def test_active_survives_a_reset_store(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first = store.register(MCQuestion("Q1", ("A", "B")))
+
+    with _running_server(store) as port:
+        _request(port, "GET", f"/{first}/results")
+        store.path.unlink()
+        second = store.register(MCQuestion("Q2", ("A", "B")))
+        stale, body = _request(port, "GET", "/active")
+        _request(port, "GET", f"/{second}/results")
+        fresh, _body = _request(port, "GET", "/active")
+
+    assert stale.status == 200
+    assert "The lecture has not started yet." in body
+    assert fresh.status == 303
+    assert fresh.getheader("Location") == f"/{second}"
+@
+
+A tokenised [[/active?admin=...]] is intercepted like any other URL: the
+token becomes a cookie and the redirect targets the bare [[/active]],
+which then redirects again.  Without this ordering the token would
+survive into the question URL.
+
+<<test functions>>=
+def test_active_sheds_the_admin_token_before_redirecting(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    store.register(MCQuestion("Q1", ("A", "B")))
+    server = create_server(
+        store,
+        host="127.0.0.1",
+        port=0,
+        admin_token="s3cret",
+        require_token=True,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        response, _body = _request(
+            server.server_address[1], "GET", "/active?admin=s3cret"
+        )
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+    assert response.status == 303
+    assert response.getheader("Location") == "/active"
+    assert "mentipy_admin=s3cret" in response.getheader("Set-Cookie")
+@
+
+[[--no-lock]] restores the old behaviour wholesale: a respondent reaches
+any question without the lecturer doing anything.
+
+<<test functions>>=
+def test_no_lock_serves_every_question_to_respondents(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    store.register(MCQuestion("Q1", ("A", "B")))
+    second = store.register(MCQuestion("Q2", ("A", "B")))
+
+    with _running_server(store, lock=False, remote=True) as port:
+        response, body = _request(port, "GET", f"/{second}")
+
+    assert response.status == 200
+    assert "Q2" in body
+@
+
+The admin index reports the same state the gate enforces: after the
+lecturer opens the second of three questions, the first is locked, the
+second active, and the [[lock=False]] third open.
+
+<<test functions>>=
+def test_index_labels_questions_with_their_lock_state(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    store.register(MCQuestion("Q1", ("A", "B")))
+    second = store.register(MCQuestion("Q2", ("A", "B")))
+    store.register(MCQuestion("Q3", ("A", "B"), lock=False))
+
+    with _running_server(store) as port:
+        _request(port, "GET", f"/{second}/results")
+        response, body = _request(port, "GET", "/")
+
+    assert response.status == 200
+    assert body.count('class="status status-locked"') == 1
+    assert body.count('class="status status-active"') == 1
+    assert body.count('class="status status-open"') == 1
 @
 
 Behind an SSH tunnel the loopback test is meaningless, so we pin the dangerous
