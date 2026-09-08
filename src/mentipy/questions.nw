@@ -35,8 +35,8 @@ import unicodedata
 
 \section{The Shared Question Contract}
 
-Two presentation flags mean the same thing on every question type, so
-they live on a common base class rather than being repeated seven
+Three presentation flags mean the same thing on every question type,
+so they live on a common base class rather than being repeated seven
 times.  The [[next]] flag is the sequence-navigation toggle: when it is
 true (the default), the server renders a \enquote{Next $\rightarrow$}
 link after the question so respondents can move on without scanning
@@ -46,10 +46,19 @@ decision about showing live results to respondents with the server,
 while [[True]] and [[False]] decide it for this question alone.  The
 override lets a lecturer keep one poll's tally hidden until everyone
 has answered --- avoiding the bandwagon effect of a visible majority
---- while the rest of the deck still shows live results.  Both flags
-are purely presentation, so they are dropped before the hash is
-computed and editing either between rebuilds never orphans the
-recorded answers.
+--- while the rest of the deck still shows live results.  The [[lock]]
+flag tells the server's lecturer-paced gate whether this question waits
+for the lecturer.  With the default [[True]] the question stays locked
+for respondents until the lecturer opens its results page; with
+[[False]] it opens as soon as the question before it in the deck is
+open.  The opt-out means \enquote{follows its predecessor} rather than
+\enquote{always open} on purpose: a slide with three questions and one
+QR code marks the second and third [[lock=False]] so respondents can
+step through the whole slide, but if the lecturer later skips that
+slide the block must stay closed together with its first question.
+All three flags are purely presentation, so they are dropped before
+the hash is computed and editing any of them between rebuilds never
+orphans the recorded answers.
 
 The prompt [[text]] is shared too: every question type opens with it.
 It lives on the base as an ordinary positional field, which works
@@ -76,15 +85,18 @@ class Question:
 
     Carries the prompt ``text`` that every question opens with, plus
     the presentation flags every question shares: ``next`` toggles
-    the post-submit navigation link and ``results`` is the tri-state
-    per-question override of the server's public-results flag.  The
-    flags stay out of the canonical hash.  Each subclass declares a
-    ``kind`` field whose default is its stable JSON tag.
+    the post-submit navigation link, ``results`` is the tri-state
+    per-question override of the server's public-results flag, and
+    ``lock`` says whether the question waits for the lecturer to open
+    it (``False`` opens it together with its predecessor).  The flags
+    stay out of the canonical hash.  Each subclass declares a ``kind``
+    field whose default is its stable JSON tag.
     """
 
     text: str
     next: bool = field(default=True, kw_only=True)
     results: bool | None = field(default=None, kw_only=True)
+    lock: bool = field(default=True, kw_only=True)
 
     <<question base methods>>
 @
@@ -115,6 +127,7 @@ def to_dict(self) -> dict[str, Any]:
     result.update(self._own_dict())
     result["next"] = self.next
     result["results"] = self.results
+    result["lock"] = self.lock
     return result
 
 def canonical_dict(self) -> dict[str, Any]:
@@ -123,6 +136,7 @@ def canonical_dict(self) -> dict[str, Any]:
     result = self.to_dict()
     result.pop("next")
     result.pop("results")
+    result.pop("lock")
     return result
 
 def _own_dict(self) -> dict[str, Any]:
@@ -202,12 +216,12 @@ def test_mc_question_requires_options():
         MCQuestion("Which one?", ())
 @
 
-The persistence shape keeps [[next]] and [[results]] explicit even at their
-default values.  That lets the store refresh question data without guessing
-whether an absent key belongs to the question or to store-owned metadata ---
-in particular, a [[results]] override that is later removed from the slide
-source must be able to revert to the deferring [[None]] on the next
-recompile.
+The persistence shape keeps [[next]], [[results]] and [[lock]] explicit
+even at their default values.  That lets the store refresh question data
+without guessing whether an absent key belongs to the question or to
+store-owned metadata --- in particular, a [[results]] override that is
+later removed from the slide source must be able to revert to the
+deferring [[None]] on the next recompile.
 
 <<test functions>>=
 
@@ -219,6 +233,7 @@ def test_mc_question_to_dict_includes_a_default_next_flag():
         "multi": False,
         "next": True,
         "results": None,
+        "lock": True,
     }
 
 
@@ -236,9 +251,10 @@ The fence hint also belongs here, but it has to be a single CommonMark info
 word: whitespace or backticks would change the structure of the generated fence
 rather than just its language tag.  We omit the hint from the canonical JSON
 when it is unset so existing open-question hashes stay byte-for-byte stable.
-The shared [[next]] and [[results]] flags shape the response flow; they are
-inherited from [[Question]] and stripped by [[canonical_dict]] before
-hashing, so flipping either does not orphan the recorded answers.
+The shared [[next]], [[results]] and [[lock]] flags shape the response
+flow; they are inherited from [[Question]] and stripped by
+[[canonical_dict]] before hashing, so flipping any of them does not orphan
+the recorded answers.
 
 <<classes>>=
 @dataclass(frozen=True)
@@ -349,6 +365,7 @@ def test_open_question_to_dict_includes_default_fields():
         "fence": None,
         "next": True,
         "results": None,
+        "lock": True,
     }
 @
 
@@ -365,12 +382,14 @@ def test_open_question_to_dict_includes_a_configured_fence():
         "fence": "python",
         "next": True,
         "results": None,
+        "lock": True,
     }
 @
 
 A [[next=False]] open question must surface the opt-out in [[to_dict]] so it
 persists across server restarts, while [[canonical_dict]] still hides the
-presentation-only [[next]] and [[results]] flags and an unset [[fence]].
+presentation-only [[next]], [[results]] and [[lock]] flags and an unset
+[[fence]].
 
 <<test functions>>=
 
@@ -380,6 +399,7 @@ def test_open_question_to_dict_records_an_opt_out_next_flag():
     canonical = OpenQuestion("Q").canonical_dict()
     assert "next" not in canonical
     assert "results" not in canonical
+    assert "lock" not in canonical
     assert "fence" not in canonical
 @
 
@@ -441,6 +461,7 @@ def test_scale_question_to_dict_records_an_opt_out_next_flag():
     canonical = ScaleQuestion("Pace?").canonical_dict()
     assert "next" not in canonical
     assert "results" not in canonical
+    assert "lock" not in canonical
 @
 
 \section{Word Clouds}
@@ -471,9 +492,10 @@ class WordCloudQuestion(Question):
     ``extra_stop_words``, ``use_default_stopwords``, ``render``) are
     presentation hints: they do not affect the question's canonical
     identity, so editing them and recompiling preserves the existing
-    answer pool.  The shared ``next`` and ``results`` flags are
-    presentation in the same sense---they only control the post-submit
-    navigation link and the per-question results visibility.
+    answer pool.  The shared ``next``, ``results`` and ``lock`` flags
+    are presentation in the same sense---they only control the
+    post-submit navigation link, the per-question results visibility
+    and the lecturer-paced gate.
     """
 
     max_chars: int = 280
@@ -634,15 +656,16 @@ def test_word_cloud_to_dict_includes_all_fields():
         "render": "table",
         "next": True,
         "results": None,
+        "lock": True,
     }
 @
 
 The canonical dictionary is the central guarantee of this question type:
 no matter how the presentation evolves, two word clouds with the same
 prompt and character limit share an identity.  We deliberately vary every
-presentation field at once, including the shared [[next]] and [[results]]
-flags, so any one of them slipping into the canonical payload would break
-this assertion.
+presentation field at once, including the shared [[next]], [[results]]
+and [[lock]] flags, so any one of them slipping into the canonical payload
+would break this assertion.
 
 <<test functions>>=
 
@@ -656,6 +679,7 @@ def test_word_cloud_canonical_dict_excludes_presentation_fields():
         use_default_stopwords=False,
         next=False,
         results=False,
+        lock=False,
     )
 
     assert question.canonical_dict() == {
@@ -911,7 +935,7 @@ that many favourites, which keeps a long option list approachable.  Both
 the form and the answer recorder treat [[top_n]] as a hard cap on how
 many ranks a respondent may assign, so --- like the option set itself ---
 it shapes the input contract and must enter the canonical identity.  Only
-the shared [[next]] and [[results]] flags are presentation.
+the shared [[next]], [[results]] and [[lock]] flags are presentation.
 
 <<classes>>=
 @dataclass(frozen=True)
@@ -923,8 +947,8 @@ class RankingQuestion(Question):
     many items a respondent ranks: ``None`` asks for a full ordering of
     every option, while an integer asks for only that many favourites.
     Like the option set, ``top_n`` shapes the input contract, so it is
-    part of the canonical identity; only ``next`` and ``results`` are
-    presentation.
+    part of the canonical identity; only ``next``, ``results`` and
+    ``lock`` are presentation.
     """
 
     options: tuple[str, ...]
@@ -991,9 +1015,9 @@ The persistence shape keeps [[top_n]] explicit, even at its [[None]]
 default, so the store can refresh a ranking question without guessing
 whether an absent key means \enquote{full ordering} or \enquote{this is
 store metadata}.  The inherited [[canonical_dict]] strips only the
-shared [[next]] and [[results]] flags, which is exactly the right
-identity: the prompt, the ordered option set, and [[top_n]] all shape
-what a respondent is asked to do, so all three stay in.
+shared [[next]], [[results]] and [[lock]] flags, which is exactly the
+right identity: the prompt, the ordered option set, and [[top_n]] all
+shape what a respondent is asked to do, so all three stay in.
 
 <<ranking question methods>>=
 def _own_dict(self) -> dict[str, Any]:
@@ -1017,6 +1041,7 @@ def test_ranking_question_to_dict_includes_top_n():
         "top_n": None,
         "next": True,
         "results": None,
+        "lock": True,
     }
     partial = RankingQuestion(
         "Rank these", ("A", "B", "C"), top_n=2
@@ -1024,8 +1049,8 @@ def test_ranking_question_to_dict_includes_top_n():
     assert partial["top_n"] == 2
 @
 
-The canonical dictionary keeps [[top_n]] but drops [[next]] and
-[[results]], which is the inverse of the word-cloud guarantee: there the
+The canonical dictionary keeps [[top_n]] but drops [[next]], [[results]]
+and [[lock]], which is the inverse of the word-cloud guarantee: there the
 visualisation never enters identity, here the answer-shaping cap always
 does.
 
@@ -1033,7 +1058,12 @@ does.
 
 def test_ranking_canonical_dict_keeps_top_n_but_drops_next():
     question = RankingQuestion(
-        "Rank these", ("A", "B", "C"), top_n=2, next=False, results=True
+        "Rank these",
+        ("A", "B", "C"),
+        top_n=2,
+        next=False,
+        results=True,
+        lock=False,
     )
 
     assert question.canonical_dict() == {
@@ -1242,8 +1272,8 @@ class PinImageQuestion(PinQuestion):
     optional short ``comment``.  The identity is the image *bytes*
     (via ``image_sha256``) together with the pin contract
     (``max_pins``, ``allow_comment``); the stored ``image_path`` and
-    ``image_mime`` are presentation, as are the shared ``next`` and
-    ``results`` flags.  Build instances from raw bytes with
+    ``image_mime`` are presentation, as are the shared ``next``,
+    ``results`` and ``lock`` flags.  Build instances from raw bytes with
     ``from_image_bytes``.
     """
 
@@ -1332,6 +1362,7 @@ def from_image_bytes(
     allow_comment: bool = False,
     next: bool = True,
     results: bool | None = None,
+    lock: bool = True,
 ) -> "PinImageQuestion":
     """Build a pin-image question from raw image bytes.
 
@@ -1355,6 +1386,7 @@ def from_image_bytes(
         allow_comment=allow_comment,
         next=next,
         results=results,
+        lock=lock,
     )
 @
 
@@ -1432,6 +1464,7 @@ def test_pin_image_canonical_dict_drops_path_mime_and_next():
         allow_comment=True,
         next=False,
         results=False,
+        lock=False,
     )
 
     assert question.canonical_dict() == {
@@ -1477,8 +1510,8 @@ class PinTextQuestion(PinQuestion):
     ``content_html`` for the web form).  Answers share the pin-image
     shape: mappings with normalised ``x`` and ``y`` in [0, 1] and an
     optional ``comment``.  Identity is the prompt, the content string
-    and the pin contract; ``language``, ``content_html``, ``next`` and
-    ``results`` are presentation.
+    and the pin contract; ``language``, ``content_html``, ``next``,
+    ``results`` and ``lock`` are presentation.
     """
 
     content: str
@@ -1825,7 +1858,10 @@ The prompt is coerced back to [[str]], and the tri-state [[results]]
 override needs care: an absent or [[null]] key stays [[None]] ---
 deferring to the server's global flag --- rather than being coerced to
 [[False]], which would silently lock every legacy question out of
-public results.
+public results.  The [[lock]] flag goes the other way: an absent key
+reads as [[True]], so a store written before the lecturer-paced gate
+existed keeps every question waiting for the lecturer --- exactly what a
+freshly registered deck gets.
 
 <<question base methods>>=
 @classmethod
@@ -1836,6 +1872,7 @@ def _shared_fields(cls, data: Mapping[str, Any]) -> dict[str, Any]:
         "results": (
             None if data.get("results") is None else bool(data["results"])
         ),
+        "lock": bool(data.get("lock", True)),
     }
 @
 
@@ -1996,6 +2033,7 @@ def test_mc_question_round_trip():
         "multi": True,
         "next": True,
         "results": None,
+        "lock": True,
     }
 @
 
@@ -2020,6 +2058,7 @@ def test_open_question_round_trip_without_fence():
         "fence": None,
         "next": True,
         "results": None,
+        "lock": True,
     }
 @
 
@@ -2045,6 +2084,7 @@ def test_open_question_round_trip_with_fence():
         "fence": "python",
         "next": True,
         "results": None,
+        "lock": True,
     }
 @
 
@@ -2075,6 +2115,7 @@ def test_scale_question_round_trip():
         "high_label": "fast",
         "next": True,
         "results": None,
+        "lock": True,
     }
 @
 
@@ -2112,6 +2153,7 @@ def test_word_cloud_round_trip_preserves_extra_stop_words_as_tuple():
         "render": "table",
         "next": True,
         "results": None,
+        "lock": True,
     }
 @
 
@@ -2135,7 +2177,11 @@ def test_pin_image_round_trip_preserves_digest_and_contract():
     question = question_from_dict(payload)
 
     assert isinstance(question, PinImageQuestion)
-    assert question.to_dict() == payload | {"next": True, "results": None}
+    assert question.to_dict() == payload | {
+        "next": True,
+        "results": None,
+        "lock": True,
+    }
 @
 
 <<test functions>>=
@@ -2154,7 +2200,11 @@ def test_pin_text_round_trip_preserves_language_and_cached_html():
     question = question_from_dict(payload)
 
     assert isinstance(question, PinTextQuestion)
-    assert question.to_dict() == payload | {"next": True, "results": None}
+    assert question.to_dict() == payload | {
+        "next": True,
+        "results": None,
+        "lock": True,
+    }
 @
 
 The [[next]] flag has to survive the store's JSON detour for every question
@@ -2187,6 +2237,32 @@ def test_question_from_dict_round_trips_a_results_override(override):
         assert rebuilt.to_dict() == question.to_dict()
 @
 
+The [[lock]] opt-out is the flag a lecturer sets on a handful of
+questions in the middle of a deck, so losing it across a restart would
+silently re-lock the second and third question of a three-question slide
+while the first one stays open.  A store from before the gate existed has
+no [[lock]] key at all, and those questions must wait for the lecturer
+like a fresh deck does.
+
+<<test functions>>=
+
+@pytest.mark.parametrize("factory", QUESTION_FACTORIES)
+def test_question_from_dict_round_trips_an_opt_out_lock_flag(factory):
+    question = factory(lock=False)
+    rebuilt = question_from_dict(question.to_dict())
+    assert rebuilt.lock is False
+    assert rebuilt.to_dict() == question.to_dict()
+
+
+@pytest.mark.parametrize("factory", QUESTION_FACTORIES)
+def test_question_from_dict_defaults_a_missing_lock_flag_to_waiting(
+    factory,
+):
+    data = factory().to_dict()
+    del data["lock"]
+    assert question_from_dict(data).lock is True
+@
+
 \subsection{Hashing canonical JSON}
 
 The canonical hash uses sorted JSON keys so that it depends on the meaning of
@@ -2194,8 +2270,8 @@ the question, not on the incidental order in which Python produced a mapping.
 
 Every question type now exposes a [[canonical_dict]] method that returns the
 identity-only payload.  For multiple-choice and scale questions the identity is
-the whole persistence shape minus the shared presentation flags ([[next]] and
-[[results]]).  Open questions do the
+the whole persistence shape minus the shared presentation flags ([[next]],
+[[results]] and [[lock]]).  Open questions do the
 same and additionally drop an unset [[fence]] so historical hashes stay
 byte-for-byte stable even though [[to_dict]] now records explicit defaults.
 Word clouds additionally strip their visualisation fields, keeping existing
@@ -2320,6 +2396,19 @@ def test_question_hash_invariant_to_results_overrides(override):
     for factory in QUESTION_FACTORIES:
         assert question_hash(factory()) == question_hash(
             factory(results=override)
+        )
+@
+
+The [[lock]] flag is the one a lecturer toggles most casually --- adding
+a question to a one-QR slide block is a one-word edit --- so it is also
+the one whose hash-invariance would be most painful to lose.
+
+<<test functions>>=
+
+def test_question_hash_invariant_to_lock_flag_across_question_types():
+    for factory in QUESTION_FACTORIES:
+        assert question_hash(factory()) == question_hash(
+            factory(lock=False)
         )
 @
 

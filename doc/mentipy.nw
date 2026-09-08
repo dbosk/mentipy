@@ -58,8 +58,10 @@ manual.
 
 \begin{description}
 \item[Build the manual] Run [[make]] in [[doc/]].
-\item[Start the server] Run [[mentipy serve --store ./mentipy.json]] in
-  [[doc/]].
+\item[Start the server] Run [[mentipy serve --store ./mentipy.json --no-lock]]
+  in [[doc/]].  Without [[--no-lock]] the server paces respondents with
+  the lecturer's browser (see \cref{sec:serving-and-recompiling}), and
+  only the questions whose results page you have opened can be answered.
 \item[Answer the polls] Open the generated PDF and scan the QR codes in this
   chapter.
 \end{description}
@@ -955,10 +957,13 @@ question is not the first in the lecture, that same row also shows
 \enquote{$\leftarrow$ Previous} on the left.  The flag defaults to true
 and is presentation only --- it does not affect the canonical hash, so
 flipping it between recompiles does not orphan any answers already
-collected.  It is one of two presentation flags shared by every helper:
-the other, [[results]], overrides the server's [[--results]] default for
-a single question and is described in
-\cref{sec:serving-and-recompiling}.
+collected.  It is one of three presentation flags shared by every
+helper: the others, [[results]] and [[lock]], override the server's
+[[--results]] default and its lecturer-paced gate for a single question
+and are described in \cref{sec:serving-and-recompiling}.  Since the gate
+is on by default, the \enquote{Next $\rightarrow$} link may land on a
+waiting page rather than the next form until the lecturer has opened
+that question.
 
 The default is what the lecturer almost always wants: a respondent who
 just submitted an answer can step to the next question without
@@ -1157,6 +1162,7 @@ but real lecture notes can point [[environment=]] at any existing LaTeX
 environment.
 
 \subsection{The Same Environment Without the URL}
+\label{sec:layout-no-url}
 
 The code used to generate the following question is shown below.
 
@@ -1317,6 +1323,98 @@ the override.  The CLI mirrors the keyword with [[--results]] and
 mentipy render mc "Which call is tail recursive?" \
   "fact(n-1) * n" "acc * n; fact(n-1, acc)" --no-results
 \end{minted}
+
+The server also paces the room.  A respondent who has just answered can
+follow the \enquote{Next $\rightarrow$} link straight into the next
+question, and a quick one can answer the whole deck while the first
+tally is still being discussed.  By default [[mentipy serve]] therefore
+serves a question to respondents only once the lecturer has reached it,
+and the lecturer's own browser is the cursor: opening a question's
+results page --- on the lecture machine or through the admin link ---
+opens that question for the room.  This holds for the first question as
+well, so the results page of a question is opened \emph{before} its
+slide is shown.  The index page at the server's root URL links to every
+results page and labels each question as active, open or locked.
+Until a question is open, respondents see a waiting page instead of the
+form; it refreshes itself and carries a \enquote{Try again} link, so the
+form appears on its own once the lecturer moves on.
+
+Skipping is honoured: opening the third question and then the sixth
+leaves the fourth and fifth locked, so respondents never see their
+forms.  Answers already submitted are untouched, and a respondent who
+has a form open can always finish, because submitting an answer and the
+thanks page are outside the gate.  Going back to an earlier tally locks
+nothing.  Everything the gate knows lives in the running server ---
+nothing is written to the store --- so restarting [[mentipy serve]]
+locks every question again, and the results tab the lecturer already has
+open reopens the current question on its next refresh.  Rendering a
+question from the terminal while the server runs never opens anything:
+a re-rendered question moves to the end of the deck, as it already does
+for the navigation row, and the only effect on the gate is that a
+[[lock=False]] block which followed that question now follows a
+different one.  The gate is a pacing device, not access control: the next
+question's URL is visible in the navigation row, and nothing stops a
+determined respondent from crafting a request.  It only keeps the class
+from wandering ahead of the slides.  It does make the admin side a
+steering wheel, though: a hand-rolled tunnel that makes every visitor
+look local would let any respondent open questions, where before it
+could only leak a tally.
+
+[[/active]] is the latecomer's URL.  It redirects to the question the
+lecturer opened most recently and keeps any suffix, so it can be printed
+on the title slide; before anything is open it shows a waiting page that
+refreshes itself.  The waiting page of a locked question offers
+[[/active]] only when the lecturer has moved past that question, because
+a respondent who is merely ahead of the room would otherwise be sent
+back to the question they just answered.
+
+Some slides carry several questions and one QR code.  Respondents reach
+the second and third question through the navigation row, so those must
+open together with the first rather than wait for their own results
+pages.  Every helper accepts a [[lock]] keyword for this: [[lock=False]]
+opens the question as soon as the question before it in the deck is
+open, while the next slide's question keeps the default [[lock=True]]
+and waits for the lecturer.  The follow-on questions typically use the
+QR-less layout from \cref{sec:layout-no-url}:
+
+\begin{minted}{python}
+from mentipy.latex import mc, scale
+
+print(mc("Which call is tail recursive?", ["fact(n-1) * n", "acc * n"]))
+print(
+    scale("How sure are you?", lock=False, layout="article", show_url=False)
+)
+\end{minted}
+
+Like [[next]] and [[results]], the flag is presentation only and never
+enters the canonical hash.  The CLI mirrors it with [[--no-lock]] on
+every [[mentipy render]] subcommand, and [[mentipy serve --no-lock]]
+switches the gate off for a whole run --- the right choice for a
+self-paced questionnaire, or for answering this manual's own polls
+without opening every results page first:
+
+\begin{minted}{text}
+mentipy render scale "How sure are you?" --no-lock --layout article --no-url
+mentipy serve --store ./mentipy.json --no-lock
+\end{minted}
+
+\ltnote{%
+  \textbf{Variation pattern}: Contrast
+
+  \textbf{What varies}: The [[lock]] flag on a question, and the
+  lecturer's position in the deck.  [[lock=True]] (the default) waits
+  for the lecturer's results view; [[lock=False]] follows the question
+  before it.
+
+  \textbf{What stays invariant}: The rendered LaTeX, the question's
+  canonical hash, the URL prefix, the recorded answers, and the
+  navigation row itself.  Only whether the server answers a respondent
+  with the form or the waiting page changes.
+
+  \textbf{What this reveals}: Pacing is a property of the lecture, not
+  of the question, so it lives in the running server and is steered from
+  the browser; the flag merely says which questions travel together.
+}
 
 QR codes are generated when the document compiles, not when the server starts.
 If [[mentipy.base_url]] is unset, the compile-time pass uses the current LAN
