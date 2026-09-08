@@ -325,20 +325,42 @@ def _render_body(question: Question) -> str:
     return _render_scale(question)
 @
 
+The flat article layout is \emph{transparent}: a reader of the handout or
+the lecture notes should see the question as the author wrote it --- an
+exercise in running text --- not the form that respondents answered on their
+phones.  So the article rendering is the prompt and nothing else: no options,
+no respondent instructions (\enquote{Choose exactly one}), no answer type,
+character limit, scale range or pin instructions, and no bold, which would
+mark the prompt as something other than the surrounding text.  A prompt that
+only makes sense together with its options (\enquote{which of these holds?})
+is therefore the author's to rephrase.
+
 The prompt/body wrapper is the one place where the configured question
 environment takes effect.  Keeping it inside the shared content renderer means
 every outer layout receives the same semantics: either the content is wrapped in
 the caller's environment, or it falls back to a bold prompt followed by the
-question-specific instructions.
+question-specific instructions.  With [[transparent]] there is no body and no
+bold: the prompt alone, wrapped in the environment when one is configured.
 
 <<functions>>=
 def _render_question_content(
     question: Question,
     environment: str | None,
+    *,
+    transparent: bool = False,
 ) -> str:
     prompt = _escape_latex(question.text)
-    body = _render_body(question)
 
+    if transparent:
+        if environment:
+            return (
+                f"\\begin{{{environment}}}\n"
+                f"{prompt}\n"
+                f"\\end{{{environment}}}"
+            )
+        return prompt
+
+    body = _render_body(question)
     if environment:
         return (
             f"\\begin{{{environment}}}\n"
@@ -375,9 +397,12 @@ def _render_slide_question(
     return "\n".join(parts)
 @
 
-The flat article layout is for handouts where a large QR would waste space.
-It prints the respondent URL as text only when requested, making [[show_url]] a
-real privacy/control knob for QR-less outputs.
+The flat article layout is for handouts and lecture notes where a large QR
+would waste space --- and where the reader should not be able to tell that
+the question was ever a poll: it renders the prompt alone, in the running
+text's own weight (no options, no form instructions).  It prints the
+respondent URL as text only when requested, making [[show_url]] a real
+privacy/control knob for QR-less outputs.
 
 <<functions>>=
 def _render_article_question(
@@ -386,7 +411,7 @@ def _render_article_question(
     environment: str | None,
     show_url: bool,
 ) -> str:
-    parts = [_render_question_content(question, environment)]
+    parts = [_render_question_content(question, environment, transparent=True)]
 
     if show_url:
         parts.append(
@@ -1645,6 +1670,43 @@ def test_article_layout_is_flat_and_qrless(tmp_path, monkeypatch):
     assert "\\begin{minipage}[t]" not in rendered
     assert "\\input" not in rendered
     assert f"\\texttt{{http://example.test:8080/{prefix}}}" in rendered
+@
+
+The article layout is transparent: the prompt alone, wrapped in the
+configured environment, with no options, no form instructions or limits and no
+bold; the slide layout keeps all of them.
+
+<<test functions>>=
+def test_article_layout_is_transparent(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    common = dict(
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir=DEFAULT_QR_DIR,
+        layout="article",
+        show_url=False,
+        environment="exercise",
+    )
+
+    choice = mc("How was the lecture?", ["Great", "OK", "Boring"], **common)
+    assert choice == (
+        "\\begin{exercise}\nHow was the lecture?\n\\end{exercise}"
+    )
+
+    open_answer = open_text("What did you learn?", max_chars=280, **common)
+    assert open_answer == (
+        "\\begin{exercise}\nWhat did you learn?\n\\end{exercise}"
+    )
+
+    cloud = word_cloud("One word for today?", **common)
+    assert "\\begin{description}" not in cloud
+
+    bare = mc("How was the lecture?", ["Great", "OK"], **{**common, "environment": ""})
+    assert bare == "How was the lecture?"
+
+    slide = mc("How was the lecture?", ["Great", "OK"], **{**common, "layout": "slide"})
+    assert "Choose exactly one" in slide and "\\item Great" in slide
 @
 
 \subsection{Environment and URL visibility policy}

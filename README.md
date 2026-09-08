@@ -86,7 +86,7 @@ Rendering options control the LaTeX wrapper without changing the poll identity.
 | Option | Purpose |
 | --- | --- |
 | `layout="slide"` / `--layout slide` | Render for presentation slides. |
-| `layout="article"` / `--layout article` | Render a flat article-style question. |
+| `layout="article"` / `--layout article` | Render a flat, transparent article-style question: the prompt alone, in the running text's weight; no options, form instructions, limits or QR. |
 | `layout="article+qr"` / `--layout article+qr` | Include the QR image beside the article-style question. |
 | `layout="auto"` / `--layout auto` | Let `mentipy` choose from the surrounding context. |
 | `environment="exercise"` / `--env exercise` | Wrap the question in an existing LaTeX environment. |
