@@ -2423,6 +2423,21 @@ def _render_wordcloud_svg(pairs: list[tuple[str, int]]) -> str:
 The optional-package path is an optimisation, not a requirement.  A
 missing dependency is normal, so [[ImportError]] simply returns
 [[None]] and lets the caller fall back to Mentipy's own SVG layout.
+A failure \emph{inside} the package gets the same treatment, for the
+same reason: the results page is what the lecturer is looking at in
+front of the class, and a prettier layout is never worth a blank page.
+The package measures every token with Pillow, whose text metrics
+reject a string containing a newline, and it can also give up on a
+phrase that does not fit the canvas at all --- whole-answer polls
+produce exactly such long tokens.  The token normalisation in
+[[WordCloudQuestion.frequencies]] removes the first cause at the
+source, but the renderer should not depend on every future input
+quirk being anticipated there.  We therefore catch any exception from
+the layout call, log it at warning level with the traceback so the
+lecturer can report it, and fall back.  A broad [[except]] is
+deliberate here: the package raises plain [[ValueError]] for its own
+complaints and lets Pillow's and NumPy's errors through unchanged, so
+no narrower clause would be reliable.
 
 This path is the one place in the results renderer where attacker-controlled
 text is emitted as inline SVG markup that we did not assemble ourselves.  Words
@@ -2454,7 +2469,16 @@ def _render_wordcloud_svg_with_package(
         prefer_horizontal=1.0,
         random_state=0,
     )
-    svg = cloud.generate_from_frequencies(dict(pairs)).to_svg().lstrip()
+    try:
+        svg = cloud.generate_from_frequencies(dict(pairs)).to_svg()
+    except Exception:  # noqa: BLE001 -- any layout failure falls back
+        LOGGER.warning(
+            "wordcloud package failed to lay out the cloud; "
+            "using the built-in layout",
+            exc_info=True,
+        )
+        return None
+    svg = svg.lstrip()
     if svg.startswith("<?xml"):
         _declaration, _separator, svg = svg.partition("?>")
         svg = svg.lstrip()
@@ -2574,6 +2598,42 @@ def test_render_wordcloud_svg_uses_optional_package_when_available(
     assert rendered.startswith('<svg class="wordcloud-svg"')
     assert 'role="img"' in rendered
     assert '<?xml version="1.0"' not in rendered
+@
+
+When the package is installed but its layout call raises, the page must
+still render.  The fake raises the same [[ValueError]] Pillow produces
+for a multi-line token; we expect the built-in layout's markup, the
+word escaped as the fallback always does, and one warning on the
+server logger carrying the traceback.
+
+<<test functions>>=
+def test_render_wordcloud_svg_falls_back_when_package_raises(
+    monkeypatch, caplog
+):
+    class FailingWordCloud:
+        def __init__(self, **_kwargs):
+            pass
+
+        def generate_from_frequencies(self, _frequencies):
+            raise ValueError("anchor not supported for multiline text")
+
+    class FakeModule:
+        WordCloud = FailingWordCloud
+
+    monkeypatch.setattr(
+        server_module.importlib,
+        "import_module",
+        lambda _name: FakeModule,
+    )
+    caplog.set_level(logging.WARNING, logger=server_module.LOGGER.name)
+
+    rendered = server_module._render_wordcloud_svg([("a<b", 2)])
+
+    assert rendered.startswith('<svg class="wordcloud-svg"')
+    assert "a&lt;b" in rendered
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelno == logging.WARNING
+    assert "multiline" in caplog.text
 @
 
 \subsection{Sequence-navigation link}

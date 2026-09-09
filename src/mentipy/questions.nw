@@ -741,9 +741,18 @@ the latter is ASCII-only and would miss the en-dash and the curly
 apostrophes Swedish answers tend to contain.  Tokens that fall below
 the minimum length or that match the active stop-word set are
 discarded; the rest accumulate into a frequency counter.  In
-whole-answer mode each non-empty stripped answer counts as one
-token --- useful when the prompt asks for a single phrase rather than
-free prose.
+whole-answer mode each non-empty answer counts as one token --- useful
+when the prompt asks for a single phrase rather than free prose.  The
+token is the answer with every run of whitespace collapsed to a single
+space, not merely stripped at the ends.  The form is a textarea, so a
+respondent can press Enter in the middle of a phrase; that line break
+is an artefact of the input widget, not part of the phrase, and
+\enquote{Linear} followed by a newline and \enquote{algebra} should
+count together with \enquote{Linear algebra}.  Collapsing also keeps
+the token on one line for every renderer: the packed SVG layout
+measures each token with Pillow, which refuses a string containing a
+newline outright, and a single such answer once took the whole results
+page down.
 
 The final sort is descending by count, then ascending by word.  The
 secondary key makes the output deterministic when several words tie ---
@@ -772,7 +781,7 @@ def frequencies(
                 ):
                     counter[word] += 1
         else:
-            token = text.strip()
+            token = " ".join(text.split())
             if token:
                 counter[token] += 1
     return sorted(
@@ -842,6 +851,28 @@ def test_word_cloud_frequencies_whole_answer_mode():
 
     assert counts["Linear algebra"] == 2
     assert counts["linear algebra"] == 1
+@
+
+A line break inside a whole answer must neither split the token nor
+survive into it.  The browser sends a textarea's newline as CRLF, so the
+test uses that form, together with a doubled space, and expects all
+three spellings to fold into one entry with no newline left in any key.
+
+<<test functions>>=
+
+def test_word_cloud_frequencies_whole_answer_collapses_whitespace():
+    question = WordCloudQuestion("Topic?", split_words=False)
+    answers = [
+        {"value": "linear\r\nalgebra"},
+        {"value": "linear  algebra"},
+        {"value": "linear algebra"},
+        {"value": "\r\n"},
+    ]
+
+    counts = dict(question.frequencies(answers))
+
+    assert counts == {"linear algebra": 3}
+    assert not any("\n" in word for word in counts)
 @
 
 Unicode punctuation needs an explicit test because [[string.punctuation]]
