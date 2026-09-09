@@ -531,7 +531,8 @@ def _latex_reference() -> str:
           environment: defaults to {QUESTION_ENVIRONMENT_CONFIG};
             MENTIPY_QUESTION_ENVIRONMENT overrides it
           show_url: defaults to {SHOW_URL_CONFIG} and only affects QR-less
-            article output
+            article output; QR layouts caption the QR via the LaTeX
+            macro \\mentipyqrcaption, which the document may redefine
           layout: slide, article, article+qr, or auto
 
         Workflow
