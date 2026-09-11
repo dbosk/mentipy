@@ -176,10 +176,15 @@ def _render_scale(question: ScaleQuestion) -> str:
 
 A word-cloud question's slide body needs to show respondents two things
 the open-question body does not: that the answer will be aggregated as
-a cloud, and (when split mode is on) the minimum word length that will
-make it into the visualisation.  Authors often print this on the slide
-so respondents understand why their two-letter answer never appears in
-the cloud.
+a cloud, and how their answer will be cut up before it is counted.
+Authors often print this on the slide so respondents understand why
+their two-letter answer never appears in the cloud, or why their comma
+list became three entries.  The mode in force comes from
+[[effective_separators]] so the sidecar cannot drift from what the
+tally does: the empty set is described as whole answers, a narrowed
+set is shown verbatim (its [[repr]], so a newline is visible as
+[[\n]]), and the default set says nothing beyond the minimum length
+that applies to every splitting mode.
 
 <<functions>>=
 def _render_word_cloud(question: WordCloudQuestion) -> str:
@@ -188,12 +193,17 @@ def _render_word_cloud(question: WordCloudQuestion) -> str:
         "\\item[Type] Word-cloud (free-text)",
         f"\\item[Limit] {question.max_chars} characters",
     ]
-    if question.split_words:
+    separators = question.effective_separators()
+    if separators == "":
+        lines.append("\\item[Mode] Whole answer counts as one entry")
+    else:
+        if separators is not None:
+            lines.append(
+                f"\\item[Split on] {_escape_latex(repr(separators))}"
+            )
         lines.append(
             f"\\item[Min word length] {question.min_word_length}"
         )
-    else:
-        lines.append("\\item[Mode] Whole answer counts as one entry")
     lines.append("\\end{description}")
     return "\n".join(lines)
 @
@@ -811,6 +821,7 @@ def word_cloud(
     *,
     max_chars: int = 280,
     split_words: bool = True,
+    separators: str | None = None,
     min_word_length: int = 3,
     extra_stop_words: Iterable[str] = (),
     use_default_stopwords: bool = True,
@@ -828,9 +839,9 @@ def word_cloud(
 ) -> str:
     """Return LaTeX for a word-cloud question.
 
-    Visualisation parameters (``split_words``, ``min_word_length``,
-    ``extra_stop_words``, ``use_default_stopwords``, ``render``) do not
-    enter the question's canonical hash, so editing them and
+    Visualisation parameters (``split_words``, ``separators``,
+    ``min_word_length``, ``extra_stop_words``, ``use_default_stopwords``,
+    ``render``) do not enter the question's canonical hash, so editing them and
     recompiling preserves any answers already collected.  The ``next``
     and ``results`` flags are presentation in the same sense---they only
     control whether the server renders a \"Next →\" link after
@@ -842,6 +853,7 @@ def word_cloud(
             text=text,
             max_chars=max_chars,
             split_words=split_words,
+            separators=separators,
             min_word_length=min_word_length,
             extra_stop_words=tuple(extra_stop_words),
             use_default_stopwords=use_default_stopwords,
@@ -1326,6 +1338,34 @@ def test_word_cloud_passes_visualisation_options_into_the_question(
     assert question.min_word_length == 5
     assert question.extra_stop_words == ("foo",)
     assert question.use_default_stopwords is False
+@
+
+The separator set travels the same way, and it cannot share the test
+above because a narrowed set contradicts [[split_words=False]].  The
+sidecar must then name the set, with the newline visible rather than
+breaking the line.
+
+<<test functions>>=
+def test_word_cloud_passes_separators_into_the_question_and_sidecar(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    rendered = word_cloud(
+        "Words?",
+        separators=",;\n",
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir=DEFAULT_QR_DIR,
+    )
+
+    [entry] = store.all_questions()
+    question = store.question(entry["hash"])
+
+    assert question.separators == ",;\n"
+    assert "\\item[Split on] ',;\\textbackslash{}n'" in rendered
+    assert "\\item[Min word length] 3" in rendered
 @
 
 The ranking wrapper meets the same registration contract, and the slide

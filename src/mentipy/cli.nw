@@ -493,7 +493,7 @@ def _latex_reference() -> str:
              base_url=None, qr_dir=None, qr_format=None,
              environment=None, show_url=None, layout="slide")
           word_cloud(text, *, max_chars=280, split_words=True,
-             min_word_length=3, extra_stop_words=(),
+             separators=None, min_word_length=3, extra_stop_words=(),
              use_default_stopwords=True, render="svg", next=True,
              results=None, lock=True, store=None, base_url=None,
              qr_dir=None, qr_format=None, environment=None,
@@ -2400,6 +2400,15 @@ def render_word_cloud(
             "the whole answer as a single token."
         ),
     ),
+    separators: Optional[str] = typer.Option(
+        None,
+        "--separators",
+        help=(
+            "Characters to cut answers on, e.g. ',;\\n' (the escapes "
+            "\\n, \\t and \\r are decoded). Default: all punctuation "
+            "and whitespace. An empty string keeps answers whole."
+        ),
+    ),
     min_word_length: int = typer.Option(
         3,
         "--min-word-length",
@@ -2445,6 +2454,7 @@ def render_word_cloud(
             text,
             max_chars=max_chars,
             split_words=split_words,
+            separators=_decode_separator_escapes(separators),
             min_word_length=min_word_length,
             extra_stop_words=tuple(extra_stop_words or ()),
             use_default_stopwords=use_default_stopwords,
@@ -2462,6 +2472,27 @@ def render_word_cloud(
                 layout=layout,
             ),
         )
+    )
+@
+
+The separator set is the one option whose natural values are control
+characters.  A newline is the separator a list poll wants most, and
+typing a literal newline into a shell argument is awkward, so the flag
+accepts the two-character escapes [[\n]], [[\t]] and [[\r]] and
+decodes exactly those.  We do not reach for Python's [[unicode_escape]]
+codec: it treats the input as Latin-1 bytes, so a Swedish letter in the
+set would come out mangled.  Three explicit replacements are enough and
+cannot surprise.  [[None]] (flag absent) passes through untouched,
+since it means the default set rather than an empty one.
+
+<<functions>>=
+def _decode_separator_escapes(separators: Optional[str]) -> Optional[str]:
+    if separators is None:
+        return None
+    return (
+        separators.replace("\\n", "\n")
+        .replace("\\t", "\t")
+        .replace("\\r", "\r")
     )
 @
 
@@ -2509,6 +2540,44 @@ def test_render_word_cloud_threads_presentation_options(tmp_path):
     assert question.min_word_length == 4
     assert question.extra_stop_words == ("foo", "bar")
     assert question.use_default_stopwords is False
+@
+
+The separator flag gets its own test because it cannot sit beside
+[[--whole-answer]] (the two contradict) and because its value crosses
+the shell boundary as an escape sequence: the stored question must hold
+a real newline, and the empty string must survive as the empty string.
+
+<<test functions>>=
+def test_render_word_cloud_decodes_separator_escapes(tmp_path):
+    runner = CliRunner()
+    store_path = tmp_path / "mentipy.json"
+    common = [
+        "--store",
+        str(store_path),
+        "--base-url",
+        "http://example.test:8080",
+        "--qr-dir",
+        str(tmp_path / DEFAULT_QR_DIR),
+    ]
+
+    result = runner.invoke(
+        cli,
+        ["render", "word-cloud", "Words?", "--separators", ",;\\n"]
+        + common,
+    )
+    assert result.exit_code == 0, result.output
+    [entry] = Store(store_path).all_questions()
+    assert Store(store_path).question(entry["hash"]).separators == ",;\n"
+
+    result = runner.invoke(
+        cli,
+        ["render", "word-cloud", "Whole?", "--separators", ""] + common,
+    )
+    assert result.exit_code == 0, result.output
+    entries = Store(store_path).all_questions()
+    whole = [e for e in entries if e["text"] == "Whole?"]
+    assert len(whole) == 1
+    assert Store(store_path).question(whole[0]["hash"]).separators == ""
 @
 
 Ranking takes its items as positional arguments, exactly like [[mc]], and

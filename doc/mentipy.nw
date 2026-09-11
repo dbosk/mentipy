@@ -597,9 +597,12 @@ The command prints the following LaTeX:
 Included in the document, that output compiles to:
 \begin{center}\useprintpythontex{cli-wordcloud}\end{center}
 
-The presentation knobs ([[render]], [[split_words]],
+The presentation knobs ([[render]], [[split_words]], [[separators]],
 [[min_word_length]], [[extra_stop_words]], [[use_default_stopwords]])
-deliberately stay out of the canonical hash.  Editing the slide source
+deliberately stay out of the canonical hash.  ([[separators]] names the
+characters an answer is cut on; the default cuts on all punctuation and
+whitespace, and the empty string keeps each answer whole, which is what
+[[split_words=False]] means too.)  Editing the slide source
 to switch from one visualisation to another and recompiling therefore
 keeps the same QR code and the same answer pool: the question's
 identity is the prompt and the character limit, not how the resulting
@@ -609,8 +612,9 @@ cloud is drawn.
   \textbf{Variation pattern}: Generalization
 
   \textbf{What varies}: The question kind, now a word cloud.  Its
-  presentation knobs ([[render]], [[split_words]], [[min_word_length]],
-  [[extra_stop_words]], [[use_default_stopwords]]) extend the shared
+  presentation knobs ([[render]], [[split_words]], [[separators]],
+  [[min_word_length]], [[extra_stop_words]], [[use_default_stopwords]])
+  extend the shared
   authoring surface without touching identity.
 
   \textbf{What stays invariant}: The PythonTeX-to-CLI parallel between

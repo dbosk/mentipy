@@ -29,6 +29,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 import hashlib
 import json
+import re
 from typing import Any, Iterable, Mapping
 import unicodedata
 @
@@ -488,11 +489,11 @@ set: for a word cloud, the visualisation never changes the identity.
 class WordCloudQuestion(Question):
     """A free-text question whose results aggregate into a word cloud.
 
-    The visualisation fields (``split_words``, ``min_word_length``,
-    ``extra_stop_words``, ``use_default_stopwords``, ``render``) are
-    presentation hints: they do not affect the question's canonical
-    identity, so editing them and recompiling preserves the existing
-    answer pool.  The shared ``next``, ``results`` and ``lock`` flags
+    The visualisation fields (``split_words``, ``separators``,
+    ``min_word_length``, ``extra_stop_words``, ``use_default_stopwords``,
+    ``render``) are presentation hints: they do not affect the
+    question's canonical identity, so editing them and recompiling
+    preserves the existing answer pool.  The shared ``next``, ``results`` and ``lock`` flags
     are presentation in the same sense---they only control the
     post-submit navigation link, the per-question results visibility
     and the lecturer-paced gate.
@@ -500,6 +501,7 @@ class WordCloudQuestion(Question):
 
     max_chars: int = 280
     split_words: bool = True
+    separators: str | None = None
     min_word_length: int = 3
     extra_stop_words: tuple[str, ...] = ()
     use_default_stopwords: bool = True
@@ -518,6 +520,7 @@ compiled, not when the first respondent reaches the results page.
 <<wordcloud question methods>>=
 def __post_init__(self):
     <<validate wordcloud limit>>
+    <<validate wordcloud separators>>
     <<validate wordcloud min length>>
     <<validate wordcloud render mode>>
 @
@@ -531,6 +534,23 @@ would let the storage layer accept an answer the form refuses.
 if self.max_chars <= 0:
     raise ValueError(
         "word-cloud questions need a positive character limit"
+    )
+@
+
+\label{sec:wordcloud-validation-separators}%
+Turning [[split_words]] off means \enquote{never split}, and so does an
+empty [[separators]] string (\cref{sec:wordcloud-pieces}); the two spellings
+agree.  A non-empty separator set together with [[split_words=False]]
+does not: the author has asked both to cut on commas and to never cut.
+We refuse rather than let one flag silently win, because whichever
+precedence we picked, half the authors would guess the other one and
+only find out from a cloud that looks wrong.
+
+<<validate wordcloud separators>>=
+if not self.split_words and self.separators:
+    raise ValueError(
+        "word-cloud separators only apply when split_words is on; "
+        "use separators='' or split_words=False for whole answers"
     )
 @
 
@@ -582,6 +602,19 @@ def test_word_cloud_question_requires_non_negative_min_length():
         WordCloudQuestion("Topic?", min_word_length=-1)
 @
 
+The contradictory combination must fail at construction, while the two
+agreeing spellings of \enquote{never split} both construct.
+
+<<test functions>>=
+
+def test_word_cloud_question_rejects_separators_with_whole_answer():
+    with pytest.raises(ValueError, match="separators"):
+        WordCloudQuestion("Topic?", split_words=False, separators=",")
+
+    WordCloudQuestion("Topic?", split_words=False, separators="")
+    WordCloudQuestion("Topic?", split_words=False, separators=None)
+@
+
 The render-mode check is the cheapest layer of defence against a typo
 in the slide source.  Without it, an invalid value would survive
 through the store and only surface at the first results request --- by
@@ -610,6 +643,7 @@ def _own_dict(self) -> dict[str, Any]:
     return {
         "max_chars": self.max_chars,
         "split_words": self.split_words,
+        "separators": self.separators,
         "min_word_length": self.min_word_length,
         "extra_stop_words": list(self.extra_stop_words),
         "use_default_stopwords": self.use_default_stopwords,
@@ -650,6 +684,7 @@ def test_word_cloud_to_dict_includes_all_fields():
         "text": "Words?",
         "max_chars": 140,
         "split_words": False,
+        "separators": None,
         "min_word_length": 4,
         "extra_stop_words": ["foo", "bar"],
         "use_default_stopwords": False,
@@ -674,6 +709,7 @@ def test_word_cloud_canonical_dict_excludes_presentation_fields():
         "Words?",
         max_chars=140,
         render="table",
+        separators=",;",
         min_word_length=5,
         extra_stop_words=("foo",),
         use_default_stopwords=False,
@@ -730,29 +766,18 @@ consumes the same descending-by-count sequence of (word, count) pairs,
 so the filter behaviour lives on the question rather than being
 duplicated in every renderer.
 
-Splitting walks each answer once.  In split mode we first replace every
-Unicode punctuation character with a space, then casefold and split on
-whitespace.  Replacing rather than stripping is what lets
-\enquote{café—café} count as two cafés and \enquote{don't} count as
-\enquote{don} --- if we stripped instead, the em-dash variant would
-collapse into a single \enquote{cafécafé} token that no one wrote.  We
-use [[unicodedata.category]] rather than [[string.punctuation]] because
-the latter is ASCII-only and would miss the en-dash and the curly
-apostrophes Swedish answers tend to contain.  Tokens that fall below
-the minimum length or that match the active stop-word set are
-discarded; the rest accumulate into a frequency counter.  In
-whole-answer mode each non-empty answer counts as one token --- useful
-when the prompt asks for a single phrase rather than free prose.  The
-token is the answer with every run of whitespace collapsed to a single
-space, not merely stripped at the ends.  The form is a textarea, so a
-respondent can press Enter in the middle of a phrase; that line break
-is an artefact of the input widget, not part of the phrase, and
-\enquote{Linear} followed by a newline and \enquote{algebra} should
-count together with \enquote{Linear algebra}.  Collapsing also keeps
-the token on one line for every renderer: the packed SVG layout
-measures each token with Pillow, which refuses a string containing a
-newline outright, and a single such answer once took the whole results
-page down.
+Tokenising an answer has two steps, and only the first is configurable.
+\emph{Cutting} decides where one token ends and the next begins; that is
+what [[separators]] and [[split_words]] control, and it is described in
+\cref{sec:wordcloud-pieces}.  \emph{Normalising} then turns each piece
+into the token that is counted --- whitespace collapsed, edge
+punctuation trimmed, case folded --- and it is the same for every piece
+no matter how it was cut (\cref{sec:wordcloud-normalise}).  Keeping
+the second step uniform is what lets a whole-answer poll and a
+word-splitting poll share one filter chain: a phrase that is exactly a
+stop word, or shorter than the minimum length, is dropped just as a
+single word would be.  Tokens that survive the two filters accumulate
+into a frequency counter.
 
 The final sort is descending by count, then ascending by word.  The
 secondary key makes the output deterministic when several words tie ---
@@ -764,25 +789,25 @@ def frequencies(
 ) -> list[tuple[str, int]]:
     """Return ``(word, count)`` pairs sorted by descending count.
 
-    Ties are broken alphabetically by word so that renderers
-    consuming the sequence lay out a deterministic cloud.
+    Each answer is cut into pieces according to `separators` (or
+    kept whole), every piece is normalised into a casefolded token
+    with its edges trimmed, and tokens shorter than
+    `min_word_length` or in the stop-word set are dropped.  Ties are
+    broken alphabetically by word so that renderers consuming the
+    sequence lay out a deterministic cloud.
     """
 
     counter: Counter[str] = Counter()
     stops = self._effective_stop_words()
     for answer in answers:
         text = str(answer.get("value", ""))
-        if self.split_words:
-            normalized = _punctuation_to_space(text).casefold()
-            for word in normalized.split():
-                if (
-                    len(word) >= self.min_word_length
-                    and word not in stops
-                ):
-                    counter[word] += 1
-        else:
-            token = " ".join(text.split())
-            if token:
+        for piece in self._pieces(text):
+            token = _normalise_token(piece)
+            if (
+                token
+                and len(token) >= self.min_word_length
+                and token not in stops
+            ):
                 counter[token] += 1
     return sorted(
         counter.items(), key=lambda pair: (-pair[1], pair[0])
@@ -793,6 +818,58 @@ def _effective_stop_words(self) -> frozenset[str]:
     if self.use_default_stopwords:
         return DEFAULT_STOP_WORDS | extra
     return extra
+@
+
+\subsubsection{Cutting an answer into pieces}
+\label{sec:wordcloud-pieces}
+
+The separator set has three shapes, and the default is the largest.
+With [[separators]] left at [[None]] every Unicode punctuation
+character and every whitespace character is a boundary: we replace the
+punctuation with spaces and split on whitespace.  Replacing rather than
+stripping is what lets \enquote{café—café} count as two cafés and
+\enquote{don't} count as \enquote{don} --- if we stripped instead, the
+em-dash variant would collapse into a single \enquote{cafécafé} token
+that no one wrote.  We use [[unicodedata.category]] rather than
+[[string.punctuation]] because the latter is ASCII-only and would miss
+the en-dash and the curly apostrophes Swedish answers tend to contain.
+This maximal set is the default because it is a superset of whatever an
+author would list by hand, so a poll that never thinks about
+separators still gets clean single words.
+
+An explicit string narrows the set to exactly those characters.  That
+is the tool for keeping compound tokens whole --- \enquote{well-known},
+\enquote{don't}, \enquote{t.ex.} --- or for a list poll where a comma
+or a line break separates phrases but a space does not.  We split with
+a regular-expression character class built by [[re.escape]] so that a
+hyphen, a bracket or a backslash in the set is taken literally.
+
+The empty string is the degenerate set: nothing is a boundary, so the
+whole answer is one piece.  [[split_words=False]] is the older spelling
+of the same request and maps onto it, which is why the two must not
+disagree (\cref{sec:wordcloud-validation-separators}).  The mapping is
+public because the LaTeX sidecar wants to describe the mode in force
+without repeating the rule.
+
+<<wordcloud question methods>>=
+def effective_separators(self) -> str | None:
+    """Return the separator set in force.
+
+    `""` when `split_words` is off or `separators` is empty, `None`
+    for the default set, otherwise the configured characters.
+    """
+
+    if not self.split_words:
+        return ""
+    return self.separators
+
+def _pieces(self, text: str) -> list[str]:
+    separators = self.effective_separators()
+    if separators is None:
+        return _punctuation_to_space(text).split()
+    if separators == "":
+        return [text]
+    return re.split(f"[{re.escape(separators)}]", text)
 @
 
 The punctuation replacer lives at module scope because the splitter is
@@ -809,6 +886,40 @@ def _punctuation_to_space(text: str) -> str:
         " " if unicodedata.category(char).startswith("P") else char
         for char in text
     )
+@
+
+\subsubsection{Normalising a piece into a token}
+\label{sec:wordcloud-normalise}
+
+Normalising does three things, each answering a way the same token can
+be spelled differently by two respondents.  Whitespace and punctuation
+at the edges are trimmed: a trailing full stop or a bracket around a
+word is never part of the token, whereas punctuation \emph{inside} the
+piece is exactly what an author with a narrowed separator set asked to
+keep, so only the edges are touched.  Interior whitespace runs collapse
+to a single space: the form is a textarea, so a respondent can press
+Enter in the middle of a phrase, and that line break is an artefact of
+the widget, not part of the phrase.  Collapsing also keeps every token
+on one line for the renderers: the packed SVG layout measures tokens
+with Pillow, which refuses a string containing a newline outright, and
+a single such answer once took the whole results page down.  Finally
+the token is casefolded, because a cloud that shows \enquote{Linear
+algebra} and \enquote{linear algebra} as two entries surprises more
+than it informs.  Casefolding also lets the stop-word filter, whose
+entries are lowercase, apply to whole answers.
+
+<<functions>>=
+def _normalise_token(piece: str) -> str:
+    start, end = 0, len(piece)
+    while start < end and _is_edge_noise(piece[start]):
+        start += 1
+    while end > start and _is_edge_noise(piece[end - 1]):
+        end -= 1
+    return " ".join(piece[start:end].split()).casefold()
+
+
+def _is_edge_noise(char: str) -> bool:
+    return char.isspace() or unicodedata.category(char).startswith("P")
 @
 
 The split-mode happy path doubles as the contract test: lowercase,
@@ -832,9 +943,56 @@ def test_word_cloud_frequencies_splits_lowercases_and_filters():
     ]
 @
 
-Whole-answer mode skips the splitter entirely and counts each non-empty
-stripped response.  Authors use it when the prompt is a single-word poll
-(\enquote{Pick one word that describes today}).
+The default set must stay maximal: a hyphen is a boundary unless the
+author says otherwise.
+
+<<test functions>>=
+
+def test_word_cloud_frequencies_default_splits_on_all_punctuation():
+    question = WordCloudQuestion("Topic?")
+
+    assert question.frequencies([{"value": "well-known"}]) == [
+        ("known", 1),
+        ("well", 1),
+    ]
+@
+
+A narrowed set keeps what the default would cut.  The em-dash, the
+apostrophe and the hyphen all sit inside their pieces here, so all
+three survive; only the commas and the semicolon split.
+
+<<test functions>>=
+
+def test_word_cloud_frequencies_splits_only_on_separators():
+    question = WordCloudQuestion("Topic?", separators=",;\n")
+
+    counts = dict(question.frequencies(
+        [{"value": "well-known, don't;café—café\nwell-known"}]
+    ))
+
+    assert counts == {"well-known": 2, "don't": 1, "café—café": 1}
+@
+
+Edge trimming is what makes a narrowed set usable: without it a
+respondent's full stop would create a second spelling of every last
+word.  Interior punctuation stays, so a decimal number is one token.
+
+<<test functions>>=
+
+def test_word_cloud_frequencies_trims_edge_punctuation():
+    question = WordCloudQuestion("Topic?", separators=" ,")
+
+    counts = dict(question.frequencies(
+        [{"value": "(val) upprepning. 3.14, ..."}]
+    ))
+
+    assert counts == {"val": 1, "upprepning": 1, "3.14": 1}
+@
+
+Whole-answer mode keeps the whole answer as one piece but normalises it
+like any other: the three spellings below fold into one entry, and the
+empty answer contributes nothing.  Authors use the mode when the prompt
+is a single-phrase poll (\enquote{Pick one word that describes today}).
 
 <<test functions>>=
 
@@ -843,14 +1001,27 @@ def test_word_cloud_frequencies_whole_answer_mode():
     answers = [
         {"value": "Linear algebra"},
         {"value": "linear algebra"},
-        {"value": "  Linear algebra  "},
+        {"value": "  Linear algebra.  "},
         {"value": ""},
     ]
 
-    counts = dict(question.frequencies(answers))
+    assert question.frequencies(answers) == [("linear algebra", 3)]
+@
 
-    assert counts["Linear algebra"] == 2
-    assert counts["linear algebra"] == 1
+The empty separator string is the same request as [[split_words=False]],
+and because whole answers share the filter chain, an answer that is
+exactly a stop word disappears from the cloud.
+
+<<test functions>>=
+
+def test_word_cloud_frequencies_empty_separators_keep_answers_whole():
+    question = WordCloudQuestion("Topic?", separators="")
+    answers = [
+        {"value": "en följd av steg"},
+        {"value": "och"},  # a stop word on its own
+    ]
+
+    assert question.frequencies(answers) == [("en följd av steg", 1)]
 @
 
 A line break inside a whole answer must neither split the token nor
@@ -1967,13 +2138,19 @@ because JSON only knows lists --- a list would break the frozen
 dataclass's hashability the next time the question takes part in a set
 or dictionary key.  Every presentation field also falls back to its
 class-level default if a hand-edited or older store file omits it.
+The separator set is the one field where [[None]] and the empty string
+mean different things (the default set versus no splitting), so its
+coercion must pass [[None]] through untouched instead of stringifying
+it.
 
 <<wordcloud question methods>>=
 @classmethod
 def _from_dict(cls, data: Mapping[str, Any]) -> "WordCloudQuestion":
+    separators = data.get("separators")
     return cls(
         max_chars=int(data.get("max_chars", 280)),
         split_words=bool(data.get("split_words", True)),
+        separators=None if separators is None else str(separators),
         min_word_length=int(data.get("min_word_length", 3)),
         extra_stop_words=tuple(data.get("extra_stop_words", ())),
         use_default_stopwords=bool(
@@ -2163,6 +2340,7 @@ def test_word_cloud_round_trip_preserves_extra_stop_words_as_tuple():
         "text": "What did you learn?",
         "max_chars": 140,
         "split_words": True,
+        "separators": ",;\n",
         "min_word_length": 4,
         "extra_stop_words": ["foo", "bar"],
         "use_default_stopwords": False,
@@ -2173,11 +2351,13 @@ def test_word_cloud_round_trip_preserves_extra_stop_words_as_tuple():
 
     assert isinstance(question, WordCloudQuestion)
     assert question.extra_stop_words == ("foo", "bar")
+    assert question.separators == ",;\n"
     assert question.to_dict() == {
         "kind": "wordcloud",
         "text": "What did you learn?",
         "max_chars": 140,
         "split_words": True,
+        "separators": ",;\n",
         "min_word_length": 4,
         "extra_stop_words": ["foo", "bar"],
         "use_default_stopwords": False,
@@ -2186,6 +2366,17 @@ def test_word_cloud_round_trip_preserves_extra_stop_words_as_tuple():
         "results": None,
         "lock": True,
     }
+@
+
+An empty separator string is a real setting, not an absence, so the
+rebuild must keep it distinct from a missing key.
+
+<<test functions>>=
+def test_word_cloud_round_trip_keeps_empty_separators():
+    base = {"kind": "wordcloud", "text": "Words?"}
+
+    assert question_from_dict({**base, "separators": ""}).separators == ""
+    assert question_from_dict(base).separators is None
 @
 
 The pin round trips guard the offline-rebuild property directly: the
