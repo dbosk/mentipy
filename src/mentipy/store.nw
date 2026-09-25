@@ -5,6 +5,8 @@ a persistent polling system.  It has three jobs:
 \begin{description}
 \item[Configuration] locate the shared configuration file in a way that works
   both from the CLI and from PythonTeX,
+\item[Placement] resolve the files a slide deck names relative to the
+  deck's own directory, even when the deck is bound into a larger document,
 \item[Registration] assign stable URL prefixes to questions, and
 \item[Persistence] append answers with an atomic rewrite so a half-written file
   never replaces a valid one.
@@ -29,6 +31,7 @@ from pathlib import Path
 import statistics
 import threading
 from typing import Any, Iterator
+from contextlib import contextmanager
 
 import typerconf
 
@@ -242,6 +245,196 @@ def parse_config_value(raw: str) -> Any:
         return raw
 @
 
+\section{Base directory}
+\label{sec:base-directory}
+
+A slide deck names its files relative to its own directory:
+[[Store("mentipy.json")]], [[qr_dir="mentipy-obj"]], the image of a
+pin question.  That works as long as PythonTeX runs in the deck's
+directory.  It stops working when several decks are bound into one book
+with the [[import]] package: every chapter shares one PythonTeX session,
+which starts in the book's directory, so the deck's relative paths would
+land next to the book instead of next to the deck.  The book could
+[[os.chdir]] the whole session into each chapter, but that moves the
+ground under every other package sharing the session.
+
+We instead give Mentipy a \emph{base directory}: when set, every file
+Mentipy reads or writes on the author's behalf is resolved against it.
+The paths Mentipy \emph{emits into LaTeX} do not change.  Those stay
+exactly as the author wrote them, because the [[import]] package already
+adds the deck's directory to [[\input@path]] and [[\Ginput@path]], so
+[[\input{mentipy-obj/Q-ab12.pdf_tex}]] finds the file in the deck either
+way.  Resolving only the file-system side is what lets one deck compile
+both standalone and inside the book without edits.
+
+The companion package [[mentipy.sty]] (\cref{chap:sty}) sets the base
+directory from LaTeX, including an [[auto]] mode that follows
+[[\import@path]].  The functions here are the Python half and work on
+their own too.
+
+\subsection{Anchoring a relative base directory}
+
+A relative base directory needs an anchor.  The current working directory
+is the wrong one: the reason we need a base directory at all is that
+something may have changed the working directory behind our back.  We
+anchor at the working directory in force when this module is first
+imported, which for a PythonTeX document is the directory the session
+started in.  The didactic package anchors its [[\runbasedir]] the same
+way, so a book can hand both packages the same relative path and they
+agree on where it points.  The companion LaTeX package imports Mentipy
+while the preamble loads, which pins the anchor before any chapter
+runs; a document using only the Python side should import Mentipy early
+for the same reason.  An absolute base directory ignores the anchor.
+
+<<constants>>=
+_ANCHOR_DIR = Path.cwd()
+@
+
+\subsection{Setting the base directory}
+
+The base directory is module state rather than a parameter, because the
+deck and the book are written by different hands: the deck's own
+PythonTeX code builds its store and its helper arguments, while only the
+book knows that the deck has been moved.  A module-level setting lets
+the book change where the deck's files go without touching the deck.
+
+We keep [[None]] as \enquote{no base directory}, which leaves relative
+paths relative, exactly as Mentipy behaved before this setting existed.
+The empty string means the same thing, because that is what the LaTeX
+side produces for [[auto]] outside any [[\subimport]], and what the
+didactic package's [[\runbasedir{}]] means.  We deliberately do not
+call [[Path.resolve()]] on the stored value: joining the anchor and the
+relative path is enough to make it absolute, and leaving symbolic links
+unresolved keeps the path the author wrote recognisable in error
+messages.
+
+<<constants>>=
+_base_dir: Path | None = None
+<<functions>>=
+def set_base_dir(path: str | Path | None) -> None:
+    """Resolve Mentipy's files against `path` from now on.
+
+    A relative `path` is anchored at the directory the session started
+    in (the working directory when Mentipy was first imported), not at
+    the current working directory.  `None` or `""` switches the base
+    directory off, so relative paths resolve against the current
+    working directory as usual.  Paths emitted into LaTeX are never
+    affected.
+    """
+
+    global _base_dir
+    if path is None or str(path) == "":
+        _base_dir = None
+    else:
+        _base_dir = _ANCHOR_DIR / Path(path)
+
+
+def get_base_dir() -> Path | None:
+    """Return the absolute base directory, or `None` when it is off."""
+
+    return _base_dir
+@
+
+Scripts and tests want the setting for one block of code and the old
+value back afterwards, even when the block raises.  A context manager
+states that directly.
+
+<<functions>>=
+@contextmanager
+def base_dir(path: str | Path | None) -> Iterator[Path | None]:
+    """Set the base directory for the duration of a `with` block."""
+
+    global _base_dir
+    previous = _base_dir
+    set_base_dir(path)
+    try:
+        yield _base_dir
+    finally:
+        _base_dir = previous
+@
+
+\subsection{Resolving a path}
+
+Every call site that touches the file system passes its path through
+[[resolve_path]].  Absolute paths pass through unchanged, so an author
+who spells out a full path always gets that path.  With the base
+directory off, relative paths also pass through unchanged, which keeps
+the historical behaviour byte for byte: they resolve against whatever
+the working directory is at the moment of the actual file operation.
+
+<<functions>>=
+def resolve_path(path: str | Path) -> Path:
+    """Return `path` resolved against the base directory, if one is set."""
+
+    candidate = Path(path)
+    if _base_dir is None or candidate.is_absolute():
+        return candidate
+    return _base_dir / candidate
+@
+
+The tests pin the anchor to a temporary directory and restore the module
+state afterwards, so no test leaks a base directory into the next one.
+
+<<test functions>>=
+@pytest.fixture
+def anchor(tmp_path, monkeypatch):
+    import mentipy.store as store_module
+
+    book = tmp_path / "book"
+    book.mkdir()
+    monkeypatch.setattr(store_module, "_ANCHOR_DIR", book)
+    monkeypatch.setattr(store_module, "_base_dir", None)
+    return book
+@
+
+A relative base directory must follow the anchor, not the current
+working directory: that is the whole point of having one.
+
+<<test functions>>=
+def test_relative_base_dir_is_anchored_at_session_start(
+    anchor, tmp_path, monkeypatch
+):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    set_base_dir("../deck")
+
+    assert get_base_dir() == anchor / "../deck"
+    assert resolve_path("mentipy.json") == anchor / "../deck/mentipy.json"
+@
+
+Switching the base directory off must restore the old behaviour exactly,
+including leaving relative paths relative, and absolute paths must win
+over any base directory.
+
+<<test functions>>=
+def test_base_dir_off_and_absolute_paths_pass_through(anchor, tmp_path):
+    for off in (None, ""):
+        set_base_dir(off)
+        assert get_base_dir() is None
+        assert resolve_path("mentipy.json") == Path("mentipy.json")
+
+    set_base_dir(tmp_path / "deck")
+    assert get_base_dir() == tmp_path / "deck"
+    assert resolve_path(tmp_path / "x.json") == tmp_path / "x.json"
+@
+
+The context manager must restore the previous setting even when its
+block raises.
+
+<<test functions>>=
+def test_base_dir_context_restores_the_previous_setting(anchor):
+    set_base_dir("outer")
+
+    with pytest.raises(RuntimeError):
+        with base_dir("inner") as inner:
+            assert inner == anchor / "inner"
+            raise RuntimeError
+
+    assert get_base_dir() == anchor / "outer"
+@
+
 \section{Store file primitives}
 
 The empty-store template is copied on demand rather than reused directly, so a
@@ -361,11 +554,36 @@ class Store:
                 get_setting(MIN_PREFIX_CONFIG, DEFAULT_MIN_PREFIX)
             )
 
-        self.path = Path(chosen_path)
+        self.path = resolve_path(chosen_path)
         self.min_prefix = int(chosen_prefix)
         self._lock = _store_lock(self.path)
 
     <<store methods>>
+@
+
+The store path goes through [[resolve_path]] once, at construction.
+A deck builds its [[Store]] in its own PythonTeX code while the book
+has the deck's base directory in force, and the object must keep
+pointing at the deck's store after the book moves on to the next
+chapter.  The image directory derives from [[self.path]], so it follows
+without further work.
+
+<<test functions>>=
+def test_store_resolves_its_path_against_the_base_dir(
+    anchor, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(anchor)
+    set_base_dir("../deck")
+
+    store = Store("mentipy.json", min_prefix=4)
+    store.register(OpenQuestion("Comment?"))
+    store.save_image(b"png bytes")
+    set_base_dir(None)
+
+    assert store.path == anchor / "../deck/mentipy.json"
+    assert (tmp_path / "deck" / "mentipy.json").exists()
+    assert (tmp_path / "deck" / "mentipy-images").is_dir()
+    assert not (anchor / "mentipy.json").exists()
 @
 
 Reading the store on every operation is the simplest way to make the server see

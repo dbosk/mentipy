@@ -143,7 +143,7 @@ def _write_pdf_tex_sidecar(
         "\\begingroup%\n"
         "\\begin{minipage}{\\linewidth}%\n"
         "\\centering%\n"
-        f"\\includegraphics[width=\\linewidth]{{{include_target.as_posix()}}}%\n"
+        f"{SIDECAR_INCLUDE_PREFIX}{include_target.as_posix()}}}%\n"
         "\\par\\smallskip\n"
         f"{QR_CAPTION_DEFAULT}%\n"
         f"\\mentipyqrcaption{{{_escape_url_for_tex(url)}}}%\n"
@@ -155,6 +155,7 @@ def _write_pdf_tex_sidecar(
 
 <<constants>>=
 QR_TEX_SUFFIX = ".pdf_tex"
+SIDECAR_INCLUDE_PREFIX = "\\includegraphics[width=\\linewidth]{"
 QR_CAPTION_DEFAULT = (
     "\\providecommand{\\mentipyqrcaption}[1]{{\\footnotesize\\ttfamily #1}}"
 )
@@ -188,6 +189,39 @@ _TEX_ESCAPES = {
     "~": r"\textasciitilde{}",
     "^": r"\textasciicircum{}",
 }
+@
+
+\subsection{Reading the include path back}
+
+The include path inside the sidecar is the one piece of the sidecar that
+only the original render knows: it is the path as the document author
+wrote it, relative to wherever that document compiles.  When
+[[mentipy serve]] later rewrites the sidecar for a new URL, it knows
+only the absolute path of the QR file, and any attempt to recompute the
+author's relative path from its own working directory guesses wrong as
+soon as the server runs somewhere else --- say, from the directory of a
+book that binds the deck, or from the home directory.  The sidecar on
+disk already records the right answer, so the rewrite reads it back
+instead of recomputing it.  Parsing our own output is safe here because
+the same [[SIDECAR_INCLUDE_PREFIX]] constant writes and reads the line.
+
+<<functions>>=
+def sidecar_include_path(qr_path: str | Path) -> Path | None:
+    """Return the graphics path recorded in the sidecar next to `qr_path`.
+
+    Returns `None` when the sidecar is missing or was not written by
+    Mentipy, so callers can fall back to computing a path themselves.
+    """
+
+    sidecar = Path(qr_path).with_suffix(QR_TEX_SUFFIX)
+    try:
+        lines = sidecar.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return None
+    for line in lines:
+        if line.startswith(SIDECAR_INCLUDE_PREFIX) and line.endswith("}%"):
+            return Path(line[len(SIDECAR_INCLUDE_PREFIX):-2])
+    return None
 @
 
 \section{QR artifact contracts}
@@ -305,6 +339,22 @@ def test_make_qr_sidecar_can_keep_a_relative_include_path(tmp_path):
         f"\\includegraphics[width=\\linewidth]{{{qr_subpath}/Q-abcd.pdf}}"
         in contents
     )
+@
+
+The recorded include path must survive a round trip through the
+sidecar, and a missing sidecar must say so rather than invent a path.
+
+<<test functions>>=
+def test_sidecar_include_path_reads_back_what_make_qr_wrote(tmp_path):
+    include = Path(DEFAULT_QR_DIR) / "Q-abcd.pdf"
+    output = make_qr(
+        "http://localhost:8080/abcd",
+        tmp_path / "Q-abcd.pdf",
+        include_path=include,
+    )
+
+    assert sidecar_include_path(output) == include
+    assert sidecar_include_path(tmp_path / "Q-none.pdf") is None
 @
 
 <<test [[qr.py]]>>=
