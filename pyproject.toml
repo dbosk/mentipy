@@ -32,6 +32,7 @@ packages = [{include = "mentipy", from = "src"}]
 include = [
   { path = "src/**/*.py", format = "wheel" },
   { path = "src/mentipy/tutorials/*.md", format = "wheel" },
+  { path = "src/mentipy/*.sty", format = "wheel" },
 ]
 exclude = [
   "src/mentipy/.gitignore",

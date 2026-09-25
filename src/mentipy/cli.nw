@@ -29,8 +29,10 @@ import ipaddress
 import io
 import json
 from pathlib import Path
+from importlib import resources
 import secrets
 import shutil
+import subprocess
 import sys
 import textwrap
 import time
@@ -466,7 +468,8 @@ def _latex_reference() -> str:
         Public helpers
           from `mentipy.latex` import (mc, open_text, pin_image,
                                        pin_text, question, ranking,
-                                       scale, word_cloud)
+                                       scale, word_cloud,
+                                       write_snippet)
 
           mc(text, options, *, multi=False, next=True, results=None,
              lock=True, store=None, base_url=None, qr_dir=None,
@@ -500,6 +503,10 @@ def _latex_reference() -> str:
              show_url=None, layout="slide")
           question(question_obj, *, ...) renders a prebuilt Question
              object and is the lower-level helper behind them.
+          write_snippet(name, latex, *, directory=None) writes a
+             helper's LaTeX to <qr_dir>/<name>.tex, so a Beamer frame
+             can \\mentipyinput{{name}} it instead of running
+             PythonTeX inside the frame.
 
         Per-question keyword arguments
           next: render a 'Next →' link on the post-submit and results
@@ -541,6 +548,17 @@ def _latex_reference() -> str:
           3. Run `mentipy serve` to publish the poll, or `mentipy url`
              PREFIX to inspect one canonical respondent URL.
           4. Recompile after URL changes so the PDF embeds refreshed QR codes.
+
+        Decks bound into a book
+          set_base_dir(path) (from `mentipy`) resolves the files Mentipy
+            reads and writes against path: the store, QR codes, pin
+            images and snippets.  A relative path is anchored where the
+            PythonTeX session started; None switches it off.  Paths
+            emitted into LaTeX stay as written.
+          \\usepackage{{mentipy}} with \\mentipybasedir{{auto}} sets it
+            from LaTeX, following the import package's \\subimport.
+            `mentipy sty` prints the package; `mentipy sty --install`
+            installs it into TEXMFHOME.
 
         Config keys
         """
@@ -2978,6 +2996,92 @@ def latex():
     typer.echo(_latex_reference())
 @
 
+The companion LaTeX package (\cref{chap:sty}) ships inside the Python
+package, where TeX cannot find it.  The [[sty]] command bridges the
+gap in the two ways authors need.  By default it prints the package, so
+a course repository can vendor it next to its documents
+([[mentipy sty > mentipy.sty]]) and pin the version it built with.
+With [[--install]] it copies the package into the user's personal TeX
+tree, whose location [[kpsewhich]] reports, so that every document on
+the machine finds it.  That tree is searched without a filename
+database, so no [[mktexlsr]] run is needed afterwards.
+
+<<cli setup>>=
+@cli.command()
+def sty(install: bool = STY_INSTALL_OPTION):
+    """Print the companion LaTeX package, or install it for TeX."""
+
+    text = _sty_text()
+    if not install:
+        typer.echo(text, nl=False)
+        return
+    target = _texmf_home() / "tex" / "latex" / "mentipy" / "mentipy.sty"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    typer.echo(str(target))
+<<constants>>=
+STY_INSTALL_OPTION = typer.Option(
+    False,
+    "--install",
+    help="Install mentipy.sty into TEXMFHOME instead of printing it.",
+)
+<<functions>>=
+def _sty_text() -> str:
+    return (
+        resources.files("mentipy")
+        .joinpath("mentipy.sty")
+        .read_text(encoding="utf-8")
+    )
+
+
+def _texmf_home() -> Path:
+    try:
+        completed = subprocess.run(
+            ["kpsewhich", "-var-value", "TEXMFHOME"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as error:
+        raise typer.BadParameter(
+            "cannot locate TEXMFHOME with kpsewhich; run `mentipy sty`"
+            " and save the output next to your document instead"
+        ) from error
+    return Path(completed.stdout.strip())
+@
+
+Printing must reproduce the package byte for byte, and installing must
+land it where [[kpsewhich]] says the personal tree is.
+
+<<test functions>>=
+def test_sty_prints_the_companion_package():
+    result = CliRunner().invoke(cli, ["sty"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith("\\NeedsTeXFormat{LaTeX2e}")
+    assert "\\ProvidesPackage{mentipy}" in result.output
+    assert "\\newcommand{\\mentipybasedir}" in result.output
+
+
+def test_sty_install_copies_the_package_into_texmfhome(
+    tmp_path, monkeypatch
+):
+    def fake_run(command, **kwargs):
+        assert command == ["kpsewhich", "-var-value", "TEXMFHOME"]
+        return mentipy.cli.subprocess.CompletedProcess(
+            command, 0, f"{tmp_path}\n", ""
+        )
+
+    monkeypatch.setattr("mentipy.cli.subprocess.run", fake_run)
+
+    result = CliRunner().invoke(cli, ["sty", "--install"])
+
+    target = tmp_path / "tex" / "latex" / "mentipy" / "mentipy.sty"
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == str(target)
+    assert target.read_text().startswith("\\NeedsTeXFormat")
+@
+
 
 \section{Listing, watching, and exporting}
 
@@ -3647,7 +3751,14 @@ def test_latex_command_prints_the_reference_and_all_config_keys():
     assert result.exit_code == 0
     assert "from `mentipy.latex` import (mc, open_text, pin_image," in result.output
     assert "pin_text, question, ranking," in result.output
-    assert "word_cloud)" in result.output
+    assert "write_snippet)" in result.output
+    assert "write_snippet(name, latex, *, directory=None)" in result.output
+    assert "\\mentipyinput{name}" in result.output
+    assert "Decks bound into a book" in result.output
+    assert "set_base_dir(path)" in result.output
+    assert "\\usepackage{mentipy} with \\mentipybasedir{auto}" in (
+        result.output
+    )
     assert "ranking(text, options, *, top_n=None, next=True," in result.output
     assert "pin_image(text, image_path, *, max_pins=1," in result.output
     assert "pin_text(text, content, *, language=None, max_pins=1," in result.output

@@ -1,0 +1,321 @@
+\chapter{The Companion LaTeX Package}
+\label{chap:sty}
+
+Everything so far lives on the Python side: an author calls a helper from
+PythonTeX and prints the LaTeX it returns.  Two jobs cannot be done from
+there, because they need information that only TeX has.
+\begin{description}
+\item[Following the [[import]] package] A deck bound into a book with
+  [[\subimport{../modules/deck/}{contents.tex}]] should write its files
+  into the deck's directory (\cref{sec:base-directory}).  Only TeX knows
+  which directory is being imported at a given point: the [[import]]
+  package keeps it in [[\import@path]], which Python never sees.
+\item[Reading generated snippets] A Beamer frame that shows a question
+  should [[\input]] a file written by [[write_snippet]] rather than run
+  PythonTeX inside the frame, and it must survive the first compile,
+  before that file exists.
+\end{description}
+The package [[mentipy.sty]] covers both.  It is deliberately thin: it
+decides \emph{when} and \emph{with what value} to call the Python side,
+and all path logic stays in [[resolve_path]], so the two sides cannot
+disagree about where a file goes.
+
+A document loads it after PythonTeX, and a book that binds decks turns on
+the automatic base directory once in its preamble:
+
+\begin{minted}{latex}
+\usepackage{import}
+\usepackage{pythontex}
+\usepackage{mentipy}
+\mentipybasedir{auto}
+\end{minted}
+
+The package is tangled from this file into the Python package, and
+[[mentipy sty]] prints it or installs it into the user's TeX tree, since
+TeX cannot find a file inside a Python wheel.
+
+<<[[mentipy.sty]]>>=
+\NeedsTeXFormat{LaTeX2e}[2020/10/01]
+\ProvidesPackage{mentipy}[2026/09/25 Companion package for Mentipy]
+<<package dependencies>>
+<<base directory>>
+<<question snippets>>
+\endinput
+@
+
+\section{Loading the Python side}
+
+The package talks to Python through PythonTeX, the same way the didactic
+package does: TeX macros emit [[\pyc{...}]] code that runs, in document
+order, in PythonTeX's default session.  We therefore require PythonTeX
+without options; a document that needs options loads PythonTeX itself
+first, and the [[\RequirePackage]] is then a no-op.
+
+Importing Mentipy right away is not just a convenience.  A relative base
+directory is anchored at the working directory in force when Mentipy is
+first imported (\cref{sec:base-directory}), and code emitted while the
+preamble loads runs before any chapter's code.  The anchor is therefore
+the directory the session started in, which is also where the didactic
+package anchors its [[\runbasedir]], so the two packages agree on what a
+relative path means.
+
+<<package dependencies>>=
+\RequirePackage{pythontex}
+\pyc{import mentipy}
+@
+
+\section{The base directory}
+
+The user-facing macro takes a path, the word [[auto]], or nothing.
+\begin{description}
+\item[A path] resolves Mentipy's files against that directory; a relative
+  one is anchored at the session start.
+\item[ [[auto]] ] follows the [[import]] package: inside
+  [[\subimport{../deck/}{...}]] it means [[../deck/]], and outside any
+  import it means no base directory at all.  A deck therefore compiles
+  unchanged standalone and inside the book.
+\item[Empty] switches the base directory off.
+\end{description}
+
+The setting is local, like any TeX definition: set inside a group or an
+environment, it ends with that group.  This matches the didactic
+package's [[\runbasedir]], so a chapter macro can set both in the same
+place and let the chapter's group undo both.
+
+<<base directory>>=
+\newcommand{\mentipybasedir}[1]{%
+  \def\mentipy@basedir{#1}%
+  \mentipy@sync
+}
+\def\mentipy@basedir{}
+\def\mentipy@auto{auto}
+@
+
+\subsection{When Python learns the value}
+
+Python cannot follow TeX's groups: a Python variable set from inside a
+group stays set after the group ends.  So we cannot simply forward each
+[[\mentipybasedir]] to Python and be done.  Instead the package
+\emph{synchronises} Python with the value TeX has in force at every
+point where Python code is about to run: at the start of every PythonTeX
+code environment and inline code command, and at [[\mentipybasedir]]
+itself.  The rule an author can rely on is therefore: \emph{a Mentipy
+call sees the base directory in force where its PythonTeX code begins.}
+
+A synchronisation emits code only when the value actually changes.  This
+is what keeps the package harmless in Beamer, which reads a frame's body
+once per overlay: re-reading the frame repeats the synchronisation but
+finds nothing to send, so the extra reads add no PythonTeX commands and
+do not shift PythonTeX's numbering.  The last value sent is kept
+globally, because it describes Python's state, which groups do not
+restore.
+
+<<base directory>>=
+\gdef\mentipy@synced{}
+\newif\ifmentipy@syncing
+\newcommand{\mentipy@sync}{%
+  \ifmentipy@syncing\else
+    <<compute the effective base directory>>
+    \ifx\mentipy@value\mentipy@synced\else
+      \global\let\mentipy@synced\mentipy@value
+      <<send the value to Python>>
+    \fi
+  \fi
+}
+@
+
+The effective value expands [[auto]] to the current [[\import@path]].
+We expand it now, with [[\edef]], because the import path changes as
+soon as the import ends; outside any import, or when the [[import]]
+package is not loaded at all, [[auto]] means no base directory.
+
+<<compute the effective base directory>>=
+\ifx\mentipy@basedir\mentipy@auto
+  \ifdefined\import@path
+    \edef\mentipy@value{\import@path}%
+  \else
+    \def\mentipy@value{}%
+  \fi
+\else
+  \let\mentipy@value\mentipy@basedir
+\fi
+@
+
+Sending the value is itself a [[\pyc]], so it triggers the hook on
+[[\pyc]] below; the [[\ifmentipy@syncing]] guard stops that recursion.
+The path travels as a raw Python string, so backslashes need no
+escaping, and the empty string is what [[set_base_dir]] reads as
+\enquote{off}.
+
+<<send the value to Python>>=
+\mentipy@syncingtrue
+\expandafter\mentipy@send\expandafter{\mentipy@value}%
+\mentipy@syncingfalse
+@
+
+<<base directory>>=
+\newcommand{\mentipy@send}[1]{%
+  \pyc{mentipy.set_base_dir(r'''#1''')}%
+}
+@
+
+\subsection{The synchronisation points}
+
+PythonTeX defines its code environments with [[\newenvironment]], so
+LaTeX's generic environment hooks run before each of them.  The inline
+commands take generic command hooks.  We hook the Python family's
+commands that execute code and leave out the verbatim ones, which only
+typeset.  All code goes to PythonTeX's default session, so a deck that
+runs Mentipy in a named session gets no synchronisation; the base
+directory then has to be set in that session with [[set_base_dir]].
+
+<<base directory>>=
+\AddToHook{env/pycode/before}{\mentipy@sync}
+\AddToHook{env/pyblock/before}{\mentipy@sync}
+\AddToHook{env/pysub/before}{\mentipy@sync}
+\AddToHook{env/pyconsole/before}{\mentipy@sync}
+\AddToHook{cmd/py/before}{\mentipy@sync}
+\AddToHook{cmd/pyc/before}{\mentipy@sync}
+\AddToHook{cmd/pys/before}{\mentipy@sync}
+\AddToHook{cmd/pyb/before}{\mentipy@sync}
+@
+
+The [[auto]] mode relies on one assumption: that PythonTeX's working
+directory is the document's directory, so that a path relative to the
+document, like [[\import@path]], is also relative to the session start.
+That is PythonTeX's default.  A document that moves the working
+directory with [[\setpythontexworkingdir]] should give
+[[\mentipybasedir]] explicit paths instead.
+
+\section{Question snippets}
+
+The frame-side half of [[write_snippet]] reads the snippet if it exists.
+On the very first compile it does not, because PythonTeX runs after
+LaTeX, so a missing snippet is a warning rather than an error: the next
+compile after PythonTeX has run picks it up.  The lookup goes through
+[[\IfFileExists]] and [[\input]], which both search [[\input@path]], so
+inside a [[\subimport]] the snippet is found in the deck's directory
+just like the QR sidecars it inputs in turn.
+
+<<question snippets>>=
+\newcommand{\mentipyinput}[1]{%
+  \IfFileExists{\mentipy@snippetdir/#1.tex}%
+    {\input{\mentipy@snippetdir/#1.tex}}%
+    {\PackageWarning{mentipy}{Snippet `#1' not written yet;
+      rerun LaTeX after PythonTeX}}%
+}
+@
+
+[[write_snippet]] writes into the configured QR directory unless told
+otherwise, and TeX cannot read Mentipy's configuration file.  The default
+here is therefore the built-in default, [[mentipy-obj]]; a document
+whose configuration or [[directory]] argument says otherwise states the
+same directory with [[\mentipysnippetdir]].
+
+<<question snippets>>=
+\newcommand{\mentipysnippetdir}[1]{\def\mentipy@snippetdir{#1}}
+\mentipysnippetdir{mentipy-obj}
+@
+
+\section{Testing the package}
+
+The macros only mean something once LaTeX, PythonTeX and the Python
+side run together, so the test compiles a real book that binds a deck.
+It needs [[pdflatex]] and [[pythontex]] and is skipped where they are
+missing, which keeps the unit suite runnable without a TeX installation.
+
+<<test [[sty.py]]>>=
+import shutil
+import subprocess
+import sys
+from importlib import resources
+
+import pytest
+
+<<test functions>>
+@
+
+<<test functions>>=
+needs_tex = pytest.mark.skipif(
+    not (shutil.which("pdflatex") and shutil.which("pythontex")),
+    reason="needs pdflatex and pythontex",
+)
+
+
+def compile_with_pythontex(directory, name):
+    def run(*command):
+        return subprocess.run(
+            command, cwd=directory, capture_output=True, text=True
+        )
+
+    latex = ("pdflatex", "-interaction=nonstopmode", "-halt-on-error", name)
+    run(*latex)
+    python = run(
+        "pythontex", "--interpreter", f"python:{sys.executable}", name
+    )
+    return python, run(*latex)
+@
+
+The fixture is the situation from the base-directory section: the book
+[[\subimport]]s a deck, the deck builds its store and writes a snippet
+with paths relative to itself, and the frame-side [[\mentipyinput]]
+reads the snippet back, which in turn inputs the QR sidecar from the
+deck.  After the import, the book records which base
+directory Python sees, to check that leaving the import switched it off
+again.
+
+<<test functions>>=
+BOOK = r"""\documentclass{article}
+\usepackage{graphicx}
+\usepackage{import}
+\usepackage{mentipy}
+\mentipybasedir{auto}
+\begin{document}
+\subimport{../deck/}{contents.tex}
+\begin{pycode}
+from mentipy.store import get_base_dir
+open("after-import.txt", "w").write(repr(get_base_dir()))
+\end{pycode}
+\end{document}
+"""
+
+DECK = r"""\begin{pycode}
+from mentipy.latex import mc, write_snippet
+from mentipy.store import Store
+write_snippet("q1", mc(
+    "Ready?", ["Yes", "No"],
+    store=Store("mentipy.json"),
+    base_url="http://example.test:8080",
+    qr_dir="mentipy-obj",
+    layout="article+qr",
+))
+\end{pycode}
+\mentipyinput{q1}
+"""
+
+
+@needs_tex
+def test_auto_base_dir_keeps_a_bound_decks_files_in_the_deck(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    book, deck = tmp_path / "book", tmp_path / "deck"
+    book.mkdir()
+    deck.mkdir()
+    sty = resources.files("mentipy").joinpath("mentipy.sty")
+    (book / "mentipy.sty").write_text(sty.read_text())
+    (book / "book.tex").write_text(BOOK)
+    (deck / "contents.tex").write_text(DECK)
+
+    python, latex = compile_with_pythontex(book, "book.tex")
+
+    assert "- 0 error(s)" in python.stdout, python.stdout[-2000:]
+    assert latex.returncode == 0, latex.stdout[-2000:]
+    assert "Package mentipy Warning" not in latex.stdout
+    assert (deck / "mentipy.json").exists()
+    assert (deck / "mentipy-obj" / "q1.tex").exists()
+    assert list((deck / "mentipy-obj").glob("Q-*.pdf_tex"))
+    assert not (book / "mentipy.json").exists()
+    assert not (book / "mentipy-obj").exists()
+    assert (book / "after-import.txt").read_text() == "None"
+@
