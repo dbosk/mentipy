@@ -146,6 +146,8 @@ def latex_pydoc_excerpt():
             lines.append(line)
         if stripped.startswith("word_cloud("):
             lines.append(line)
+        if stripped.startswith("write_snippet("):
+            lines.append(line)
     return "\n".join(lines)
 
 
@@ -1076,7 +1078,8 @@ print(render_help_excerpt())
 \useprintpythontex[verbatim]{render-help}
 
 On the Python side, [[python -m pydoc mentipy.latex]] lists the render helpers
-exported from the LaTeX module:
+exported from the LaTeX module, together with [[write_snippet]], which
+\cref{sec:binding-decks} puts to use:
 
 \begin{minted}{text}
 python -m pydoc mentipy.latex
@@ -1450,6 +1453,102 @@ replaced by new compile-time placeholders.
   in the document.
 }
 
+\section{Binding Decks into a Book}
+\label{sec:binding-decks}
+
+A deck is usually compiled on its own, from its own directory: the
+slides, the lecture notes, and the Mentipy store all live side by side.
+The same deck can also become a chapter of a book that binds several
+decks with the [[import]] package.  Nothing about the deck's source
+should have to change between the two, yet one thing does change: where
+PythonTeX runs.  Standalone, the session starts in the deck's directory;
+in the book, one session serves every chapter and starts in the book's
+directory.  A deck that says [[Store("mentipy.json")]] would then write
+its store next to the book.
+
+Mentipy therefore resolves the files it reads and writes against a
+\emph{base directory}, while the paths it writes into the LaTeX stay as
+the author wrote them, which the [[import]] package already knows how to
+find in the deck.  With the companion package (\cref{chap:sty}), a book
+turns this on once, in its preamble:
+
+\begin{minted}{latex}
+\usepackage{import}
+\usepackage{pythontex}
+\usepackage{mentipy}
+\mentipybasedir{auto}
+
+\begin{document}
+\chapter{Sequences}
+\subimport{../modules/sequences/}{contents.tex}
+\end{document}
+\end{minted}
+
+With [[auto]], every PythonTeX block inside the [[\subimport]] sees the
+deck's directory as its base, and outside any import there is no base
+directory at all.  So the deck itself compiles unchanged on its own.  A
+deck written for both contexts looks like this:
+
+\begin{minted}{latex}
+\begin{pycode}
+from mentipy.latex import mc, write_snippet
+from mentipy.store import Store
+common = {"store": Store("mentipy.json"), "qr_dir": "mentipy-obj"}
+write_snippet("q-order", mc("Which line runs first?", ["1", "2"], **common))
+\end{pycode}
+
+\begin{frame}
+  \mentipyinput{q-order}
+\end{frame}
+\end{minted}
+
+The PythonTeX block sits outside the frame on purpose.  Beamer reads a
+frame's body once per overlay, which makes PythonTeX blocks inside
+frames unreliable; [[write_snippet]] hands the question's LaTeX over
+through a file instead, and [[\mentipyinput]] reads it back inside the
+frame.
+
+TeX cannot find a package inside a Python installation, so the package
+is installed from the command line.  [[mentipy sty --install]] copies it
+into the personal TeX tree; [[mentipy sty > mentipy.sty]] instead
+vendors it next to the document, for a repository that should build on
+machines without Mentipy's command installed:
+
+\begin{minted}{text}
+mentipy sty --install
+\end{minted}
+
+A document that does not load the package can set the base directory
+from Python directly.  A relative path is anchored where the PythonTeX
+session started, not at the current working directory, so it means the
+same thing no matter what else has happened in the session:
+
+\begin{minted}{latex}
+\pyc{import mentipy; mentipy.set_base_dir("../modules/sequences")}
+\subimport{../modules/sequences/}{contents.tex}
+\pyc{mentipy.set_base_dir(None)}
+\end{minted}
+
+Serving is unaffected: [[mentipy serve --store]] with the deck's store
+serves the deck's questions from any directory, and when it rewrites the
+QR codes for a new address it keeps the paths the render wrote into the
+QR sidecars, so both the book and the standalone deck still compile.
+
+\ltnote{%
+  \textbf{Variation pattern}: Contrast
+
+  \textbf{What varies}: Where the PythonTeX session starts --- in the
+  deck's directory when the deck compiles alone, in the book's directory
+  when the book binds it.
+
+  \textbf{What stays invariant}: The deck's source, its store, and its
+  QR files.
+
+  \textbf{What this reveals}: The base directory is what absorbs the
+  difference, so the reader should see the unchanged deck in both
+  contexts before learning the Python-level alternative.
+}
+
 \input{../src/mentipy/mentipy.tex}
 \input{../src/mentipy/questions.tex}
 \input{../src/mentipy/qr.tex}
@@ -1457,6 +1556,7 @@ replaced by new compile-time placeholders.
 \input{../src/mentipy/venv.tex}
 \input{../src/mentipy/network.tex}
 \input{../src/mentipy/latex.tex}
+\input{../src/mentipy/sty.tex}
 \input{../src/mentipy/server.tex}
 \input{../src/mentipy/public.tex}
 \input{../src/mentipy/cli.tex}

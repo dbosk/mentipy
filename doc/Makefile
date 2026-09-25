@@ -30,6 +30,7 @@ MODULE_TEX = \
 	../src/mentipy/venv.tex \
 	../src/mentipy/network.tex \
 	../src/mentipy/latex.tex \
+	../src/mentipy/sty.tex \
 	../src/mentipy/server.tex \
 	../src/mentipy/public.tex \
 	../src/mentipy/cli.tex \
