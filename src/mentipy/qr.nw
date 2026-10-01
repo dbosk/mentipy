@@ -113,9 +113,19 @@ chosen.  This avoids the [[\svgwidth]]/[[\svgscale]] dance Inkscape uses for
 its sidecars: we do not need a scale-override knob in this codebase, and
 adding one would just be one more thing for callers to forget to set.
 
-The caption is rendered with [[\footnotesize\ttfamily]] so that the URL shows
-up in monospace at a size that fits beneath a slide-sized QR without crowding
-the matrix.
+The caption is not typeset directly but handed to a macro,
+[[\mentipyqrcaption]], whose default is [[\footnotesize\ttfamily]]: monospace
+at a size that fits beneath a slide-sized QR without crowding the matrix.
+The default is declared with [[\providecommand]] inside the sidecar itself,
+so a document that says nothing gets the default, while a document that
+defines [[\mentipyqrcaption]] before its first [[\input]] wins.  The hook has
+to live in the sidecar rather than in the document because the caption text
+is the one thing [[regenerate_qrs]] rewrites: a document that wants a
+smaller or breakable URL (a narrow Beamer column, say) must be able to
+change the \emph{formatting} without copying the \emph{content} out of the
+sidecar, since any copy is frozen at compile time and stops following the
+server.  Repeating the [[\providecommand]] in every sidecar is harmless:
+after the first definition it is a no-op.
 
 <<functions>>=
 def _write_pdf_tex_sidecar(
@@ -133,9 +143,10 @@ def _write_pdf_tex_sidecar(
         "\\begingroup%\n"
         "\\begin{minipage}{\\linewidth}%\n"
         "\\centering%\n"
-        f"\\includegraphics[width=\\linewidth]{{{include_target.as_posix()}}}%\n"
+        f"{SIDECAR_INCLUDE_PREFIX}{include_target.as_posix()}}}%\n"
         "\\par\\smallskip\n"
-        f"{{\\footnotesize\\ttfamily {_escape_url_for_tex(url)}}}%\n"
+        f"{QR_CAPTION_DEFAULT}%\n"
+        f"\\mentipyqrcaption{{{_escape_url_for_tex(url)}}}%\n"
         "\\end{minipage}%\n"
         "\\endgroup%\n"
     )
@@ -144,6 +155,10 @@ def _write_pdf_tex_sidecar(
 
 <<constants>>=
 QR_TEX_SUFFIX = ".pdf_tex"
+SIDECAR_INCLUDE_PREFIX = "\\includegraphics[width=\\linewidth]{"
+QR_CAPTION_DEFAULT = (
+    "\\providecommand{\\mentipyqrcaption}[1]{{\\footnotesize\\ttfamily #1}}"
+)
 @
 
 \subsection{Escaping the URL}
@@ -174,6 +189,39 @@ _TEX_ESCAPES = {
     "~": r"\textasciitilde{}",
     "^": r"\textasciicircum{}",
 }
+@
+
+\subsection{Reading the include path back}
+
+The include path inside the sidecar is the one piece of the sidecar that
+only the original render knows: it is the path as the document author
+wrote it, relative to wherever that document compiles.  When
+[[mentipy serve]] later rewrites the sidecar for a new URL, it knows
+only the absolute path of the QR file, and any attempt to recompute the
+author's relative path from its own working directory guesses wrong as
+soon as the server runs somewhere else --- say, from the directory of a
+book that binds the deck, or from the home directory.  The sidecar on
+disk already records the right answer, so the rewrite reads it back
+instead of recomputing it.  Parsing our own output is safe here because
+the same [[SIDECAR_INCLUDE_PREFIX]] constant writes and reads the line.
+
+<<functions>>=
+def sidecar_include_path(qr_path: str | Path) -> Path | None:
+    """Return the graphics path recorded in the sidecar next to `qr_path`.
+
+    Returns `None` when the sidecar is missing or was not written by
+    Mentipy, so callers can fall back to computing a path themselves.
+    """
+
+    sidecar = Path(qr_path).with_suffix(QR_TEX_SUFFIX)
+    try:
+        lines = sidecar.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return None
+    for line in lines:
+        if line.startswith(SIDECAR_INCLUDE_PREFIX) and line.endswith("}%"):
+            return Path(line[len(SIDECAR_INCLUDE_PREFIX):-2])
+    return None
 @
 
 \section{QR artifact contracts}
@@ -219,6 +267,20 @@ def test_make_qr_writes_pdf_tex_sidecar_with_the_url(tmp_path):
     )
     assert expected_include in contents
     assert "http://localhost:8080/abcd" in contents
+@
+
+The caption goes through the [[\mentipyqrcaption]] hook, and the sidecar
+carries the hook's default so an unprepared document still compiles.  Pinning
+both halves keeps a refactor from inlining the caption again, which would
+silently take the formatting knob away from documents that rely on it.
+
+<<test functions>>=
+def test_make_qr_sidecar_routes_the_caption_through_a_hook(tmp_path):
+    output = make_qr("http://localhost:8080/abcd", tmp_path / "Q-abcd.pdf")
+
+    contents = output.with_suffix(".pdf_tex").read_text()
+    assert "\\mentipyqrcaption{http://localhost:8080/abcd}" in contents
+    assert "\\providecommand{\\mentipyqrcaption}[1]" in contents
 @
 
 PNG output is used both for the HTML results page and for the printed manual
@@ -277,6 +339,22 @@ def test_make_qr_sidecar_can_keep_a_relative_include_path(tmp_path):
         f"\\includegraphics[width=\\linewidth]{{{qr_subpath}/Q-abcd.pdf}}"
         in contents
     )
+@
+
+The recorded include path must survive a round trip through the
+sidecar, and a missing sidecar must say so rather than invent a path.
+
+<<test functions>>=
+def test_sidecar_include_path_reads_back_what_make_qr_wrote(tmp_path):
+    include = Path(DEFAULT_QR_DIR) / "Q-abcd.pdf"
+    output = make_qr(
+        "http://localhost:8080/abcd",
+        tmp_path / "Q-abcd.pdf",
+        include_path=include,
+    )
+
+    assert sidecar_include_path(output) == include
+    assert sidecar_include_path(tmp_path / "Q-none.pdf") is None
 @
 
 <<test [[qr.py]]>>=

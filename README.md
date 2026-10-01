@@ -92,6 +92,13 @@ Rendering options control the LaTeX wrapper without changing the poll identity.
 | `environment="exercise"` / `--env exercise` | Wrap the question in an existing LaTeX environment. |
 | `show_url=False` / `--no-url` | Suppress the printed respondent URL when the layout supports it. |
 
+The QR layouts print the respondent URL through the LaTeX macro
+`\mentipyqrcaption{URL}` (default `\footnotesize\ttfamily`). Redefine it in
+your preamble to change the caption's size or allow line breaks, for example
+`\newcommand{\mentipyqrcaption}[1]{{\tiny\url{#1}}}`. Do not replace the
+sidecar `\input` with your own text: that copy is frozen at compile time and
+stops following `mentipy serve`.
+
 The named LaTeX environment must already be defined by your document class or
 preamble. For example, a lecture note template can use `environment="exercise"`
 to reuse its existing exercise styling and counters.

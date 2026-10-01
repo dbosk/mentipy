@@ -27,7 +27,7 @@ from typing import Iterable
 import warnings
 
 from mentipy.network import resolve_base_url
-from mentipy.qr import make_qr
+from mentipy.qr import make_qr, sidecar_include_path
 from mentipy.questions import (
     MCQuestion,
     OpenQuestion,
@@ -53,6 +53,7 @@ from mentipy.store import (
     SHOW_URL_CONFIG,
     Store,
     get_setting,
+    resolve_path,
 )
 @
 
@@ -176,10 +177,15 @@ def _render_scale(question: ScaleQuestion) -> str:
 
 A word-cloud question's slide body needs to show respondents two things
 the open-question body does not: that the answer will be aggregated as
-a cloud, and (when split mode is on) the minimum word length that will
-make it into the visualisation.  Authors often print this on the slide
-so respondents understand why their two-letter answer never appears in
-the cloud.
+a cloud, and how their answer will be cut up before it is counted.
+Authors often print this on the slide so respondents understand why
+their two-letter answer never appears in the cloud, or why their comma
+list became three entries.  The mode in force comes from
+[[effective_separators]] so the sidecar cannot drift from what the
+tally does: the empty set is described as whole answers, a narrowed
+set is shown verbatim (its [[repr]], so a newline is visible as
+[[\n]]), and the default set says nothing beyond the minimum length
+that applies to every splitting mode.
 
 <<functions>>=
 def _render_word_cloud(question: WordCloudQuestion) -> str:
@@ -188,12 +194,17 @@ def _render_word_cloud(question: WordCloudQuestion) -> str:
         "\\item[Type] Word-cloud (free-text)",
         f"\\item[Limit] {question.max_chars} characters",
     ]
-    if question.split_words:
+    separators = question.effective_separators()
+    if separators == "":
+        lines.append("\\item[Mode] Whole answer counts as one entry")
+    else:
+        if separators is not None:
+            lines.append(
+                f"\\item[Split on] {_escape_latex(repr(separators))}"
+            )
         lines.append(
             f"\\item[Min word length] {question.min_word_length}"
         )
-    else:
-        lines.append("\\item[Mode] Whole answer counts as one entry")
     lines.append("\\end{description}")
     return "\n".join(lines)
 @
@@ -306,7 +317,11 @@ article layout prints the respondent URL directly in the returned LaTeX, so
 always carries the canonical URL caption that [[mentipy serve]] later
 regenerates together with the QR image.  This keeps the printed caption and the
 matrix in sync after public URL rewrites, but it also means [[show_url]] only
-affects layouts that do \emph{not} embed the QR sidecar.
+affects layouts that do \emph{not} embed the QR sidecar.  A document that
+needs the QR caption smaller or breakable does not post-process the
+[[\input]] into literal text (that copy would freeze at compile time); it
+defines [[\mentipyqrcaption]] before the first sidecar is read, as
+described in the QR module.
 
 <<functions>>=
 def _render_body(question: Question) -> str:
@@ -522,6 +537,15 @@ paths are only for the runtime file write.  The sidecar keeps the original
 document-facing include path so slide sources do not suddenly switch to
 absolute [[\includegraphics]] paths after [[mentipy serve]] refreshes the URL.
 
+That include path is read back from the sidecar the render wrote, with
+[[sidecar_include_path]] from the QR module.  Recomputing it from the
+absolute target is only a fallback, for a sidecar that has gone missing:
+the recomputation is relative to the server's working directory, which
+matches the document's only when the server happens to run where the
+document compiles.  A lecturer who starts [[mentipy serve]] from a book
+directory, or who points [[--store]] at a deck from elsewhere, would
+otherwise get sidecars that no longer compile.
+
 <<functions>>=
 def _latex_include_path(target: Path) -> Path:
     cwd = Path.cwd().resolve()
@@ -578,7 +602,10 @@ def regenerate_qrs(
                 url,
                 target,
                 fmt=fmt,
-                include_path=_latex_include_path(target),
+                include_path=(
+                    sidecar_include_path(target)
+                    or _latex_include_path(target)
+                ),
             )
             count += 1
 
@@ -592,6 +619,15 @@ effects: registration, QR writing, and QR-target remembrance.  Doing them in
 one place keeps the question wrappers honest: every question kind follows the
 same identity and artifact rules once it has been converted to a [[Question]]
 object.
+
+Each QR artifact has two paths.  [[qr_path]] is the path as the author
+wrote it, and it is the one that reaches LaTeX: the [[\input]] of the
+sidecar and, inside the sidecar, the [[\includegraphics]] of the image.
+The file write instead goes to [[resolve_path(qr_path)]], which differs
+only when a base directory is set (\cref{sec:base-directory}).  Keeping
+the LaTeX side relative is what lets a deck bound into a book with
+[[\subimport]] find its QR codes through the [[import]] package's search
+path, while the files themselves land in the deck's directory.
 
 <<functions>>=
 def question(
@@ -624,12 +660,14 @@ def question(
     full_hash = question_hash(prompt)
     prefix = active_store.register(prompt)
     url = _join_url(chosen_base, prefix)
-    qr_path = make_qr(
+    qr_path = chosen_dir / f"Q-{prefix}.{chosen_format}"
+    written = make_qr(
         url,
-        chosen_dir / f"Q-{prefix}.{chosen_format}",
+        resolve_path(qr_path),
         fmt=chosen_format,
+        include_path=qr_path,
     )
-    active_store.remember_qr_target(full_hash, qr_path)
+    active_store.remember_qr_target(full_hash, written)
     return _render_question(
         prompt,
         qr_path,
@@ -807,6 +845,7 @@ def word_cloud(
     *,
     max_chars: int = 280,
     split_words: bool = True,
+    separators: str | None = None,
     min_word_length: int = 3,
     extra_stop_words: Iterable[str] = (),
     use_default_stopwords: bool = True,
@@ -824,9 +863,9 @@ def word_cloud(
 ) -> str:
     """Return LaTeX for a word-cloud question.
 
-    Visualisation parameters (``split_words``, ``min_word_length``,
-    ``extra_stop_words``, ``use_default_stopwords``, ``render``) do not
-    enter the question's canonical hash, so editing them and
+    Visualisation parameters (``split_words``, ``separators``,
+    ``min_word_length``, ``extra_stop_words``, ``use_default_stopwords``,
+    ``render``) do not enter the question's canonical hash, so editing them and
     recompiling preserves any answers already collected.  The ``next``
     and ``results`` flags are presentation in the same sense---they only
     control whether the server renders a \"Next →\" link after
@@ -838,6 +877,7 @@ def word_cloud(
             text=text,
             max_chars=max_chars,
             split_words=split_words,
+            separators=separators,
             min_word_length=min_word_length,
             extra_stop_words=tuple(extra_stop_words),
             use_default_stopwords=use_default_stopwords,
@@ -915,7 +955,10 @@ when the caller passes [[None]].  We therefore resolve the store here,
 save the bytes, and hand the resolved instance down.  Reading the file
 happens at authoring time --- inside the PythonTeX run, where the slide's
 relative paths are meaningful --- so the stored question carries the
-digest and never needs the file again.
+digest and never needs the file again.  The read goes through
+[[resolve_path]] like every other file Mentipy touches, while the path
+stored for [[\includegraphics]] stays as written, for the same reason as
+the QR paths above.
 
 <<functions>>=
 def pin_image(
@@ -945,7 +988,7 @@ def pin_image(
     enter the canonical identity.
     """
 
-    data = Path(image_path).read_bytes()
+    data = resolve_path(image_path).read_bytes()
     prompt = PinImageQuestion.from_image_bytes(
         text,
         data,
@@ -1056,6 +1099,63 @@ def pin_text(
         show_url=show_url,
         layout=layout,
     )
+@
+
+\section{Question snippets for Beamer frames}
+
+The helpers return LaTeX, and the natural way to use it is
+[[\printpythontex]] right after the PythonTeX block, inside the frame.
+Beamer spoils that for slides with overlays: it reads a frame's body
+once per overlay, so a PythonTeX block inside the frame is seen several
+times, and PythonTeX's block numbering shifts between runs.  A question's
+output then lands on the wrong slide.  The robust pattern keeps the
+PythonTeX block outside the frame and hands the LaTeX over through a
+file, which the frame [[\input]]s as often as Beamer likes:
+
+\begin{minted}{latex}
+\begin{pycode}
+write_snippet("q-sequence", mc("Which runs first?", ["A", "B"]))
+\end{pycode}
+\begin{frame}
+  \mentipyinput{q-sequence}
+\end{frame}
+\end{minted}
+
+[[write_snippet]] is the writing half; the companion LaTeX package's
+[[\mentipyinput]] (\cref{chap:sty}) is the reading half, which also
+tolerates the first compile, before PythonTeX has written the file.  By
+default the snippet goes next to the QR codes, in the configured QR
+directory, because that directory already holds generated files the
+author does not edit.  The file is resolved against the base directory
+like any other, and the returned path is the LaTeX-facing one.
+
+We skip the write when the content is unchanged.  The file's timestamp
+then stays put, so build tools that watch dependencies do not see a
+change on every run.
+
+<<functions>>=
+def write_snippet(
+    name: str,
+    latex: str,
+    *,
+    directory: str | Path | None = None,
+) -> str:
+    """Write `latex` to `<directory>/<name>.tex` and return that path.
+
+    `directory` defaults to the configured QR directory.  The file is
+    written relative to the base directory, if one is set, while the
+    returned path is the one to use from LaTeX.  Use it to keep
+    PythonTeX blocks out of Beamer frames: write the question's LaTeX
+    here and `\\input` the file inside the frame.
+    """
+
+    chosen_dir = Path(directory or get_setting(QR_DIR_CONFIG, DEFAULT_QR_DIR))
+    snippet = chosen_dir / f"{name}.tex"
+    target = resolve_path(snippet)
+    if not target.exists() or target.read_text(encoding="utf-8") != latex:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(latex, encoding="utf-8")
+    return snippet.as_posix()
 @
 
 \section{Rendering contracts}
@@ -1322,6 +1422,34 @@ def test_word_cloud_passes_visualisation_options_into_the_question(
     assert question.min_word_length == 5
     assert question.extra_stop_words == ("foo",)
     assert question.use_default_stopwords is False
+@
+
+The separator set travels the same way, and it cannot share the test
+above because a narrowed set contradicts [[split_words=False]].  The
+sidecar must then name the set, with the newline visible rather than
+breaking the line.
+
+<<test functions>>=
+def test_word_cloud_passes_separators_into_the_question_and_sidecar(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    rendered = word_cloud(
+        "Words?",
+        separators=",;\n",
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir=DEFAULT_QR_DIR,
+    )
+
+    [entry] = store.all_questions()
+    question = store.question(entry["hash"])
+
+    assert question.separators == ",;\n"
+    assert "\\item[Split on] ',;\\textbackslash{}n'" in rendered
+    assert "\\item[Min word length] 3" in rendered
 @
 
 The ranking wrapper meets the same registration contract, and the slide
@@ -2103,6 +2231,127 @@ def test_regenerate_qrs_reuses_all_remembered_qr_targets(tmp_path, monkeypatch):
             Path("handout") / f"Q-{prefix}.png",
         ),
     ]
+@
+
+\subsection{Decks bound into a book}
+
+These tests set up the situation the base directory exists for: a book
+directory where the PythonTeX session starts, and a deck next to it
+whose files must stay in the deck.  The fixture pins the session
+anchor to the book and restores the module state afterwards.
+
+<<test functions>>=
+@pytest.fixture
+def book(tmp_path, monkeypatch):
+    import mentipy.store as store_module
+
+    book = tmp_path / "book"
+    book.mkdir()
+    monkeypatch.setattr(store_module, "_ANCHOR_DIR", book)
+    monkeypatch.setattr(store_module, "_base_dir", None)
+    monkeypatch.chdir(book)
+    return book
+@
+
+Under a base directory the QR files and the store land in the deck,
+nothing lands in the book, and the LaTeX still names the files
+relative to the deck, both in the returned [[\input]] and inside the
+sidecar.
+
+<<test functions>>=
+def test_question_writes_under_the_base_dir_but_emits_relative_paths(
+    book, tmp_path
+):
+    deck = tmp_path / "deck"
+    set_base_dir("../deck")
+
+    rendered = mc(
+        "How was the lecture?",
+        ["Great", "OK", "Boring"],
+        store=Store("mentipy.json", min_prefix=4),
+        base_url="http://example.test:8080",
+        qr_dir="mentipy-obj",
+    )
+
+    [entry] = Store(deck / "mentipy.json").all_questions()
+    prefix = entry["url_prefix"]
+    qr_file = deck / "mentipy-obj" / f"Q-{prefix}.pdf"
+    assert f"\\input{{mentipy-obj/Q-{prefix}.pdf_tex}}" in rendered
+    assert qr_file.exists()
+    assert sidecar_include_path(qr_file) == (
+        Path("mentipy-obj") / f"Q-{prefix}.pdf"
+    )
+    assert Store(deck / "mentipy.json").qr_targets(entry["hash"]) == [
+        qr_file.resolve()
+    ]
+    assert list(book.iterdir()) == []
+@
+
+The pin-image helper reads its image through the base directory and
+still hands LaTeX the path as written.
+
+<<test functions>>=
+def test_pin_image_reads_the_image_relative_to_the_base_dir(book, tmp_path):
+    deck = tmp_path / "deck"
+    deck.mkdir()
+    (deck / "pin.png").write_bytes(PNG_SAMPLE)
+    set_base_dir("../deck")
+
+    rendered = pin_image(
+        "Where is the bug?",
+        "pin.png",
+        store=Store("mentipy.json", min_prefix=4),
+        base_url="http://example.test:8080",
+    )
+
+    assert "\\includegraphics[width=\\linewidth]{pin.png}" in rendered
+    assert (deck / "mentipy-images").is_dir()
+@
+
+This is the regression test for the server rewrite: a server started
+from an unrelated directory must keep the include path the render
+wrote, not recompute one from its own working directory.
+
+<<test functions>>=
+def test_regenerate_qrs_keeps_the_rendered_include_path(
+    book, tmp_path, monkeypatch
+):
+    set_base_dir("../deck")
+    store = Store("mentipy.json", min_prefix=4)
+    mc("Ready?", ["Yes", "No"], store=store, qr_dir="mentipy-obj",
+       base_url="http://example.test:8080")
+    set_base_dir(None)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    regenerate_qrs(store, "http://public.example:9000")
+
+    [entry] = store.all_questions()
+    [target] = store.qr_targets(entry["hash"])
+    assert sidecar_include_path(target) == target.relative_to(
+        (tmp_path / "deck").resolve()
+    )
+    assert "public.example" in target.with_suffix(".pdf_tex").read_text()
+@
+
+A snippet lands in the deck's QR directory by default and reports the
+path LaTeX should use; rewriting identical content leaves the file
+untouched.
+
+<<test functions>>=
+def test_write_snippet_writes_under_the_base_dir(book, tmp_path):
+    set_base_dir("../deck")
+
+    path = write_snippet("q1", "\\textbf{Hi}", directory="mentipy-obj")
+    target = tmp_path / "deck" / "mentipy-obj" / "q1.tex"
+    first_mtime = target.stat().st_mtime_ns
+    write_snippet("q1", "\\textbf{Hi}", directory="mentipy-obj")
+
+    assert path == "mentipy-obj/q1.tex"
+    assert target.read_text() == "\\textbf{Hi}"
+    assert target.stat().st_mtime_ns == first_mtime
+    assert list(book.iterdir()) == []
 @
 
 <<test [[latex.py]]>>=

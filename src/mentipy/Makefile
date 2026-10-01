@@ -20,6 +20,8 @@ MODULES+= \
 	server.tex \
 	store.py \
 	store.tex \
+	mentipy.sty \
+	sty.tex \
 	venv.py \
 	venv.tex \
 	tutorials.tex \
@@ -35,6 +37,9 @@ all: ${MODULES}
 
 __init__.py: mentipy.nw
 	${NOTANGLE.py}
+
+mentipy.sty: sty.nw
+	${NOTANGLE.sty}
 
 
 tutorials:

@@ -28,6 +28,7 @@ from mentipy.latex import (
     ranking,
     scale,
     word_cloud,
+    write_snippet,
 )
 from mentipy.questions import (
     MCQuestion,
@@ -43,7 +44,13 @@ from mentipy.questions import (
     question_hash,
 )
 from mentipy.server import serve
-from mentipy.store import Store
+from mentipy.store import (
+    Store,
+    base_dir,
+    get_base_dir,
+    resolve_path,
+    set_base_dir,
+)
 from mentipy.venv import activation_script, create_venv, install_package
 @
 
@@ -52,6 +59,10 @@ The version constant keeps the generated package self-describing, while
 helpers live here too because the CLI and PythonTeX workflows both benefit from
 one obvious import surface when a course repository needs a local virtual
 environment.
+The base-directory functions belong on the same surface: the companion
+LaTeX package (\cref{chap:sty}) calls [[mentipy.set_base_dir]] through
+the package root, and a book that binds decks sets the base directory
+from its own preamble without knowing which module owns it.
 
 <<constants>>=
 __version__ = "0.2"
@@ -68,7 +79,9 @@ __all__ = [
     "Store",
     "WordCloudQuestion",
     "activation_script",
+    "base_dir",
     "create_venv",
+    "get_base_dir",
     "install_package",
     "mc",
     "open_text",
@@ -78,9 +91,12 @@ __all__ = [
     "question_from_dict",
     "question_hash",
     "ranking",
+    "resolve_path",
     "scale",
     "serve",
+    "set_base_dir",
     "word_cloud",
+    "write_snippet",
     "__version__",
 ]
 @
@@ -124,5 +140,10 @@ def test_package_facade_reexports_the_public_api():
     assert callable(install_package)
     assert callable(activation_script)
     assert Store.__name__ == "Store"
+    assert callable(set_base_dir)
+    assert callable(get_base_dir)
+    assert callable(base_dir)
+    assert callable(resolve_path)
+    assert callable(write_snippet)
     assert __version__ == "0.2"
 @
