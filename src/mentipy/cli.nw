@@ -528,6 +528,13 @@ def _latex_reference() -> str:
             with their predecessor.  Presentation-only; does not
             affect the question's canonical hash.
 
+        Inline code
+          Prompts and options mark code with backtick pairs, as in
+            Markdown: mc("What does `len(xs)` return?", ["`2`", "`3`"]).
+            The slide sets it in typewriter type; the web pages show it
+            as code.  On the command line, single-quote such text: in
+            double quotes the shell runs `...` as a command.
+
         Shared keyword arguments
           store: defaults to config key {STORE_CONFIG}
           base_url: defaults to {BASE_URL_CONFIG}; if omitted, Mentipy
@@ -3774,6 +3781,8 @@ def test_latex_command_prints_the_reference_and_all_config_keys():
     assert "results: override `mentipy serve --results`" in result.output
     assert "lock=True" in result.output
     assert "lock: pace this question with the slides" in result.output
+    assert "Inline code" in result.output
+    assert "single-quote" in result.output
     for key, _description in CONFIG_KEY_HELP:
         assert key in result.output
 @

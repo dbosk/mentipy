@@ -243,27 +243,30 @@ def test_mc_question_to_dict_includes_an_opt_out_next_flag():
     assert payload["next"] is False
 @
 
-\subsection{Inline code in options}
+\subsection{Inline code in prompts and options}
 \label{sec:inline-code}
 
-Programming questions often have code as their options: [[len(x)]],
-[[None]], [[print]] as opposed to the word \enquote{print}.  An option
-is a plain string, so it marks inline code the way Markdown does, with a
-pair of backticks: [[`len(x)`]].  The markup lives in the string rather
-than in a richer option type because the string is what the author
-already writes, on a slide or on the command line, and what the store
-and the hash already hold, so nothing about storage changes.  The
-backticks are part of the option's text: adding them to an option is an
-edit like any other and makes a new question, while every existing
-option without backticks renders exactly as before.
+Programming questions often have code in their prompts and as their
+options: [[len(x)]], [[None]], [[print]] as opposed to the word
+\enquote{print}.  Prompts and options are plain strings, so they mark
+inline code the way Markdown does, with a pair of backticks:
+[[`len(x)`]].  The markup lives in the string rather than in a richer
+type because the string is what the author already writes, on a slide
+or on the command line, and what the store and the hash already hold,
+so nothing about storage changes.  The backticks are part of the text:
+adding them is an edit like any other and makes a new question, while
+every existing prompt and option without backticks renders exactly as
+before.
 
 The rule is deliberately smaller than Markdown's.  A code span is a
-backtick, at least one character that is not a backtick, and the next
-backtick.  Anything else is literal text: the apostrophe-like backtick
-in [[it`s]], an empty pair, and a final unpaired backtick.  An option
-can therefore not contain a backtick inside code, which no question in
-practice needs, and an option that never meant to be code is not
-mangled by a lone backtick.
+single backtick, at least one character that is not a backtick, and the
+next backtick, where neither delimiter touches another backtick.
+Anything else is literal text: the apostrophe-like backtick in
+[[it`s]], an empty pair, a final unpaired backtick, and LaTeX's
+doubled-backtick quotes, which a prompt written by a LaTeX author is
+likely to contain.  Code can therefore not contain a backtick, which no
+question in practice needs, and text that never meant to be code is
+not mangled.
 
 The split is defined here, next to the options it reads, because two
 renderers need exactly the same reading of it: the slide typesets the
@@ -271,7 +274,7 @@ spans in typewriter type, and the web pages wrap them in [[<code>]].
 Each renderer escapes every piece for its own format.
 
 <<functions>>=
-INLINE_CODE = re.compile(r"`([^`]+)`")
+INLINE_CODE = re.compile(r"(?<!`)`([^`]+)`(?!`)")
 
 
 def inline_code_spans(text: str) -> list[tuple[str, bool]]:
@@ -314,6 +317,20 @@ def test_inline_code_spans_leave_stray_backticks_literal():
         ("a", True),
         (" and `b", False),
     ]
+@
+
+LaTeX authors quote with doubled backticks, and a prompt like
+[[``a'' or ``b'']] must stay two quotations rather than become the code
+span between its inner backticks.  So a backtick next to another
+backtick neither opens nor closes code.
+
+<<test functions>>=
+
+def test_inline_code_spans_leave_latex_quotes_alone():
+    quoted = "Is ``a'' or ``b'' longer?"
+    assert inline_code_spans(quoted) == [(quoted, False)]
+    assert inline_code_spans("`x```") == [("`x```", False)]
+    assert inline_code_spans("``a` b") == [("``a` b", False)]
 @
 
 

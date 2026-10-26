@@ -281,14 +281,17 @@ Included in the document, that output compiles to:
   the same kind of fragment for inspection or redirection.
 }
 
-Options that are code mark it with a pair of backticks, as in Markdown.
-The slide sets the code in typewriter type and the answer and results
-pages show it as code; a lone backtick stays an ordinary character.  The same holds for ranking options.
+Code in a prompt or an option is marked with a pair of backticks, as in
+Markdown.  The slide and the notes set it in typewriter type, and the
+answer and results pages show it as code.  A backtick that no later
+backtick closes stays an ordinary character, and so do LaTeX's
+doubled-backtick quotes.  The same holds for every question kind's
+prompt and for ranking options.
 
 \begin{pyblock}
 print(
     mc(
-        "Which call gives the number of items in the list xs?",
+        "Which call gives the number of items in the list `xs`?",
         ["`len(xs)`", "`xs.size()`", "`xs.length`", "None of them"],
         base_url="http://localhost:8080",
         qr_dir="mentipy-obj",
@@ -298,6 +301,15 @@ print(
 \end{pyblock}
 
 \begin{center}\printpythontex\end{center}
+
+On the command line, put such text in single quotes.  In double quotes
+the shell would run [[`len(xs)`]] as a command and pass on its empty
+output:
+
+\begin{minted}{text}
+mentipy render mc 'Which call gives the number of items in the list `xs`?' \
+  '`len(xs)`' '`xs.size()`' '`xs.length`' 'None of them'
+\end{minted}
 
 \subsection{A Scale Poll}
 
