@@ -957,7 +957,7 @@ the form falls back to syntax-highlighted LaTeX source.
   knobs.
 }
 
-\subsection{Context on the Answer Page}
+\subsection{Context on the Web Pages}
 
 A slide has little room, but the phone a student answers on has a lot.
 A question about a program that was built up over several slides can
@@ -1057,13 +1057,15 @@ discussion after the vote points at belongs on the slide.
   file by name, an offered download, prose --- each matched to how much
   a student can read on a phone.
 
-  \textbf{What stays invariant}: The keyword and the rule that the
-  premises are identity, for every question kind.
+  \textbf{What stays invariant}: The question kind and the keyword:
+  every kind takes the same [[context]], and the same premises always
+  give the same question.
 
   \textbf{What this reveals}: The context is the web pages' share of
-  the question, the part the slide has no room for.  Contrasting a new
-  caption (same question) with an edited program (new question)
-  separates how the premises are shown from what they are.
+  the question, the part the slide has no room for.  The identity
+  paragraph contrasts a new caption or file name, which keeps the
+  question, with an edited program, which makes a new one; the reader
+  learns to separate how the premises are shown from what they are.
 }
 
 \subsection{Sequencing Questions}

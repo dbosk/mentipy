@@ -3456,8 +3456,11 @@ uses: the prompt, its premises, then what the room made of them.  The
 results page is what the lecturer projects while the room answers and
 what the discussion after the vote points at, so the program the
 question is about belongs there; the respondents see the same premises
-the lecturer is talking over.  The window filter sits
-under the context so the lecturer can rescope without scrolling past the results; the total responses
+the lecturer is talking over.  The price is that a long context pushes
+the window filter and the numbers below the fold of the projected
+page, which a deck with a long program pays for by scrolling.  The
+window filter comes next, so the
+lecturer can rescope next to the results; the total responses
 line follows because that is the first number every lecturer asks for;
 then come the type-specific stats and the visualization.  The optional
 [[admin]] keyword lets the caller communicate whether the requester is

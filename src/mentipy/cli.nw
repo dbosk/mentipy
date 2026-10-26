@@ -550,9 +550,10 @@ def _latex_reference() -> str:
             in the deck is open, for questions that share a slide
             with their predecessor.  Presentation-only; does not
             affect the question's canonical hash.
-          context: material shown only on the answer page, between
-            the question and the inputs; never on the slide or the
-            results page.  One item or a list: a string is prose, a
+          context: material shown on the answer page, between the
+            question and the inputs, and on the results page, above
+            the results; never on the slide.  One item or a list: a
+            string is prose, a
             ContextSnippet(text, language=None, label=None) is shown
             as is, and two helpers read files:
             file_snippet(path, *, name=None, language=None,
@@ -560,8 +561,10 @@ def _latex_reference() -> str:
               "Account.deposit" one class or function of it;
             file_download(path, *, label=None) offers a file for
               download, for data too large to read on a phone.
-            Show only the premises, never the answer.  Presentation-
-            only; does not affect the question's canonical hash.
+            Show only the premises, never the answer.  The premises
+            (snippet text, download bytes) are part of the question's
+            identity: editing them gives a new URL and QR code, while
+            labels, languages and file names do not.
 
         Shared keyword arguments
           store: defaults to config key {STORE_CONFIG}
@@ -3901,7 +3904,7 @@ def test_latex_command_prints_the_reference_and_all_config_keys():
     assert "results: override `mentipy serve --results`" in result.output
     assert "lock=True" in result.output
     assert "lock: pace this question with the slides" in result.output
-    assert "context: material shown only on the answer page" in (
+    assert "context: material shown on the answer page" in (
         result.output
     )
     assert "file_snippet(path, *, name=None, language=None," in result.output

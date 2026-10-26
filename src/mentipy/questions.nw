@@ -93,10 +93,11 @@ class Question:
     per-question override of the server's public-results flag, and
     ``lock`` says whether the question waits for the lecturer to open
     it (``False`` opens it together with its predecessor).  ``context``
-    holds ``ContextSnippet`` and ``ContextDownload`` items that only
-    the web form shows.  The flags and the context stay out of the
-    canonical hash.  Each subclass declares a ``kind`` field whose
-    default is its stable JSON tag.
+    holds ``ContextSnippet`` and ``ContextDownload`` items that the web
+    pages (the answer form and the results page) show.  The flags stay
+    out of the canonical hash; the context's premises enter it.  Each
+    subclass declares a ``kind`` field whose default is its stable JSON
+    tag.
     """
 
     text: str
@@ -122,11 +123,12 @@ key as store-owned metadata during refresh --- in particular, a
 [[results]] override that is later removed from the slide source must
 be able to revert to the deferring [[None]] on the next recompile.
 
-The context is written even when it is empty, so that every stored
-entry has the same shape as the flags give it.  Deleting the context
-from a slide clears it either way: the store's refresh rebuilds the old
-entry and treats only the keys that rebuild does not produce as
-store-owned metadata.
+The context is written in full, every item with every key, for the
+same reason as the flags.  Its premises are identity, so editing a
+program or removing the context makes another question and never
+reaches the refresh; what does reach it is a change of presentation
+alone, such as a caption removed from a slide, and that must clear the
+stored caption rather than leave it behind as apparent metadata.
 
 The default [[canonical_dict]] is the persistence shape minus the
 shared flags, with the context reduced to its premises, which is the
@@ -255,7 +257,7 @@ tell where one ends and the next begins.
 <<classes>>=
 @dataclass(frozen=True)
 class ContextSnippet:
-    """One piece of web-only context shown on a question's answer page.
+    """One piece of context shown on a question's web pages.
 
     ``language`` selects the presentation: a Pygments lexer name for
     highlighted code, ``None`` for prose, or ``"latex"`` for LaTeX
@@ -306,7 +308,7 @@ reason.
 <<classes>>=
 @dataclass(frozen=True)
 class ContextDownload:
-    """A file offered for download on a question's answer page.
+    """A file offered for download on a question's web pages.
 
     The bytes live in the store's content-addressed sidecar under
     ``sha256``; ``filename`` is the name the browser saves them as,
@@ -386,9 +388,7 @@ def from_dict(cls, data: Mapping[str, Any]) -> "ContextDownload":
 @
 
 Each item also has the identity-only shape that enters the question's
-hash: its tag and its premises, nothing about how they are shown.  The
-tag stays in, so that a snippet whose text happens to equal a digest
-cannot collide with a download.
+hash: its tag and its premises, nothing about how they are shown.
 
 <<context snippet methods>>=
 def canonical_dict(self) -> dict[str, Any]:
@@ -2807,8 +2807,9 @@ stances: the target content (the image byte digest, the raw text string)
 and the pin contract ([[max_pins]], [[allow_comment]]) are identity, while
 the rendering hints ([[image_path]], [[image_mime]], [[language]],
 [[content_html]]) follow the word-cloud rule and stay out of the hash.
-Every kind adds the premises of its context, when it has one, by the
-same rule (\cref{sec:web-only-context}).
+The context is the exception to that rule: like a pin-text target,
+its premises are identity for every kind that has one
+(\cref{sec:web-only-context}).
 
 <<functions>>=
 def question_hash(question: Question) -> str:
@@ -2938,11 +2939,11 @@ def test_question_hash_invariant_to_lock_flag_across_question_types():
         )
 @
 
-The context's premises are identity for every kind: adding a context
-editing its program, or offering other data under the same file name,
-makes another question.  Running the check over
-the factory table catches an override that builds its identity from
-scratch and forgets to splice the context in.
+The context's premises are identity for every kind: adding a context,
+editing its program, reordering its items, or offering other data
+under the same file name makes another question.  Running the check
+over the factory table catches an override that builds its identity
+from scratch and forgets to splice the context in.
 
 <<test functions>>=
 
@@ -2954,11 +2955,12 @@ def test_question_hash_depends_on_the_context_across_question_types():
         hashes = {
             question_hash(factory()),
             question_hash(factory(context=SAMPLE_CONTEXT)),
+            question_hash(factory(context=SAMPLE_CONTEXT[::-1])),
             question_hash(factory(context=edited)),
             question_hash(factory(context=data)),
             question_hash(factory(context=other_data)),
         }
-        assert len(hashes) == 5
+        assert len(hashes) == 6
 @
 
 Only the premises count.  Captions, languages, cached renderings and
@@ -2983,6 +2985,47 @@ def test_question_hash_ignores_how_the_context_is_presented():
             factory(context=restyled)
         )
         assert "context" not in factory().canonical_dict()
+@
+
+The absent key is what keeps old hashes, but the guarantee itself is
+that no store loses its prefixes.  So one question of each kind is
+pinned to the digest it had before the context existed, computed with
+the code on [[main]] at the time.
+
+<<test functions>>=
+
+HASHES_BEFORE_CONTEXT = {
+    "mc": "8ec2e3fa3239bcb71a99f370642d0670290ab296e088a60c125675de64b589e6",
+    "open": "623d4be0a5d26706b276a00992cc2e15f69be2f8ba2c4d0c292a6c289fe643d8",
+    "scale": "befd9db985e8eae1f03fb0cf557ba67f0cea1aab92062c12113e79bd26ff523a",
+    "wordcloud": "0ae897065c98abc5b71ae0dab0f393347c24505c940991b7a31feb9485d85260",
+    "ranking": "6c54fab3956b8de8e5c81f9d878b8296eb96dde8df40c15b3565ba28ff28aaf0",
+    "pin_image": "4e464e32a449c325b3a5fc4d4792e0228b5ff6040d4f6e4092c477821f4b75e5",
+    "pin_text": "a47b8a15e91cdb6ed439898a41bf1e92d2bbc9e3f25ee573fa962f749a7fe765",
+}
+
+
+def test_questions_without_context_keep_their_earlier_hashes():
+    questions = {
+        "mc": MCQuestion("Pick one", ("A", "B"), multi=True),
+        "open": OpenQuestion("Why?", max_chars=140, fence="python"),
+        "scale": ScaleQuestion("Pace?", low=1, high=5, low_label="Slow"),
+        "wordcloud": WordCloudQuestion("One word?", max_chars=30),
+        "ranking": RankingQuestion("Rank", ("A", "B", "C"), top_n=2),
+        "pin_image": PinImageQuestion(
+            "Pin it",
+            image_sha256="c" * 64,
+            image_mime="image/png",
+            image_path="a.png",
+            max_pins=2,
+        ),
+        "pin_text": PinTextQuestion(
+            "Pin the bug", "total =+ x", allow_comment=True
+        ),
+    }
+    assert {
+        kind: question_hash(question) for kind, question in questions.items()
+    } == HASHES_BEFORE_CONTEXT
 @
 
 The test root is intentionally small: the interesting details live next to the
