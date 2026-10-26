@@ -59,9 +59,10 @@ step through the whole slide, but if the lecturer later skips that
 slide the block must stay closed together with its first question.
 All three flags are purely presentation, so they are dropped before
 the hash is computed and editing any of them between rebuilds never
-orphans the recorded answers.  The same holds for the optional
-[[context]], the material the web form shows next to the prompt
-(\cref{sec:web-only-context}).
+orphans the recorded answers.  The optional [[context]], the material
+the web pages show next to the prompt (\cref{sec:web-only-context}), is
+the exception among the shared fields: its premises are part of the
+question's identity.
 
 The prompt [[text]] is shared too: every question type opens with it.
 It lives on the base as an ordinary positional field, which works
@@ -128,10 +129,16 @@ entry and treats only the keys that rebuild does not produce as
 store-owned metadata.
 
 The default [[canonical_dict]] is the persistence shape minus the
-shared flags and the context, which is the right identity for question types whose
-every other field shapes the input contract.  Types with further
-presentation fields (word clouds, the pin questions) or
-historical-hash constraints (open questions) override it.
+shared flags, with the context reduced to its premises, which is the
+right identity for question types whose every other field shapes the
+input contract.  Types with further presentation fields (word clouds,
+the pin questions) or historical-hash constraints (open questions)
+override it.  The context's part comes from one helper,
+[[_context_identity]], which the overrides that build their identity
+from scratch splice in the same way the pin questions splice in their
+pin contract.  It is empty for a question without context, so the hash
+of such a question is byte for byte what it was before the field
+existed and no store loses its prefixes.
 
 <<question base methods>>=
 def to_dict(self) -> dict[str, Any]:
@@ -153,7 +160,13 @@ def canonical_dict(self) -> dict[str, Any]:
     result.pop("results")
     result.pop("lock")
     result.pop("context")
+    result.update(self._context_identity())
     return result
+
+def _context_identity(self) -> dict[str, Any]:
+    if not self.context:
+        return {}
+    return {"context": [item.canonical_dict() for item in self.context]}
 
 def _own_dict(self) -> dict[str, Any]:
     raise NotImplementedError
@@ -200,21 +213,29 @@ A slide has little room, but the phone a respondent answers on has a
 lot.  A peer-instruction question about a program built up over several
 slides can only show a fragment of it on the slide, while the whole
 program fits on the answer page.  The [[context]] field carries that
-material: a tuple of items that the web form shows between the prompt
-and the inputs, and that nothing else shows.  The slide stays the room's
-shared reference for the discussion after the vote, so the LaTeX side
-ignores the context entirely, and the projected results page leaves it
-out too.
+material: a tuple of items that the web pages show under the prompt,
+on the answer form before the inputs and on the results page before the
+results.  The slide has no room for it, so the LaTeX side ignores the
+context entirely.
 
-The context is presentation, not identity, and it stays out of the
-canonical hash like the flags.  That is the opposite of
-[[PinTextQuestion.content]], and the difference is deliberate.  A
-pin-text answer is a position \emph{in} the content, so a changed
-content is a different question.  An answer to a question with context
-is about the prompt and its options; the context is material tangled
-from the slides, and reformatting it or renaming a variable must not
-mint a new URL prefix, invalidate the printed QR codes and strand the
-answers already collected under the old hash.
+The context's premises are part of the question's identity, as
+[[PinTextQuestion.content]] is.  An answer is an answer about the
+program the respondent read: \enquote{What is printed?} over one
+program and over another are two questions, and pooling their answers
+would mix two votes into one bar chart.  Only the premises count,
+though --- a snippet's text and a download's bytes, by their digest.
+The label, the language, the cached pandoc rendering, the file name and
+the size only change how the same premises are shown, and stay out of
+the hash for the reason [[content_html]] does: a pandoc upgrade or a
+renamed caption must not orphan the answers.  The items keep their
+order, since the author puts the program asked about first.
+
+The price is paid when the program changes after answers exist.
+Reformatting it, or renaming a variable in it, mints a new URL prefix
+and a new QR code, and the answers already collected stay under the old
+hash.  The next compile prints the new code, so a deck that is
+recompiled before the lecture is unaffected; editing during a lecture
+starts the question afresh, which is what an edited question is.
 
 There are two kinds of item, because there are two sizes of material.
 A program of a page or two is best \emph{shown}: the respondent reads it
@@ -362,6 +383,19 @@ def from_dict(cls, data: Mapping[str, Any]) -> "ContextDownload":
         size=int(data["size"]),
         label=data.get("label"),
     )
+@
+
+Each item also has the identity-only shape that enters the question's
+hash: its tag and its premises, nothing about how they are shown.  The
+tag stays in, so that a snippet whose text happens to equal a digest
+cannot collide with a download.
+
+<<context snippet methods>>=
+def canonical_dict(self) -> dict[str, Any]:
+    return {"type": "text", "text": self.text}
+<<context download methods>>=
+def canonical_dict(self) -> dict[str, Any]:
+    return {"type": "download", "sha256": self.sha256}
 @
 
 An unknown tag fails loudly for the same reason an unknown question kind
@@ -873,6 +907,7 @@ def canonical_dict(self) -> dict[str, Any]:
         "kind": self.kind,
         "text": self.text,
         "max_chars": self.max_chars,
+        **self._context_identity(),
     }
 @
 
@@ -1872,6 +1907,7 @@ def canonical_dict(self) -> dict[str, Any]:
         "text": self.text,
         "image_sha256": self.image_sha256,
         **self._pin_contract(),
+        **self._context_identity(),
     }
 @
 
@@ -1995,6 +2031,7 @@ def canonical_dict(self) -> dict[str, Any]:
         "text": self.text,
         "content": self.content,
         **self._pin_contract(),
+        **self._context_identity(),
     }
 @
 
@@ -2770,6 +2807,8 @@ stances: the target content (the image byte digest, the raw text string)
 and the pin contract ([[max_pins]], [[allow_comment]]) are identity, while
 the rendering hints ([[image_path]], [[image_mime]], [[language]],
 [[content_html]]) follow the word-cloud rule and stay out of the hash.
+Every kind adds the premises of its context, when it has one, by the
+same rule (\cref{sec:web-only-context}).
 
 <<functions>>=
 def question_hash(question: Question) -> str:
@@ -2899,20 +2938,51 @@ def test_question_hash_invariant_to_lock_flag_across_question_types():
         )
 @
 
-The context is the change most likely to happen \emph{after} answers
-exist: the program it shows is tangled from the slides, so reformatting
-or a renamed variable rewrites it.  Adding, editing or removing context
-must therefore keep the hash, and with it the URL prefix, the printed QR
-codes and the answers already collected.
+The context's premises are identity for every kind: adding a context
+editing its program, or offering other data under the same file name,
+makes another question.  Running the check over
+the factory table catches an override that builds its identity from
+scratch and forgets to splice the context in.
 
 <<test functions>>=
 
-def test_question_hash_invariant_to_context_across_question_types():
+def test_question_hash_depends_on_the_context_across_question_types():
     edited = (ContextSnippet("class Account:\n    balance = 0\n"),)
+    data = (ContextDownload("a" * 64, "sales.csv", 2048),)
+    other_data = (ContextDownload("b" * 64, "sales.csv", 2048),)
     for factory in QUESTION_FACTORIES:
-        plain = question_hash(factory())
-        assert plain == question_hash(factory(context=SAMPLE_CONTEXT))
-        assert plain == question_hash(factory(context=edited))
+        hashes = {
+            question_hash(factory()),
+            question_hash(factory(context=SAMPLE_CONTEXT)),
+            question_hash(factory(context=edited)),
+            question_hash(factory(context=data)),
+            question_hash(factory(context=other_data)),
+        }
+        assert len(hashes) == 5
+@
+
+Only the premises count.  Captions, languages, cached renderings and
+file names are presentation, so changing them keeps the question.  And
+a question without context must keep the hash it had before the field
+existed, or every store would lose its prefixes; its identity therefore
+has no [[context]] key at all, not an empty one.
+
+<<test functions>>=
+
+def test_question_hash_ignores_how_the_context_is_presented():
+    shown = (
+        ContextSnippet("x = 1", language="python", label="a.py"),
+        ContextDownload("c" * 64, "sales.csv", 2048, label="Sales"),
+    )
+    restyled = (
+        ContextSnippet("x = 1", label="setup", html="<p>x = 1</p>"),
+        ContextDownload("c" * 64, "försäljning.csv", 1),
+    )
+    for factory in QUESTION_FACTORIES:
+        assert question_hash(factory(context=shown)) == question_hash(
+            factory(context=restyled)
+        )
+        assert "context" not in factory().canonical_dict()
 @
 
 The test root is intentionally small: the interesting details live next to the

@@ -1394,13 +1394,14 @@ def test_render_index_labels_questions_when_given_progress(tmp_path):
 \subsection{The prompt and its context}
 \label{sec:prompt-and-context}
 
-Every form opens the same way: the prompt, then the question's web-only
+Every form opens the same way: the prompt, then the question's
 context (\cref{sec:web-only-context}), then the inputs.  The prompt
 comes first so that a long program cannot push the question off the
 screen, and the context comes before the inputs so that the respondent
 reads the premises before answering.  One helper builds that opening
 for every form, so that no question kind can leave the context out or
-put it somewhere else.
+put it somewhere else.  The results page shows the same context under
+its heading (\cref{sec:results-page}).
 
 <<functions>>=
 def _render_prompt(question: Question, prefix: str) -> str:
@@ -3230,6 +3231,7 @@ def test_render_question_nav_offers_skip_only_to_the_lecturer(tmp_path):
 @
 
 \subsection{Dispatching by question type}
+\label{sec:results-page}
 
 A ranking result is a single bar per option, ordered best-first, where
 the bar length encodes consensus rather than a count: a low mean rank
@@ -3448,8 +3450,14 @@ def _render_pin_stats(
 @
 
 The top-level renderer reads the window-filtered summary from the store
-and dispatches to the per-type helpers.  The window filter sits at the
-top so the lecturer can rescope without scrolling; the total responses
+and dispatches to the per-type helpers.  The question's context comes
+first, right under the page's heading, in the order the answer form
+uses: the prompt, its premises, then what the room made of them.  The
+results page is what the lecturer projects while the room answers and
+what the discussion after the vote points at, so the program the
+question is about belongs there; the respondents see the same premises
+the lecturer is talking over.  The window filter sits
+under the context so the lecturer can rescope without scrolling past the results; the total responses
 line follows because that is the first number every lecturer asks for;
 then come the type-specific stats and the visualization.  The optional
 [[admin]] keyword lets the caller communicate whether the requester is
@@ -3481,6 +3489,7 @@ def _render_results(
     question = store.question(full_hash)
 
     parts = [
+        _render_context(question, summary["url_prefix"]),
         _render_window_filter(
             summary["url_prefix"], summary["window"]
         ),
@@ -5405,8 +5414,9 @@ def test_context_route_404s_for_anything_but_a_stored_download(tmp_path):
 
 A download is part of what the question reveals, so the lecturer-paced
 gate covers it like the pin image: a respondent cannot fetch the data
-before the lecturer opens the question.  The projected results page
-leaves the context out, as it belongs to the answer page alone.
+before the lecturer opens the question.  The results page shows the
+same context as the form, download links included, between its heading
+and the results.
 
 <<test functions>>=
 def test_locked_question_gates_context_downloads(tmp_path):
@@ -5454,16 +5464,17 @@ def test_skipped_question_does_not_hand_out_another_questions_file(
     assert SALES_CSV not in payload
 
 
-def test_results_page_leaves_the_context_out(tmp_path):
+def test_results_page_shows_the_context_above_the_results(tmp_path):
     store, prefix = _download_store(tmp_path)
 
     with _running_server(store) as port:
-        _form, form_body = _request(port, "GET", f"/{prefix}")
         _results, results_body = _request(port, "GET", f"/{prefix}/results")
 
-    assert "Prices are in SEK." in form_body
-    assert "Prices are in SEK." not in results_body
-    assert "/context/" not in results_body
+    context = results_body.index('<section class="context">')
+    assert context < results_body.index("Total responses")
+    assert results_body.index("<h1>") < context
+    assert "Prices are in SEK." in results_body
+    assert f'href="/{prefix}/context/1"' in results_body
 @
 
 A pin submission travels the ordinary urlencoded POST path end to end:

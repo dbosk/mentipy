@@ -665,7 +665,6 @@ def question(
     chosen_show_url = _resolve_show_url(show_url)
 
     full_hash = question_hash(prompt)
-    _warn_on_context_clash(active_store, full_hash, prompt)
     prefix = active_store.register(prompt)
     url = _join_url(chosen_base, prefix)
     qr_path = chosen_dir / f"Q-{prefix}.{chosen_format}"
@@ -1357,42 +1356,6 @@ def _resolve_context_item(
     if isinstance(item, ContextDownload):
         return item
     raise TypeError(f"not a context item: {item!r}")
-@
-
-\subsection{Same prompt, another context}
-
-Leaving the context out of the hash has a price.  Two questions with the
-same prompt are one question, so [[open_text("What is printed?")]] on
-two slides, each with its own program in the context, shares one URL,
-one QR code and one pool of answers, and both answer pages show
-whichever program was registered last.  The prompt is what must tell
-such questions apart.
-
-The helpers cannot tell an edit from a second question in general, but
-within one Python process they can: a PythonTeX run registers every
-question of the deck once, so the same prompt arriving twice with
-different context in the same run is two questions, not an edit.
-[[question]] therefore remembers the context each question was
-registered with in this process, per store, and warns the second time
-the same question arrives with another context.  The edit-and-recompile
-loop starts a new process each time, so it never warns.
-
-<<functions>>=
-_REGISTERED_CONTEXT: dict[tuple[Path, str], tuple] = {}
-
-
-def _warn_on_context_clash(
-    store: Store, full_hash: str, prompt: Question
-) -> None:
-    key = (store.path.resolve(), full_hash)
-    earlier = _REGISTERED_CONTEXT.setdefault(key, prompt.context)
-    if earlier != prompt.context:
-        warnings.warn(
-            f"two questions with the prompt {prompt.text!r} differ only"
-            " in their context; they share one URL and one pool of"
-            " answers, so give them different prompts"
-        )
-        _REGISTERED_CONTEXT[key] = prompt.context
 @
 
 \section{Question snippets for Beamer frames}
@@ -2145,29 +2108,6 @@ def test_file_snippet_guesses_and_accepts_overrides(bank_file):
     assert file_snippet("notes.unknownext").language is None
     overridden = file_snippet("bank.py", language="text", label="Bank")
     assert (overridden.language, overridden.label) == ("text", "Bank")
-@
-
-Two questions with the same prompt are one question, whatever their
-context, because the context stays out of the hash.  Within one run of
-the helpers that is almost always a mistake --- the same generic prompt
-on two slides, each with its own program --- so the second registration
-warns.  Registering the same question twice with the same context is
-fine, and so is the same prompt in another store.
-
-<<test functions>>=
-def test_same_prompt_with_another_context_warns(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    store = Store(tmp_path / "mentipy.json", min_prefix=4)
-    other = Store(tmp_path / "other.json", min_prefix=4)
-    common = dict(base_url="http://example.test:8080", qr_dir=DEFAULT_QR_DIR)
-
-    open_text("What is printed?", context="print(1)", store=store, **common)
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        open_text("What is printed?", context="print(1)", store=store, **common)
-        open_text("What is printed?", context="print(2)", store=other, **common)
-    with pytest.warns(UserWarning, match="differ only in their context"):
-        open_text("What is printed?", context="print(2)", store=store, **common)
 @
 
 A lone item needs no list: [[context=file_snippet("bank.py")]] reads
@@ -2938,7 +2878,6 @@ def test_write_snippet_writes_under_the_base_dir(book, tmp_path):
 
 <<test [[latex.py]]>>=
 import hashlib
-import warnings
 
 import pytest
 

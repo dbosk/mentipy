@@ -964,9 +964,9 @@ A question about a program that was built up over several slides can
 show only a fragment of it on the slide, while the whole program fits
 on the answer page.  Every question helper therefore takes a
 [[context]]: material that the answer page shows between the question
-and the inputs, and that neither the slide nor the projected results
-page shows.  The slide stays the room's shared reference for the
-discussion after the vote.
+and the inputs, and that the results page shows between the question
+and the results.  The slide, which has no room for it, does not show
+it.
 
 The context should come from the files the slides are built from, never
 be retyped, or it drifts the moment the program changes.
@@ -1033,15 +1033,15 @@ mentipy render mc "What is the balance after the loop?" \
   --context bank.py --context-download transactions.csv
 \end{minted}
 
-The context is not part of the question's identity, unlike a pin-text
-target.  Reformatting the program, or renaming a variable in it, keeps
-the question's URL, its printed QR code and the answers it has already
-collected; the next compile simply updates what the answer page shows.
-The flip side is that the prompt alone tells questions apart: two
-\enquote{What is printed?} questions with different programs in their
-context are one question with one pool of answers.  Mentipy warns when
-one compile registers the same prompt with two different contexts; give
-such questions prompts of their own.
+The context is part of the question's identity, as a pin-text target
+is: two \enquote{What is printed?} questions with different programs in
+their context are two questions, each with its own URL, QR code and
+answers.  Only the premises count --- the text of a snippet and the
+bytes of a download --- so a new caption or file name keeps the
+question.  Editing the program does not: reformatting it, or renaming a
+variable in it, makes a new question with a new QR code, which the next
+compile prints, and the answers collected before the edit stay with the
+old one.
 
 What belongs in the context is the premises and nothing more.  A run of
 the program the question asks about, a file that run produces, or the
@@ -1052,19 +1052,18 @@ discussion after the vote points at belongs on the slide.
   \textbf{Variation pattern}: Contrast between surfaces.
 
   \textbf{What varies}: Where the material appears: the answer page
-  shows the context, while the slide and the results page do not.
+  and the results page show the context, while the slide does not.
   Within the context, the item kind varies --- a shown file, a part of a
   file by name, an offered download, prose --- each matched to how much
   a student can read on a phone.
 
-  \textbf{What stays invariant}: The question: its prompt, options,
-  identity, URL and QR code are the same with or without context, and
-  the same for every question kind.
+  \textbf{What stays invariant}: The keyword and the rule that the
+  premises are identity, for every question kind.
 
-  \textbf{What this reveals}: Context is presentation for one surface
-  only.  The contrast with the pin-text target, whose content \emph{is}
-  the identity, separates the material a student answers \emph{about}
-  from the material a student answers \emph{in}.
+  \textbf{What this reveals}: The context is the web pages' share of
+  the question, the part the slide has no room for.  Contrasting a new
+  caption (same question) with an edited program (new question)
+  separates how the premises are shown from what they are.
 }
 
 \subsection{Sequencing Questions}
