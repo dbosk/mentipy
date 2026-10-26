@@ -491,6 +491,104 @@ def test_mc_question_to_dict_includes_an_opt_out_next_flag():
     assert payload["next"] is False
 @
 
+\subsection{Inline code in prompts and options}
+\label{sec:inline-code}
+
+Programming questions often have code in their prompts and as their
+options: [[len(x)]], [[None]], [[print]] as opposed to the word
+\enquote{print}.  Prompts and options are plain strings, so they mark
+inline code the way Markdown does, with a pair of backticks:
+[[`len(x)`]].  The markup lives in the string rather than in a richer
+type because the string is what the author already writes, on a slide
+or on the command line, and what the store and the hash already hold,
+so nothing about storage changes.  The backticks are part of the text:
+adding them is an edit like any other and makes a new question, while
+every existing prompt and option without backticks renders exactly as
+before.
+
+The rule is deliberately smaller than Markdown's.  A code span is a
+single backtick, at least one character that is not a backtick, and the
+next backtick, where neither delimiter touches another backtick.
+Anything else is literal text: the apostrophe-like backtick in
+[[it`s]], an empty pair, a final unpaired backtick, and LaTeX's
+doubled-backtick quotes, which a prompt written by a LaTeX author is
+likely to contain.  Code can therefore not contain a backtick, which no
+question in practice needs.
+
+Pairing runs from the left, so a stray backtick before a code span
+pairs with the span's opening backtick instead: in [[It`s `x`]] the
+code is [[s ]], and in LaTeX's single quotes [[`stack' or `queue']] it
+is [[stack' or ]].  The rule cannot tell an apostrophe from a delimiter
+without guessing, so text that has code in it should write
+apostrophes as [[']] and quotations with typographic quotes, ‘like
+this’, never with a backtick.
+
+The split is defined here, next to the options it reads, because two
+renderers need exactly the same reading of it: the slide typesets the
+spans in typewriter type, and the web pages wrap them in [[<code>]].
+Each renderer escapes every piece for its own format.
+
+<<functions>>=
+INLINE_CODE = re.compile(r"(?<!`)`([^`]+)`(?!`)")
+
+
+def inline_code_spans(text: str) -> list[tuple[str, bool]]:
+    """Split ``text`` into ``(piece, is_code)`` pairs at backtick pairs."""
+
+    spans = []
+    position = 0
+    for match in INLINE_CODE.finditer(text):
+        if match.start() > position:
+            spans.append((text[position : match.start()], False))
+        spans.append((match.group(1), True))
+        position = match.end()
+    if position < len(text):
+        spans.append((text[position:], False))
+    return spans
+@
+
+<<test functions>>=
+
+def test_inline_code_spans_split_at_backtick_pairs():
+    assert inline_code_spans("Use `x[1:]` here") == [
+        ("Use ", False),
+        ("x[1:]", True),
+        (" here", False),
+    ]
+    assert inline_code_spans("`None`") == [("None", True)]
+    assert inline_code_spans("`a` or `b`") == [
+        ("a", True),
+        (" or ", False),
+        ("b", True),
+    ]
+    assert inline_code_spans("plain") == [("plain", False)]
+    assert inline_code_spans("") == []
+
+
+def test_inline_code_spans_leave_stray_backticks_literal():
+    assert inline_code_spans("it`s") == [("it`s", False)]
+    assert inline_code_spans("a `` b") == [("a `` b", False)]
+    assert inline_code_spans("`a` and `b") == [
+        ("a", True),
+        (" and `b", False),
+    ]
+@
+
+LaTeX authors quote with doubled backticks, and a prompt like
+[[``a'' or ``b'']] must stay two quotations rather than become the code
+span between its inner backticks.  So a backtick next to another
+backtick neither opens nor closes code.
+
+<<test functions>>=
+
+def test_inline_code_spans_leave_latex_quotes_alone():
+    quoted = "Is ``a'' or ``b'' longer?"
+    assert inline_code_spans(quoted) == [(quoted, False)]
+    assert inline_code_spans("`x```") == [("`x```", False)]
+    assert inline_code_spans("``a` b") == [("``a` b", False)]
+@
+
+
 \section{Open Questions}
 
 Open questions need the prompt and a character limit, and they can optionally

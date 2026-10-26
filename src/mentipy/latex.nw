@@ -44,6 +44,7 @@ from mentipy.questions import (
     RankingQuestion,
     ScaleQuestion,
     WordCloudQuestion,
+    inline_code_spans,
     question_hash,
 )
 from mentipy.store import (
@@ -81,6 +82,7 @@ LATEX_ESCAPES = {
     "}": r"\}",
     "~": r"\textasciitilde{}",
     "^": r"\textasciicircum{}",
+    '"': r'\string"',
 }
 
 DEFAULT_LAYOUT = "slide"
@@ -94,7 +96,12 @@ ARTICLE_QR_WIDTH = "0.32\\textwidth"
 
 The escape helper is small, but it is what keeps ordinary poll questions from
 breaking TeX when they happen to contain an underscore, percent sign, or other
-special character.
+special character.  The double quote is not special in plain LaTeX, but
+babel makes it an active shorthand in Swedish and German, where [["a]]
+sets an umlaut, so a quoted word in a prompt would lose its quotes;
+[[\string"]] prints the character itself under any language.
+[[\textquotedbl]] would be the obvious spelling, but it fails outright
+under the default OT1 encoding.
 
 <<functions>>=
 def _escape_latex(text: str) -> str:
@@ -145,9 +152,46 @@ def _render_multiple_choice(question: MCQuestion) -> str:
         "Choose one or more:" if question.multi else "Choose exactly one:"
     )
     lines = ["\\emph{" + prompt + "}", "\\begin{itemize}"]
-    lines.extend(f"\\item {_escape_latex(option)}" for option in question.options)
+    lines.extend(
+        f"\\item {_render_inline(option)}" for option in question.options
+    )
     lines.append("\\end{itemize}")
     return "\n".join(lines)
+@
+
+The options go through the inline-code renderer, as the prompt does
+(\cref{sec:inline-code}): backtick pairs mark code, which becomes
+[[\texttt]], in the slide and the notes alike.  Escaping alone is not
+enough inside it.  Typewriter type does not stop LaTeX's ligatures,
+which under the T1 encoding turn [[--]] into a dash, [[@<<]] and [[>>]]
+into guillemets and [[,,]] into a low quote, while [[']] becomes a curly
+quote under any encoding and runs of spaces collapse.  A code piece
+therefore breaks every ligature with an empty group, spells the
+apostrophe as [[\textquotesingle]] and keeps each space with a control
+space, so the slide shows the characters the phone shows.
+
+<<constants>>=
+LATEX_CODE_ESCAPES = {
+    **LATEX_ESCAPES,
+    "-": "-{}",
+    "<": "<{}",
+    ">": ">{}",
+    ",": ",{}",
+    "'": r"\textquotesingle{}",
+    " ": "\\ ",
+}
+<<functions>>=
+def _escape_latex_code(text: str) -> str:
+    return "".join(LATEX_CODE_ESCAPES.get(char, char) for char in text)
+
+
+def _render_inline(text: str) -> str:
+    return "".join(
+        f"\\texttt{{{_escape_latex_code(piece)}}}"
+        if code
+        else _escape_latex(piece)
+        for piece, code in inline_code_spans(text)
+    )
 @
 
 Open-text and scale questions are both compact enough to render as description
@@ -232,10 +276,96 @@ def _render_ranking(question: RankingQuestion) -> str:
         prompt = f"Rank your top {question.top_n}:"
     lines = ["\\emph{" + prompt + "}", "\\begin{enumerate}"]
     lines.extend(
-        f"\\item {_escape_latex(option)}" for option in question.options
+        f"\\item {_render_inline(option)}" for option in question.options
     )
     lines.append("\\end{enumerate}")
     return "\n".join(lines)
+@
+
+<<test functions>>=
+def test_prompts_typeset_inline_code_on_slides_and_in_notes(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    common = dict(
+        store=Store(tmp_path / "mentipy.json", min_prefix=4),
+        base_url="http://example.test:8080",
+        qr_dir=DEFAULT_QR_DIR,
+        environment="",
+    )
+    prompt = "What does `len(a_b)` return?"
+
+    slide = open_text(prompt, layout="slide", **common)
+    notes = open_text(prompt, layout="article", show_url=False, **common)
+
+    assert "\\textbf{What does \\texttt{len(a\\_b)} return?}" in slide
+    assert notes == "What does \\texttt{len(a\\_b)} return?"
+@
+
+<<test functions>>=
+def test_slide_options_typeset_inline_code(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    common = dict(
+        store=Store(tmp_path / "mentipy.json", min_prefix=4),
+        base_url="http://example.test:8080",
+        qr_dir=DEFAULT_QR_DIR,
+        layout="slide",
+    )
+
+    choice = mc("Which is a list?", ["`x[1:]`", "`a_b` & co", "it`s"], **common)
+    ranked = ranking("Rank", ["`sorted`", "a loop"], **common)
+
+    assert "\\item \\texttt{x[1:]}" in choice
+    assert "\\item \\texttt{a\\_b} \\& co" in choice
+    assert "\\item it`s" in choice
+    assert "\\item \\texttt{sorted}" in ranked
+    assert "\\item a loop" in ranked
+@
+
+Code on the slide must come out as the characters it is, despite the
+ligatures and the collapsing spaces described with the renderer.
+
+<<test functions>>=
+def test_slide_code_spans_break_ligatures_and_keep_spaces(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    slide = mc(
+        "Which?",
+        ["`ls --all`", "`a @<< b >> c`", "`f(a,,b)`", "`'a'  x`"],
+        store=Store(tmp_path / "mentipy.json", min_prefix=4),
+        base_url="http://example.test:8080",
+        qr_dir=DEFAULT_QR_DIR,
+        layout="slide",
+    )
+
+    assert "\\texttt{ls\\ -{}-{}all}" in slide
+    assert "\\texttt{a\\ <{}<{}\\ b\\ >{}>{}\\ c}" in slide
+    assert "\\texttt{f(a,{},{}b)}" in slide
+    assert (
+        "\\texttt{\\textquotesingle{}a\\textquotesingle{}\\ \\ x}"
+        in slide
+    )
+@
+
+Babel makes [["]] an active shorthand in Swedish and German, where
+[["a]] sets an umlaut, so a string literal in a prompt would lose its
+quotes on the slide.  [[\string"]] prints the quote character itself,
+in code and in running text.
+
+<<test functions>>=
+def test_double_quotes_survive_babel_shorthands(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    slide = open_text(
+        'Is "abc" the same as `x = "abc"`?',
+        store=Store(tmp_path / "mentipy.json", min_prefix=4),
+        base_url="http://example.test:8080",
+        qr_dir=DEFAULT_QR_DIR,
+        layout="slide",
+    )
+
+    assert '\\string"abc\\string"' in slide
+    assert '\\texttt{x\\ =\\ \\string"abc\\string"}' in slide
 @
 
 Pin questions show their target on the slide so the projected content and
@@ -363,6 +493,8 @@ every outer layout receives the same semantics: either the content is wrapped in
 the caller's environment, or it falls back to a bold prompt followed by the
 question-specific instructions.  With [[transparent]] there is no body and no
 bold: the prompt alone, wrapped in the environment when one is configured.
+The prompt keeps its inline code (\cref{sec:inline-code}) in either
+case, as the options do.
 
 <<functions>>=
 def _render_question_content(
@@ -371,7 +503,7 @@ def _render_question_content(
     *,
     transparent: bool = False,
 ) -> str:
-    prompt = _escape_latex(question.text)
+    prompt = _render_inline(question.text)
 
     if transparent:
         if environment:
@@ -739,7 +871,12 @@ def mc(
     show_url: bool | None = None,
     layout: str = DEFAULT_LAYOUT,
 ) -> str:
-    """Return LaTeX for a multiple-choice question."""
+    """Return LaTeX for a multiple-choice question.
+
+    Backtick pairs in ``text`` and ``options`` mark inline code, as in
+    Markdown: ``"`len(xs)`"`` is set in typewriter type on the slide
+    and shown as code on the web pages.
+    """
 
     active_store = store or Store()
     return question(
@@ -955,7 +1092,8 @@ def ranking(
     ``top_n`` caps how many items a respondent ranks: ``None`` asks for a
     full ordering, an integer asks only for that many favourites.  Unlike
     the word-cloud visualisation knobs, ``top_n`` is part of the question's
-    canonical identity.
+    canonical identity.  Backtick pairs in ``text`` and ``options`` mark
+    inline code, as for ``mc``.
     """
 
     active_store = store or Store()

@@ -63,6 +63,7 @@ from mentipy.questions import (
     ScaleQuestion,
     WordCloudQuestion,
     bin_pins,
+    inline_code_spans,
     pin_heat_color,
     smooth_pin_grid,
     sniff_image_mime,
@@ -462,13 +463,20 @@ REFRESH_SECONDS = 2
 The helper functions collect the logic that would otherwise be repeated across
 multiple routes.  [[_page]] takes the refresh interval as a parameter because
 the lecturer's live tally and a respondent's waiting page want different
-polling rates; the default is the tally's.
+polling rates; the default is the tally's.  The heading is the prompt on
+most pages, so it shows the prompt's inline code
+(\cref{sec:inline-code}); the browser shows the title as plain text, so
+the title keeps the code's characters and drops only the backticks.
 
 <<functions>>=
 def is_local_address(address: str) -> bool:
     """Return whether ``address`` is considered localhost."""
 
     return address in {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
+
+
+def _plain_inline(text: str) -> str:
+    return "".join(piece for piece, _code in inline_code_spans(text))
 
 
 def _page(
@@ -486,8 +494,8 @@ def _page(
         )
 
     return PAGE_TEMPLATE.substitute(
-        title=escape(title),
-        heading=escape(heading),
+        title=escape(_plain_inline(title)),
+        heading=_render_inline(heading),
         refresh=refresh_tag,
         body=body,
     )
@@ -1329,7 +1337,7 @@ def _render_index(
         items.append(
             "<li>"
             f'<a href="/{entry["url_prefix"]}"><code>{entry["url_prefix"]}</code></a> '
-            f'{escape(entry["text"])} '
+            f'{_render_inline(entry["text"])} '
             f'(<a href="/{entry["url_prefix"]}/results">results</a>)'
             f"{status}"
             "</li>"
@@ -1400,12 +1408,14 @@ comes first so that a long program cannot push the question off the
 screen, and the context comes before the inputs so that the respondent
 reads the premises before answering.  One helper builds that opening
 for every form, so that no question kind can leave the context out or
-put it somewhere else.  The results page shows the same context under
-its heading (\cref{sec:results-page}).
+put it somewhere else, and so that the prompt's inline code
+(\cref{sec:inline-code}) is rendered the same way on every form.  The
+results page shows the same context under its heading
+(\cref{sec:results-page}).
 
 <<functions>>=
 def _render_prompt(question: Question, prefix: str) -> str:
-    return f"<p>{escape(question.text)}</p>" + _render_context(
+    return f"<p>{_render_inline(question.text)}</p>" + _render_context(
         question, prefix
     )
 @
@@ -1628,6 +1638,21 @@ def test_format_size_reads_like_a_file_manager():
     assert server_module._format_size(3_400_000) == "3.4 MB"
 @
 
+Prompts and options are the author's text with backtick pairs for
+inline code (\cref{sec:inline-code}), and every page that shows one
+shows it through one helper: the forms here, the page heading, the
+index, and the results pages' bar labels and mode callout.  Each piece
+is escaped before the code pieces are wrapped, so the only markup the
+author's text can produce is [[<code>]].
+
+<<functions>>=
+def _render_inline(text: str) -> str:
+    return "".join(
+        f"<code>{escape(piece)}</code>" if code else escape(piece)
+        for piece, code in inline_code_spans(text)
+    )
+@
+
 The form renderer mirrors the parser's input policy.  Open questions keep both
 the textarea and file picker visible because respondents may need a short note
 plus an uploaded artifact.  The [[accept]] list is only a browser hint, but it
@@ -1651,7 +1676,7 @@ def _render_form(store: Store, full_hash: str) -> str:
         input_type = "checkbox" if question.multi else "radio"
         inputs = "".join(
             f'<label><input type="{input_type}" name="value" value="{index}"> '
-            f"{escape(option)}</label>"
+            f"{_render_inline(option)}</label>"
             for index, option in enumerate(question.options)
         )
         return (
@@ -1737,7 +1762,7 @@ def _render_ranking_form(question: RankingQuestion, prefix: str) -> str:
         f'<div class="rank-row">'
         f'<select name="rank_{index}">'
         f'<option value="">—</option>{positions}</select> '
-        f"{escape(option)}</div>"
+        f"{_render_inline(option)}</div>"
         for index, option in enumerate(question.options)
     )
     if question.top_n is None:
@@ -1935,6 +1960,106 @@ def test_open_form_uses_multipart_and_renders_both_inputs(tmp_path):
     assert 'enctype="multipart/form-data"' in rendered
     assert 'name="value"' in rendered
     assert 'name="file"' in rendered
+@
+
+Options mark inline code with backticks, and the form shows it as
+code: escaped like any other text, so an option about [[<b>]] cannot
+inject markup through a code span.
+
+<<test functions>>=
+def test_forms_show_inline_code_in_options(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    mc_hash = store.resolve(
+        store.register(
+            MCQuestion("Pick", ("`x[1:]`", "`<b>` tag", "it`s", "`x` < `y` & z"))
+        )
+    )
+    ranking_hash = store.resolve(
+        store.register(RankingQuestion("Rank", ("`sorted`", "a loop")))
+    )
+
+    mc_form = server_module._render_form(store, mc_hash)
+    ranking_form = server_module._render_form(store, ranking_hash)
+
+    assert "<code>x[1:]</code></label>" in mc_form
+    assert "<code>&lt;b&gt;</code> tag</label>" in mc_form
+    assert "it`s</label>" in mc_form
+    assert "<code>x</code> &lt; <code>y</code> &amp; z</label>" in mc_form
+    assert "<code>sorted</code></div>" in ranking_form
+@
+
+Prompts follow the same rule wherever a page shows them: the form,
+the page heading, the lecturer's index and the list of candidates for
+an ambiguous prefix.  The browser tab's title cannot hold markup, so it
+shows the prompt without the backticks.
+
+<<test functions>>=
+PROMPT_KINDS = [
+    lambda text: MCQuestion(text, ("A", "B")),
+    lambda text: OpenQuestion(text),
+    lambda text: ScaleQuestion(text),
+    lambda text: WordCloudQuestion(text),
+    lambda text: RankingQuestion(text, ("A", "B")),
+    lambda text: PinImageQuestion(
+        text, image_sha256="c" * 64, image_mime="image/png", image_path="a.png"
+    ),
+    lambda text: PinTextQuestion(text, "total =+ x"),
+]
+
+
+@pytest.mark.parametrize("kind", PROMPT_KINDS)
+def test_every_form_shows_inline_code_in_its_prompt(tmp_path, kind):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(kind("Is `<b>` bold?")))
+
+    rendered = server_module._render_form(store, full_hash)
+
+    assert "<p>Is <code>&lt;b&gt;</code> bold?</p>" in rendered
+
+
+def test_pages_show_inline_code_in_prompts(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Is `<b>` bold?", ("Yes", "No")))
+    shown = "Is <code>&lt;b&gt;</code> bold?"
+
+    with _running_server(store) as port:
+        _form, form_body = _request(port, "GET", f"/{prefix}")
+        _results, results_body = _request(port, "GET", f"/{prefix}/results")
+        _index, index_body = _request(port, "GET", "/")
+
+    assert f"<p>{shown}</p>" in form_body
+    assert f"<h1>{shown}</h1>" in form_body
+    assert "<title>Is &lt;b&gt; bold?</title>" in form_body
+    assert f"<h1>{shown}</h1>" in results_body
+    assert "<title>Results for Is &lt;b&gt; bold?</title>" in results_body
+    assert f"{shown} (<a" in index_body
+@
+
+The results pages label the bars with the same options, so they show
+the same code: the multiple-choice chart and its mode callout, and the
+ranking chart.
+
+<<test functions>>=
+def test_results_show_inline_code_in_options(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    mc_hash = store.resolve(
+        store.register(MCQuestion("Pick", ("`x[1:]`", "`<b>`")))
+    )
+    ranking_hash = store.resolve(
+        store.register(RankingQuestion("Rank", ("`sorted`", "a loop")))
+    )
+    store.record(mc_hash, 0)
+    store.record(ranking_hash, [0, 1])
+
+    mc_results = server_module._render_results(store, mc_hash)
+    ranking_results = server_module._render_results(store, ranking_hash)
+
+    assert "<strong><code>x[1:]</code></strong>" in mc_results
+    assert '<span class="bar-label"><code>x[1:]</code></span>' in mc_results
+    assert '<span class="bar-label"><code>&lt;b&gt;</code></span>' in mc_results
+    assert '<span class="bar-label"><code>sorted</code></span>' in (
+        ranking_results
+    )
 @
 
 The ranking form gives each option its own position dropdown.  We pin the
@@ -2271,7 +2396,10 @@ def test_window_filter_marks_only_the_current_selection():
 
 The histogram is one CSS-only bar per category.  Each row carries the
 label, a track that fills proportionally to the count, and the count
-itself with its share as a percentage.  Inline [[width:]] styles avoid
+itself with its share as a percentage.  The labels go through the
+option renderer, so a multiple-choice option shows its inline code; the
+scale's numeric labels have no backticks and come out unchanged.
+Inline [[width:]] styles avoid
 inventing a JavaScript charting layer for what is fundamentally a
 single linear scale.
 
@@ -2285,7 +2413,7 @@ def _render_bar_chart(
     for label, count, percentage in zip(labels, counts, percentages):
         rows.append(
             f'<div class="bar-row">'
-            f'<span class="bar-label">{escape(str(label))}</span>'
+            f'<span class="bar-label">{_render_inline(str(label))}</span>'
             f'<span class="bar-bar">'
             f'<span class="bar-fill" '
             f'style="width:{percentage:.1f}%"></span>'
@@ -2328,7 +2456,7 @@ def _render_mc_stats(
     percentage = summary["percentages"][mode_index]
     return (
         f'<p class="mode-callout">'
-        f'Mode: <strong>{escape(label)}</strong> '
+        f'Mode: <strong>{_render_inline(label)}</strong> '
         f'({percentage:.0f}%)'
         f'</p>'
     )
@@ -3343,7 +3471,7 @@ def _render_ranking_stats(
         rows.append(
             f'<div class="bar-row">'
             f'<span class="bar-label">'
-            f'{escape(question.options[index])}</span>'
+            f'{_render_inline(question.options[index])}</span>'
             f'<span class="bar-bar">'
             f'<span class="bar-fill" style="width:{width:.1f}%"></span>'
             f'</span>'
@@ -4477,7 +4605,7 @@ def _resolve(self, prefix: str) -> str | None:
         items = "".join(
             "<li>"
             f'<a href="/{candidate["url_prefix"]}"><code>{candidate["url_prefix"]}</code></a> '
-            f'{escape(candidate["text"])}'
+            f'{_render_inline(candidate["text"])}'
             "</li>"
             for candidate in matches
         )
@@ -7220,7 +7348,7 @@ so the user can pick the intended poll.
 def test_ambiguous_prefix_returns_multiple_choices(tmp_path, monkeypatch):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     hashes = {
-        "first": "abcd" + "1" * 60,
+        "`first`": "abcd" + "1" * 60,
         "second": "abce" + "2" * 60,
     }
 
@@ -7229,7 +7357,7 @@ def test_ambiguous_prefix_returns_multiple_choices(tmp_path, monkeypatch):
         lambda question: hashes[question.text],
     )
 
-    first_prefix = store.register(OpenQuestion("first"))
+    first_prefix = store.register(OpenQuestion("`first`"))
     second_prefix = store.register(OpenQuestion("second"))
     server = create_server(store, host="127.0.0.1", port=0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -7245,6 +7373,7 @@ def test_ambiguous_prefix_returns_multiple_choices(tmp_path, monkeypatch):
     assert response.status == 300
     assert first_prefix in body
     assert second_prefix in body
+    assert "<code>first</code>" in body
 @
 
 <<test [[server.py]]>>=
