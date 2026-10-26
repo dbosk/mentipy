@@ -1924,11 +1924,10 @@ question reused from an earlier lecture or an earlier year shares its
 canonical hash and its answer pool, and the room should see this
 lecture's votes rather than every vote ever cast.  That holds for the
 lecturer and the respondents alike, so the projected tally and a
-respondent's own view agree.  The lecturer's two-second refresh reloads
-the URL verbatim, so a page opened without a window stays on the last
-hour, and the filter form switches to \enquote{All time} when the
-lecturer wants the history.  The JSON export is for analysis after the
-fact, so it keeps the store's own default of everything.
+respondent's own view agree.  The filter form switches to
+\enquote{All time} when the lecturer wants the history.  The JSON
+export is for analysis after the fact, so it keeps the store's own
+default of everything.
 
 <<constants>>=
 RESULTS_PAGE_WINDOW = "hour"
@@ -1938,6 +1937,22 @@ def _parse_window(query_string: str, *, default: str = "all") -> str:
     if candidate in {"hour", "day", "all"}:
         return candidate
     return default
+@
+
+A window the lecturer picked must survive the lecturer's own steps
+through the deck: Previous, Next, Skip and Reopen all lead to another
+results page, which would otherwise fall back to the last hour and hide
+the older votes the lecturer asked to see.  Those controls therefore
+carry the window as a query string, and only when it differs from the
+default, so the everyday URLs stay as they were.  The parser has
+already reduced the window to one of three fixed words, so it needs no
+quoting.
+
+<<functions>>=
+def _window_query(window: str) -> str:
+    if window == RESULTS_PAGE_WINDOW:
+        return ""
+    return f"?window={window}"
 @
 
 <<test functions>>=
@@ -2723,13 +2738,17 @@ whenever there is an earlier question in the current registration order.
 
 <<functions>>=
 def _render_prev_link(
-    store: Store, full_hash: str, *, results: bool = False
+    store: Store,
+    full_hash: str,
+    *,
+    results: bool = False,
+    window: str = RESULTS_PAGE_WINDOW,
 ) -> str:
     prev_hash = store.prev_question(full_hash)
     if prev_hash is None:
         return ""
     prev_prefix = store.metadata(prev_hash)["url_prefix"]
-    suffix = "/results" if results else ""
+    suffix = f"/results{_window_query(window)}" if results else ""
     return (
         f'<a class="prev-link" href="/{prev_prefix}{suffix}">'
         f"← Previous</a>"
@@ -2753,7 +2772,11 @@ render time would be wrong whenever the lecturer skips ahead.
 
 <<functions>>=
 def _render_next_link(
-    store: Store, full_hash: str, *, results: bool = False
+    store: Store,
+    full_hash: str,
+    *,
+    results: bool = False,
+    window: str = RESULTS_PAGE_WINDOW,
 ) -> str:
     next_hash = store.next_question(full_hash)
     if next_hash is None:
@@ -2763,7 +2786,7 @@ def _render_next_link(
         return ""
     if results:
         next_prefix = store.metadata(next_hash)["url_prefix"]
-        href = f"/{next_prefix}/results"
+        href = f"/{next_prefix}/results{_window_query(window)}"
     else:
         prefix = store.metadata(full_hash)["url_prefix"]
         href = f"/{prefix}/next"
@@ -2787,10 +2810,13 @@ button, and the joined corners are squared only when Next follows; on the
 last question Skip stands alone with all four corners rounded.
 
 <<functions>>=
-def _render_skip_form(store: Store, full_hash: str) -> str:
+def _render_skip_form(
+    store: Store, full_hash: str, *, window: str = RESULTS_PAGE_WINDOW
+) -> str:
     prefix = store.metadata(full_hash)["url_prefix"]
+    action = f"/{prefix}/skip{_window_query(window)}"
     return (
-        f'<form class="skip-form" method="post" action="/{prefix}/skip">'
+        f'<form class="skip-form" method="post" action="{action}">'
         f'<button class="skip-button" type="submit">Skip</button>'
         f"</form>"
     )
@@ -2804,11 +2830,21 @@ results pages.
 
 <<functions>>=
 def _render_question_nav(
-    store: Store, full_hash: str, *, results: bool = False
+    store: Store,
+    full_hash: str,
+    *,
+    results: bool = False,
+    window: str = RESULTS_PAGE_WINDOW,
 ) -> str:
-    prev_link = _render_prev_link(store, full_hash, results=results)
-    skip = _render_skip_form(store, full_hash) if results else ""
-    next_link = _render_next_link(store, full_hash, results=results)
+    prev_link = _render_prev_link(
+        store, full_hash, results=results, window=window
+    )
+    skip = (
+        _render_skip_form(store, full_hash, window=window) if results else ""
+    )
+    next_link = _render_next_link(
+        store, full_hash, results=results, window=window
+    )
     if not prev_link and not skip and not next_link:
         return ""
     return f'<nav class="question-nav">{prev_link}{skip}{next_link}</nav>'
@@ -2986,6 +3022,33 @@ def test_render_question_nav_offers_skip_only_to_the_lecturer(tmp_path):
     assert "skip" not in respondent
     assert f'action="/{third_prefix}/skip"' in last
     assert "Next →" not in last
+@
+
+The lecturer who picks another window, say \enquote{All time} to
+compare with last year, keeps it while stepping through the deck:
+Previous, Next and Skip carry it along.  The default window leaves the
+URLs as they were.
+
+<<test functions>>=
+
+def test_lecturer_nav_carries_a_chosen_window(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first_prefix = store.register(OpenQuestion("Q1"))
+    second_prefix = store.register(OpenQuestion("Q2"))
+    third_prefix = store.register(OpenQuestion("Q3"))
+    second_hash = store.resolve(second_prefix)
+
+    chosen = server_module._render_question_nav(
+        store, second_hash, results=True, window="all"
+    )
+    default = server_module._render_question_nav(
+        store, second_hash, results=True, window="hour"
+    )
+
+    assert f'href="/{first_prefix}/results?window=all"' in chosen
+    assert f'href="/{third_prefix}/results?window=all"' in chosen
+    assert f'action="/{second_prefix}/skip?window=all"' in chosen
+    assert "window=" not in default
 @
 
 \subsection{Dispatching by question type}
@@ -3231,7 +3294,7 @@ def _render_results(
     store: Store,
     full_hash: str,
     *,
-    window: str = "all",
+    window: str = RESULTS_PAGE_WINDOW,
     admin: bool = False,
     allow_images: bool = False,
     heatmap_bins: int = DEFAULT_HEATMAP_BINS,
@@ -3285,7 +3348,9 @@ def _render_results(
             )
         )
 
-    parts.append(_render_question_nav(store, full_hash, results=admin))
+    parts.append(
+        _render_question_nav(store, full_hash, results=admin, window=window)
+    )
 
     return "".join(parts)
 
@@ -4345,14 +4410,16 @@ def _handle_question_get(self, segments: list[str], query: str):
             self._deny_admin("Results pages are")
             return
 
+        window = _parse_window(query, default=RESULTS_PAGE_WINDOW)
         banner = ""
         if self._admin_allowed():
             progress.open(full_hash)
             if progress.is_skipped(full_hash):
-                banner = _render_skipped_banner(store, full_hash)
+                banner = _render_skipped_banner(
+                    store, full_hash, window=window
+                )
 
         title = store.metadata(full_hash)["text"]
-        window = _parse_window(query, default=RESULTS_PAGE_WINDOW)
         self._send(
             HTTPStatus.OK,
             _page(
@@ -4622,7 +4689,9 @@ next_hash = store.next_question(full_hash)
 if next_hash is None:
     self._redirect("/")
     return
-self._redirect(f"/{store.metadata(next_hash)['url_prefix']}/results")
+window = _parse_window(parsed.query, default=RESULTS_PAGE_WINDOW)
+next_prefix = store.metadata(next_hash)["url_prefix"]
+self._redirect(f"/{next_prefix}/results{_window_query(window)}")
 return
 @
 
@@ -4635,12 +4704,15 @@ must happen once, on purpose.  The banner sits above the tally so the
 lecturer cannot miss that the room is not answering this question.
 
 <<functions>>=
-def _render_skipped_banner(store: Store, full_hash: str) -> str:
+def _render_skipped_banner(
+    store: Store, full_hash: str, *, window: str = RESULTS_PAGE_WINDOW
+) -> str:
     prefix = store.metadata(full_hash)["url_prefix"]
+    action = f"/{prefix}/reopen{_window_query(window)}"
     return (
         '<div class="skipped-banner">'
         "<p>Skipped: this question is locked for the room.</p>"
-        f'<form method="post" action="/{prefix}/reopen">'
+        f'<form method="post" action="{action}">'
         '<button class="reopen-button" type="submit">Reopen</button>'
         "</form></div>"
     )
@@ -4657,7 +4729,9 @@ full_hash = self._resolve(segments[0])
 if full_hash is None:
     return
 progress.reopen(full_hash)
-self._redirect(f"/{store.metadata(full_hash)['url_prefix']}/results")
+window = _parse_window(parsed.query, default=RESULTS_PAGE_WINDOW)
+prefix = store.metadata(full_hash)["url_prefix"]
+self._redirect(f"/{prefix}/results{_window_query(window)}")
 return
 @
 
@@ -5698,6 +5772,27 @@ skipped and offer Reopen.  Reopening opens it for the room and makes it
 active again.
 
 <<test functions>>=
+def test_skip_and_reopen_keep_the_chosen_window(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first = store.register(MCQuestion("Q1", ("A", "B")))
+    second = store.register(MCQuestion("Q2", ("A", "B")))
+
+    with _running_server(store) as port:
+        _response, chosen = _request(port, "GET", f"/{first}/results?window=all")
+        skip, _body = _request(port, "POST", f"/{first}/skip?window=all")
+        _response, skipped = _request(port, "GET", f"/{first}/results?window=day")
+        reopen, _body = _request(port, "POST", f"/{first}/reopen?window=day")
+        _request(port, "POST", f"/{first}/skip")
+        plain, _body = _request(port, "POST", f"/{first}/reopen")
+
+    assert f'href="/{second}/results?window=all"' in chosen
+    assert f'action="/{first}/skip?window=all"' in chosen
+    assert skip.getheader("Location") == f"/{second}/results?window=all"
+    assert f'action="/{first}/reopen?window=day"' in skipped
+    assert reopen.getheader("Location") == f"/{first}/results?window=day"
+    assert plain.getheader("Location") == f"/{first}/results"
+
+
 def test_skip_survives_a_refreshing_tab_until_reopened(tmp_path):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     first = store.register(MCQuestion("Q1", ("A", "B")))
@@ -6348,12 +6443,9 @@ def test_results_page_window_query_filters_recent_only(tmp_path):
     assert 'value="all" selected' in all_time
 @
 
-A question reused from an earlier lecture, or from last year, shares its
-canonical hash and so its answer pool.  The results page therefore
-opens on the last hour, for the lecturer and the respondents alike: the
-room sees this lecture's votes, not every vote ever cast.  The JSON
-export is for analysis, not for the room, so it keeps everything unless
-asked otherwise.
+With an answer two hours old, the results page without a window shows
+only the recent answer, to the lecturer and to a respondent alike,
+while the JSON export still counts both.
 
 <<test functions>>=
 def test_results_page_defaults_to_the_last_hour_and_export_to_all(
