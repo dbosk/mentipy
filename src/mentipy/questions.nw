@@ -265,8 +265,15 @@ Anything else is literal text: the apostrophe-like backtick in
 [[it`s]], an empty pair, a final unpaired backtick, and LaTeX's
 doubled-backtick quotes, which a prompt written by a LaTeX author is
 likely to contain.  Code can therefore not contain a backtick, which no
-question in practice needs, and text that never meant to be code is
-not mangled.
+question in practice needs.
+
+Pairing runs from the left, so a stray backtick before a code span
+pairs with the span's opening backtick instead: in [[It`s `x`]] the
+code is [[s ]], and in LaTeX's single quotes [[`stack' or `queue']] it
+is [[stack' or ]].  The rule cannot tell an apostrophe from a delimiter
+without guessing, so text that has code in it should write
+apostrophes as [[']] and quotations with typographic quotes, ‘like
+this’, never with a backtick.
 
 The split is defined here, next to the options it reads, because two
 renderers need exactly the same reading of it: the slide typesets the

@@ -75,6 +75,7 @@ LATEX_ESCAPES = {
     "}": r"\}",
     "~": r"\textasciitilde{}",
     "^": r"\textasciicircum{}",
+    '"': r'\string"',
 }
 
 DEFAULT_LAYOUT = "slide"
@@ -88,7 +89,12 @@ ARTICLE_QR_WIDTH = "0.32\\textwidth"
 
 The escape helper is small, but it is what keeps ordinary poll questions from
 breaking TeX when they happen to contain an underscore, percent sign, or other
-special character.
+special character.  The double quote is not special in plain LaTeX, but
+babel makes it an active shorthand in Swedish and German, where [["a]]
+sets an umlaut, so a quoted word in a prompt would lose its quotes;
+[[\string"]] prints the character itself under any language.
+[[\textquotedbl]] would be the obvious spelling, but it fails outright
+under the default OT1 encoding.
 
 <<functions>>=
 def _escape_latex(text: str) -> str:
@@ -309,11 +315,8 @@ def test_slide_options_typeset_inline_code(tmp_path, monkeypatch):
     assert "\\item a loop" in ranked
 @
 
-Typewriter type does not stop LaTeX's ligatures: under the T1 font
-encoding, which decks commonly load, [[--]] in [[\texttt]] still sets a
-dash, [[@<<]] a guillemet, [[,,]] a low quote, and [['a']] curly quotes,
-and runs of spaces collapse.  Code must come out as the characters it
-is.
+Code on the slide must come out as the characters it is, despite the
+ligatures and the collapsing spaces described with the renderer.
 
 <<test functions>>=
 def test_slide_code_spans_break_ligatures_and_keep_spaces(
@@ -336,6 +339,26 @@ def test_slide_code_spans_break_ligatures_and_keep_spaces(
         "\\texttt{\\textquotesingle{}a\\textquotesingle{}\\ \\ x}"
         in slide
     )
+@
+
+Babel makes [["]] an active shorthand in Swedish and German, where
+[["a]] sets an umlaut, so a string literal in a prompt would lose its
+quotes on the slide.  [[\string"]] prints the quote character itself,
+in code and in running text.
+
+<<test functions>>=
+def test_double_quotes_survive_babel_shorthands(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    slide = open_text(
+        'Is "abc" the same as `x = "abc"`?',
+        store=Store(tmp_path / "mentipy.json", min_prefix=4),
+        base_url="http://example.test:8080",
+        qr_dir=DEFAULT_QR_DIR,
+        layout="slide",
+    )
+
+    assert '\\string"abc\\string"' in slide
+    assert '\\texttt{x\\ =\\ \\string"abc\\string"}' in slide
 @
 
 Pin questions show their target on the slide so the projected content and

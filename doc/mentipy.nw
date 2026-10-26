@@ -285,7 +285,9 @@ Code in a prompt or an option is marked with a pair of backticks, as in
 Markdown.  The slide and the notes set it in typewriter type, and the
 answer and results pages show it as code.  A backtick that no later
 backtick closes stays an ordinary character, and so do LaTeX's
-doubled-backtick quotes.  The same holds for every question kind's
+doubled-backtick quotes.  A single backtick used as an apostrophe or an
+opening quote does pair with the next code span, though, so text with
+code in it should use [[']] and typographic quotes, ‘like this’.  The same holds for every question kind's
 prompt and for ranking options.
 
 \begin{pyblock}

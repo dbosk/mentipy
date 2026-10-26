@@ -1734,6 +1734,29 @@ an ambiguous prefix.  The browser tab's title cannot hold markup, so it
 shows the prompt without the backticks.
 
 <<test functions>>=
+PROMPT_KINDS = [
+    lambda text: MCQuestion(text, ("A", "B")),
+    lambda text: OpenQuestion(text),
+    lambda text: ScaleQuestion(text),
+    lambda text: WordCloudQuestion(text),
+    lambda text: RankingQuestion(text, ("A", "B")),
+    lambda text: PinImageQuestion(
+        text, image_sha256="c" * 64, image_mime="image/png", image_path="a.png"
+    ),
+    lambda text: PinTextQuestion(text, "total =+ x"),
+]
+
+
+@pytest.mark.parametrize("kind", PROMPT_KINDS)
+def test_every_form_shows_inline_code_in_its_prompt(tmp_path, kind):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(kind("Is `<b>` bold?")))
+
+    rendered = server_module._render_form(store, full_hash)
+
+    assert "<p>Is <code>&lt;b&gt;</code> bold?</p>" in rendered
+
+
 def test_pages_show_inline_code_in_prompts(tmp_path):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(MCQuestion("Is `<b>` bold?", ("Yes", "No")))
