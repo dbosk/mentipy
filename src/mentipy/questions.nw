@@ -121,8 +121,11 @@ key as store-owned metadata during refresh --- in particular, a
 [[results]] override that is later removed from the slide source must
 be able to revert to the deferring [[None]] on the next recompile.
 
-The context is written even when it is empty for the same reason:
-deleting the context from a slide must clear it from the store.
+The context is written even when it is empty, so that every stored
+entry has the same shape as the flags give it.  Deleting the context
+from a slide clears it either way: the store's refresh rebuilds the old
+entry and treats only the keys that rebuild does not produce as
+store-owned metadata.
 
 The default [[canonical_dict]] is the persistence shape minus the
 shared flags and the context, which is the right identity for question types whose
@@ -2741,7 +2744,7 @@ def test_question_from_dict_round_trips_the_context(factory):
 
 
 @pytest.mark.parametrize("factory", QUESTION_FACTORIES)
-def test_question_from_dict_reads_a_missing_context_as_none(factory):
+def test_question_from_dict_reads_a_missing_context_as_empty(factory):
     data = factory(context=SAMPLE_CONTEXT).to_dict()
     del data["context"]
     assert question_from_dict(data).context == ()

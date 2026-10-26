@@ -1037,6 +1037,11 @@ The context is not part of the question's identity, unlike a pin-text
 target.  Reformatting the program, or renaming a variable in it, keeps
 the question's URL, its printed QR code and the answers it has already
 collected; the next compile simply updates what the answer page shows.
+The flip side is that the prompt alone tells questions apart: two
+\enquote{What is printed?} questions with different programs in their
+context are one question with one pool of answers.  Mentipy warns when
+one compile registers the same prompt with two different contexts; give
+such questions prompts of their own.
 
 What belongs in the context is the premises and nothing more.  A run of
 the program the question asks about, a file that run produces, or the

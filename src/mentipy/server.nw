@@ -294,7 +294,7 @@ pre code.highlight {
   font-size: 0.85em;
   margin: 0 0 0.25rem;
 }
-.context-item p {
+.context-prose {
   white-space: pre-line;
 }
 .context-download {
@@ -1444,6 +1444,8 @@ def _render_context_item(
             f"Download {escape(item.filename)} "
             f"({_format_size(item.size)})</a>"
         )
+    elif not item.language and not item.html:
+        body = f'<p class="context-prose">{escape(item.text)}</p>'
     else:
         body = _render_text_body(item.text, item.language, item.html)
     return f'<figure class="context-item">{caption}{body}</figure>'
@@ -1460,11 +1462,16 @@ names it does not know, in which case we fall back to an escaped
 [[<pre>]] so that unknown languages still render their text safely.
 This fallback also covers a [[latex]] snippet whose registration ran
 without pandoc: Pygments knows a [[latex]] lexer, so respondents see
-highlighted source rather than nothing.  Prose keeps its line breaks
-through the style sheet ([[white-space: pre-line]] on context prose)
-rather than through [[<br>]] tags, which leaves a pin target's prose
-laid out exactly as before, so pins already placed on it keep their
-positions.
+highlighted source rather than nothing.
+
+Context prose is the one exception, and the context renderer above
+handles it itself: it keeps the author's line breaks, through a
+[[context-prose]] class with [[white-space: pre-line]] rather than
+through [[<br>]] tags.  The class keeps the rule off two other kinds of
+paragraph.  Pandoc wraps its HTML at 72 columns, and if those newlines
+became line breaks every LaTeX snippet would break mid-sentence; and a
+pin target's prose must stay laid out exactly as before, so that pins
+already placed on it keep their positions.
 
 <<functions>>=
 def _render_text_body(
@@ -1568,6 +1575,7 @@ def test_render_context_shows_each_item_in_its_presentation():
                 r"\emph{x}", language="latex", html="<p><em>x</em></p>"
             ),
             ContextDownload("c" * 64, "sales.csv", 2048, label="Sales"),
+            ContextDownload("d" * 64, "<b>.csv", 10),
         ),
     )
 
@@ -1576,11 +1584,36 @@ def test_render_context_shows_each_item_in_its_presentation():
     assert "<figcaption>f.py</figcaption>" in rendered
     assert 'class="language-python highlight"' in rendered
     assert "<figcaption>&lt;Notes&gt;</figcaption>" in rendered
-    assert "<p>a &lt; b\nand c</p>" in rendered
+    assert '<p class="context-prose">a &lt; b\nand c</p>' in rendered
     assert "<p><em>x</em></p>" in rendered
+    assert "Download &lt;b&gt;.csv (10 bytes)" in rendered
     assert 'href="/abcd/context/3"' in rendered
     assert "Download sales.csv (2.0 kB)" in rendered
     assert server_module._render_context(MCQuestion("Q", ("A",)), "a") == ""
+@
+
+Only the author's prose keeps its line breaks.  Pandoc wraps its HTML
+at 72 columns, and those newlines are not the author's: if they became
+line breaks, every LaTeX snippet would break mid-sentence on the phone.
+So the [[pre-line]] rule must reach prose and nothing else.
+
+<<test functions>>=
+def test_only_context_prose_keeps_its_line_breaks():
+    question = MCQuestion(
+        "Pick one",
+        ("A", "B"),
+        context=(
+            ContextSnippet(
+                "x", language="latex", html="<p>A long\nsentence.</p>"
+            ),
+        ),
+    )
+
+    assert "<p>A long\nsentence.</p>" in server_module._render_context(
+        question, "abcd"
+    )
+    assert ".context-prose {\n  white-space: pre-line;" in STYLE_CSS
+    assert ".context-item p" not in STYLE_CSS
 @
 
 The size is what someone on a phone plan decides by, so it is rounded
@@ -4398,6 +4431,13 @@ skipped questions behave the same way.  [[moved_past]] holds only when
 the active question is in the deck, so the store has its prefix and the
 redirect target exists.
 
+Files are the exception, so their routes pass [[follow=False]] and get
+the waiting page instead.  The same suffix on another question names a
+different file: the pin image of another picture, or whatever happens
+to sit at the same position in another question's context.  A
+respondent who taps a download on a form the lecturer has since skipped
+would otherwise receive another question's data under its file name.
+
 The routes that reveal a question go through this resolver: the form,
 the pin image and the results page.  The thanks page and the answer
 [[POST]] deliberately do not.  Both can only be reached after the form
@@ -4409,7 +4449,9 @@ later, and the \enquote{Try again} link repeats the full request path,
 query string included, so a time-scoped results view keeps its window.
 
 <<mentipy handler prefix resolution>>=
-def _resolve_for_respondent(self, prefix: str) -> str | None:
+def _resolve_for_respondent(
+    self, prefix: str, *, follow: bool = True
+) -> str | None:
     full_hash = self._resolve(prefix)
     if full_hash is None or not lock or self._admin_allowed():
         return full_hash
@@ -4418,7 +4460,7 @@ def _resolve_for_respondent(self, prefix: str) -> str | None:
     if progress.is_open(full_hash, deck):
         return full_hash
 
-    if progress.moved_past(full_hash, deck):
+    if follow and progress.moved_past(full_hash, deck):
         parsed = urlparse(self.path)
         rest = [segment for segment in parsed.path.split("/") if segment]
         location = _active_location(store, progress, rest[1:], parsed.query)
@@ -4724,7 +4766,7 @@ classic disguised-content hole for anything that slips past the
 allowlist in the future.
 
 <<serve the registered pin image>>=
-full_hash = self._resolve_for_respondent(segments[0])
+full_hash = self._resolve_for_respondent(segments[0], follow=False)
 if full_hash is None:
     return
 question = store.question(full_hash)
@@ -4764,7 +4806,7 @@ than rendering it on the server's origin, and [[nosniff]] stops it from
 guessing a type other than the one guessed from the file name.
 
 <<serve a context download>>=
-full_hash = self._resolve_for_respondent(segments[0])
+full_hash = self._resolve_for_respondent(segments[0], follow=False)
 if full_hash is None:
     return
 item = _context_download(store.question(full_hash), segments[2])
@@ -5373,6 +5415,38 @@ def test_locked_question_gates_context_downloads(tmp_path):
     with _running_server(store, remote=True) as port:
         response, payload = _request_bytes(
             port, "GET", f"/{prefix}/context/1"
+        )
+
+    assert response.status == 200
+    assert b"Try again" in payload
+    assert SALES_CSV not in payload
+
+
+def test_skipped_question_does_not_hand_out_another_questions_file(
+    tmp_path,
+):
+    store, first = _download_store(tmp_path)
+    second = store.register(
+        MCQuestion(
+            "Pick again",
+            ("A", "B"),
+            context=(
+                ContextDownload(
+                    hashlib.sha256(SALES_CSV).hexdigest(), "other.csv", 1
+                ),
+                ContextDownload(
+                    hashlib.sha256(SALES_CSV).hexdigest(), "other.csv", 1
+                ),
+            ),
+        )
+    )
+    client = {"remote": False}
+
+    with _running_server(store, remote=client) as port:
+        _request(port, "GET", f"/{second}/results")
+        client["remote"] = True
+        response, payload = _request_bytes(
+            port, "GET", f"/{first}/context/1"
         )
 
     assert response.status == 200
