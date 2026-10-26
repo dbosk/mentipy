@@ -37,6 +37,7 @@ from mentipy.questions import (
     RankingQuestion,
     ScaleQuestion,
     WordCloudQuestion,
+    inline_code_spans,
     question_hash,
 )
 from mentipy.store import (
@@ -127,6 +128,20 @@ def _resolve_show_url(explicit: bool | None) -> bool:
 
 \section{Question body rendering}
 
+Options are the one place where the author's text carries markup:
+backtick pairs mark inline code (\cref{sec:inline-code}).  On the
+slide a code span becomes [[\texttt]], and both kinds of piece are
+escaped, so an underscore in an identifier stays an underscore inside
+the typewriter type too.
+
+<<functions>>=
+def _render_option(option: str) -> str:
+    return "".join(
+        f"\\texttt{{{_escape_latex(piece)}}}" if code else _escape_latex(piece)
+        for piece, code in inline_code_spans(option)
+    )
+@
+
 Each question kind needs slightly different explanatory text on the left-hand
 side of the slide.  Multiple-choice questions expose the largest difference:
 single choice and multi-select use the same stored model, but the prompt text
@@ -138,7 +153,7 @@ def _render_multiple_choice(question: MCQuestion) -> str:
         "Choose one or more:" if question.multi else "Choose exactly one:"
     )
     lines = ["\\emph{" + prompt + "}", "\\begin{itemize}"]
-    lines.extend(f"\\item {_escape_latex(option)}" for option in question.options)
+    lines.extend(f"\\item {_render_option(option)}" for option in question.options)
     lines.append("\\end{itemize}")
     return "\n".join(lines)
 @
@@ -225,10 +240,30 @@ def _render_ranking(question: RankingQuestion) -> str:
         prompt = f"Rank your top {question.top_n}:"
     lines = ["\\emph{" + prompt + "}", "\\begin{enumerate}"]
     lines.extend(
-        f"\\item {_escape_latex(option)}" for option in question.options
+        f"\\item {_render_option(option)}" for option in question.options
     )
     lines.append("\\end{enumerate}")
     return "\n".join(lines)
+@
+
+<<test functions>>=
+def test_slide_options_typeset_inline_code(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    common = dict(
+        store=Store(tmp_path / "mentipy.json", min_prefix=4),
+        base_url="http://example.test:8080",
+        qr_dir=DEFAULT_QR_DIR,
+        layout="slide",
+    )
+
+    choice = mc("Which is a list?", ["`x[1:]`", "`a_b` & co", "it`s"], **common)
+    ranked = ranking("Rank", ["`sorted`", "a loop"], **common)
+
+    assert "\\item \\texttt{x[1:]}" in choice
+    assert "\\item \\texttt{a\\_b} \\& co" in choice
+    assert "\\item it`s" in choice
+    assert "\\item \\texttt{sorted}" in ranked
+    assert "\\item a loop" in ranked
 @
 
 Pin questions show their target on the slide so the projected content and

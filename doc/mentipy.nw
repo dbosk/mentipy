@@ -281,6 +281,24 @@ Included in the document, that output compiles to:
   the same kind of fragment for inspection or redirection.
 }
 
+Options that are code mark it with a pair of backticks, as in Markdown.
+The slide sets the code in typewriter type and the answer and results
+pages show it as code; a lone backtick stays an ordinary character.  The same holds for ranking options.
+
+\begin{pyblock}
+print(
+    mc(
+        "Which call gives the number of items in the list xs?",
+        ["`len(xs)`", "`xs.size()`", "`xs.length`", "None of them"],
+        base_url="http://localhost:8080",
+        qr_dir="mentipy-obj",
+        layout="article+qr",
+    )
+)
+\end{pyblock}
+
+\begin{center}\printpythontex\end{center}
+
 \subsection{A Scale Poll}
 
 The same naming pattern holds for a scale question.  PythonTeX again calls the
