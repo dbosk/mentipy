@@ -1916,15 +1916,28 @@ out output---reads from top to bottom.
 
 The window arrives as a query-string parameter on [[/<prefix>/results]].
 We allow only the strings the store accepts; anything else collapses to
-[[\"all\"]] before it reaches the store, mirroring the store's own
-fallback so the layers stay consistent.
+the caller's default before it reaches the store.
 
+The default depends on who reads the result.  The results page is what
+the room sees, during a lecture, so it opens on the last hour: a
+question reused from an earlier lecture or an earlier year shares its
+canonical hash and its answer pool, and the room should see this
+lecture's votes rather than every vote ever cast.  That holds for the
+lecturer and the respondents alike, so the projected tally and a
+respondent's own view agree.  The lecturer's two-second refresh reloads
+the URL verbatim, so a page opened without a window stays on the last
+hour, and the filter form switches to \enquote{All time} when the
+lecturer wants the history.  The JSON export is for analysis after the
+fact, so it keeps the store's own default of everything.
+
+<<constants>>=
+RESULTS_PAGE_WINDOW = "hour"
 <<functions>>=
-def _parse_window(query_string: str) -> str:
-    candidate = parse_qs(query_string).get("window", ["all"])[0]
+def _parse_window(query_string: str, *, default: str = "all") -> str:
+    candidate = parse_qs(query_string).get("window", [default])[0]
     if candidate in {"hour", "day", "all"}:
         return candidate
-    return "all"
+    return default
 @
 
 <<test functions>>=
@@ -1934,6 +1947,9 @@ def test_parse_window_keeps_known_values_and_falls_back():
     assert server_module._parse_window("window=all") == "all"
     assert server_module._parse_window("") == "all"
     assert server_module._parse_window("window=garbage") == "all"
+    assert server_module._parse_window("", default="hour") == "hour"
+    assert server_module._parse_window("window=x", default="hour") == "hour"
+    assert server_module._parse_window("window=all", default="hour") == "all"
 @
 
 \subsection{The window filter form}
@@ -4336,7 +4352,7 @@ def _handle_question_get(self, segments: list[str], query: str):
                 banner = _render_skipped_banner(store, full_hash)
 
         title = store.metadata(full_hash)["text"]
-        window = _parse_window(query)
+        window = _parse_window(query, default=RESULTS_PAGE_WINDOW)
         self._send(
             HTTPStatus.OK,
             _page(
@@ -6301,7 +6317,7 @@ def test_results_page_includes_window_filter_form(tmp_path):
     assert 'value="hour"' in body
     assert 'value="day"' in body
     assert 'value="all"' in body
-    assert 'value="all" selected' in body
+    assert 'value="hour" selected' in body
 
 
 def test_results_page_window_query_filters_recent_only(tmp_path):
@@ -6330,6 +6346,44 @@ def test_results_page_window_query_filters_recent_only(tmp_path):
     assert "Total responses: <strong>2</strong>" in all_time
     assert 'value="hour" selected' in last_hour
     assert 'value="all" selected' in all_time
+@
+
+A question reused from an earlier lecture, or from last year, shares its
+canonical hash and so its answer pool.  The results page therefore
+opens on the last hour, for the lecturer and the respondents alike: the
+room sees this lecture's votes, not every vote ever cast.  The JSON
+export is for analysis, not for the room, so it keeps everything unless
+asked otherwise.
+
+<<test functions>>=
+def test_results_page_defaults_to_the_last_hour_and_export_to_all(
+    tmp_path,
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, 0)
+    store.record(full_hash, 1)
+
+    data = store._data()
+    aged = (
+        datetime.now(timezone.utc) - timedelta(hours=2)
+    ).isoformat().replace("+00:00", "Z")
+    data["answers"][full_hash][0]["ts"] = aged
+    store._write(data)
+
+    client = {"remote": False}
+    with _running_server(store, public_results=True, remote=client) as port:
+        _, lecturer = _request(port, "GET", f"/{prefix}/results")
+        client["remote"] = True
+        _, respondent = _request(port, "GET", f"/{prefix}/results")
+        client["remote"] = False
+        _, export = _request(port, "GET", f"/{prefix}/results.json")
+
+    for page in (lecturer, respondent):
+        assert "Total responses: <strong>1</strong>" in page
+        assert 'value="hour" selected' in page
+    assert json.loads(export)["total"] == 2
 @
 
 Scale results combine descriptive statistics with a histogram.  Exercising the
