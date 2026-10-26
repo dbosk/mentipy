@@ -298,6 +298,51 @@ pre code.highlight {
   margin-left: auto;
 }
 
+.skip-form {
+  margin: 0 0 0 auto;
+}
+.skip-form + .next-link {
+  margin-left: 0.5rem;
+}
+.skip-button {
+  background: #888;
+  border: none;
+  border-radius: 3px;
+  color: white;
+  cursor: pointer;
+  font: inherit;
+  padding: 0.5rem 1rem;
+}
+.skip-button:hover {
+  background: #666;
+}
+
+.skipped-banner {
+  align-items: center;
+  background: #fff3cd;
+  border-radius: 3px;
+  color: #7a5b00;
+  display: flex;
+  justify-content: space-between;
+  margin: 0 0 1rem;
+  padding: 0.5rem 1rem;
+}
+.skipped-banner p {
+  margin: 0;
+}
+.reopen-button {
+  background: #4a90d9;
+  border: none;
+  border-radius: 3px;
+  color: white;
+  cursor: pointer;
+  font: inherit;
+  padding: 0.5rem 1rem;
+}
+.reopen-button:hover {
+  background: #3a7dc0;
+}
+
 .status {
   border-radius: 3px;
   font-size: 0.85em;
@@ -307,6 +352,7 @@ pre code.highlight {
 .status-active { background: #4a90d9; color: white; }
 .status-open { background: #dfeee0; color: #1f5c2a; }
 .status-locked { background: #eee; color: #555; }
+.status-skipped { background: #fff3cd; color: #7a5b00; }
 
 .pin-wrap {
   display: inline-block;
@@ -2667,6 +2713,17 @@ The forward helper still honours [[question.next]], but it asks the store for
 the neighbour first.  That keeps stale hashes on the empty-output path instead
 of raising before we even know whether a link exists.
 
+The two audiences get different forward targets.  The lecturer's link goes
+straight to the next results page, because visiting it is how the lecturer
+moves the lecture on (\cref{sec:lecturer-paced-progression}).  The
+respondent's link goes to [[/<prefix>/next]] on the \emph{current}
+question, and the server picks the destination when it is clicked.  The
+link is rendered the moment the respondent submits, and at that point the
+lecturer is usually still on this question.  Whether the respondent should
+step to the next question or jump to wherever the lecture has got to
+depends on what the lecturer does in the meantime, so a target fixed at
+render time would be wrong whenever the lecturer skips ahead.
+
 <<functions>>=
 def _render_next_link(
     store: Store, full_hash: str, *, results: bool = False
@@ -2677,27 +2734,53 @@ def _render_next_link(
     question = store.question(full_hash)
     if not question.next:
         return ""
-    next_prefix = store.metadata(next_hash)["url_prefix"]
-    suffix = "/results" if results else ""
+    if results:
+        next_prefix = store.metadata(next_hash)["url_prefix"]
+        href = f"/{next_prefix}/results"
+    else:
+        prefix = store.metadata(full_hash)["url_prefix"]
+        href = f"/{prefix}/next"
+    return f'<a class="next-link" href="{href}">Next →</a>'
+@
+
+The lecturer's row has a third control between the two links: Skip.  The
+lecturer decides whether to skip a question while looking at its results
+page, and the page is already open by then.  Clicking Next would leave it
+open for the room, so Skip has to \emph{close} the current question and
+then move on (\cref{sec:lecturer-paced-progression} explains what closing
+means for the pacing).  Closing changes server state, so Skip is a
+[[POST]] form rather than a link.  The results page reloads itself every
+[[REFRESH_SECONDS]], and with a [[POST]] followed by a redirect neither
+that reload nor the back button can repeat the skip.  Skip is a lecturer
+control rather than part of the respondent's forward path, so it ignores
+[[question.next]] and is shown even on the last question.
+
+<<functions>>=
+def _render_skip_form(store: Store, full_hash: str) -> str:
+    prefix = store.metadata(full_hash)["url_prefix"]
     return (
-        f'<a class="next-link" href="/{next_prefix}{suffix}">'
-        f"Next →</a>"
+        f'<form class="skip-form" method="post" action="/{prefix}/skip">'
+        f'<button class="skip-button" type="submit">Skip</button>'
+        f"</form>"
     )
 @
 
-The wrapper emits one row when either side has something to show, and nothing
-at all when both helpers return the empty string.  Rendering the links in
+The wrapper emits one row when any control has something to show, and nothing
+at all when every helper returns the empty string.  Rendering the controls in
 source order pins the HTML to the same left-to-right convention the CSS uses.
+Skip appears only in the lecturer's row, that is, when the links target
+results pages.
 
 <<functions>>=
 def _render_question_nav(
     store: Store, full_hash: str, *, results: bool = False
 ) -> str:
     prev_link = _render_prev_link(store, full_hash, results=results)
+    skip = _render_skip_form(store, full_hash) if results else ""
     next_link = _render_next_link(store, full_hash, results=results)
-    if not prev_link and not next_link:
+    if not prev_link and not skip and not next_link:
         return ""
-    return f'<nav class="question-nav">{prev_link}{next_link}</nav>'
+    return f'<nav class="question-nav">{prev_link}{skip}{next_link}</nav>'
 @
 
 The previous-link helper mirrors the forward path except for the opt-out case:
@@ -2791,7 +2874,7 @@ def test_render_next_link_returns_empty_when_question_opts_out(tmp_path):
     assert server_module._render_next_link(store, first_hash) == ""
 
 
-def test_render_next_link_points_to_form_by_default(tmp_path):
+def test_render_next_link_defers_the_target_to_click_time(tmp_path):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     first_prefix = store.register(OpenQuestion("Q1"))
     second_prefix = store.register(OpenQuestion("Q2"))
@@ -2799,7 +2882,8 @@ def test_render_next_link_points_to_form_by_default(tmp_path):
 
     rendered = server_module._render_next_link(store, first_hash)
 
-    assert f'href="/{second_prefix}"' in rendered
+    assert f'href="/{first_prefix}/next"' in rendered
+    assert f'href="/{second_prefix}"' not in rendered
     assert "Next →" in rendered
 
 
@@ -2836,6 +2920,41 @@ def test_render_question_nav_wraps_links_in_book_order(tmp_path):
         'class="next-link"'
     )
     assert rendered.index("← Previous") < rendered.index("Next →")
+@
+
+Skip belongs to the lecturer alone.  The lecturer's row carries the form
+between the two links, posting to the \emph{current} question, and it
+stays even on the last question, where there is no Next.  The
+respondent's row never carries it.
+
+<<test functions>>=
+
+def test_render_question_nav_offers_skip_only_to_the_lecturer(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    store.register(OpenQuestion("Q1"))
+    second_prefix = store.register(OpenQuestion("Q2"))
+    third_prefix = store.register(OpenQuestion("Q3"))
+    second_hash = store.resolve(second_prefix)
+    third_hash = store.resolve(third_prefix)
+
+    lecturer = server_module._render_question_nav(
+        store, second_hash, results=True
+    )
+    respondent = server_module._render_question_nav(store, second_hash)
+    last = server_module._render_question_nav(
+        store, third_hash, results=True
+    )
+
+    assert f'action="/{second_prefix}/skip"' in lecturer
+    assert 'method="post"' in lecturer
+    assert (
+        lecturer.index("← Previous")
+        < lecturer.index("Skip")
+        < lecturer.index("Next →")
+    )
+    assert "skip" not in respondent
+    assert f'action="/{third_prefix}/skip"' in last
+    assert "Next →" not in last
 @
 
 \subsection{Dispatching by question type}
@@ -3061,10 +3180,15 @@ and dispatches to the per-type helpers.  The window filter sits at the
 top so the lecturer can rescope without scrolling; the total responses
 line follows because that is the first number every lecturer asks for;
 then come the type-specific stats and the visualization.  The optional
-[[is_local]] keyword lets the caller communicate whether the requester is
-the lecturer driving from localhost, which controls where the trailing
-navigation row points: localhost callers land on neighbouring results pages,
-everyone else on the corresponding forms.  The [[allow_images]] keyword is
+[[admin]] keyword lets the caller communicate whether the requester is
+the lecturer, which controls the trailing navigation row: the lecturer
+lands on neighbouring results pages and gets the Skip button, everyone else
+lands on the corresponding forms.  \enquote{The lecturer} is the same
+[[_admin_allowed()]] predicate that guards the results page itself, not
+the loopback address.  Behind an SSH tunnel every student looks local and
+would otherwise be shown a Skip button that refuses them, while a lecturer
+with the admin token on another device would get the respondent's row and
+could never open the next question from it.  The [[allow_images]] keyword is
 threaded straight through to the open-answer renderer so the image policy is
 decided once, by the caller that knows the deployment, rather than rediscovered
 deep in the rendering stack.  [[heatmap_bins]] follows the same route for the
@@ -3077,7 +3201,7 @@ def _render_results(
     full_hash: str,
     *,
     window: str = "all",
-    is_local: bool = False,
+    admin: bool = False,
     allow_images: bool = False,
     heatmap_bins: int = DEFAULT_HEATMAP_BINS,
 ) -> str:
@@ -3130,7 +3254,7 @@ def _render_results(
             )
         )
 
-    parts.append(_render_question_nav(store, full_hash, results=is_local))
+    parts.append(_render_question_nav(store, full_hash, results=admin))
 
     return "".join(parts)
 
@@ -3249,6 +3373,7 @@ def test_results_public_resolves_the_tri_state(
 @
 
 \subsection{Lecturer-paced progression}
+\label{sec:lecturer-paced-progression}
 
 Respondents can outrun the slides.  The \enquote{Next $\rightarrow$}
 link exists so nobody has to scan another QR code, but it also lets a
@@ -3284,6 +3409,29 @@ what [[/active]] redirects to, and it moves only on a \emph{new}
 opening.  A results tab left open on an earlier question keeps
 refreshing, and if every refresh counted, [[/active]] would flip between
 two questions twice a second.
+
+The lecturer can also take an opening back.  The decision to skip a
+question is made while looking at its results page, and by then the
+visit has opened it.  The Skip button on that page therefore
+\emph{closes} the question again before moving on.  Closing removes the
+question from the set as if it had never been opened, and
+[[/active]] falls back to the most recent opening that is still open.
+Without that fallback, skipping the last question of the lecture would
+leave [[/active]] pointing at a question nobody may see.
+
+A skip is also sticky.  Opening is driven by results-page requests, and
+those keep coming after the decision: a second window on the projector
+that still shows the skipped question refreshes every
+[[REFRESH_SECONDS]], and each refresh is an admin results request.  If a
+refresh could open the question again, the skip would be undone two
+seconds later and [[/active]] would jump back to it.  So the tracker
+remembers skipped questions and ignores openings of them.  Undoing a
+skip takes an explicit reopen, which the results page of a skipped
+question offers as a button; the skip and reopen routes sit next to the
+answer route below.  A
+skipped question is locked even inside a [[lock=False]] block, and so
+are the [[lock=False]] questions that follow it: the lecturer has
+decided against that part of the slide.
 
 The per-question [[lock]] flag relaxes the rule for questions that share
 a slide with their predecessor and have no QR code of their own.  A
@@ -3328,17 +3476,18 @@ def _deck_index(deck: list[dict[str, Any]], full_hash: str) -> int | None:
 class LectureProgress:
     """Track which questions the lecturer has opened this run.
 
-    ``open`` records an admin results view; ``is_open`` applies the
-    pacing rule to one question given the deck as the rows of
-    ``Store.all_questions()``; ``active_hash`` names the question
-    ``/active`` redirects to.  The tracker holds no store reference,
-    so it is shared safely between request threads.
+    ``open`` records an admin results view, ``close`` takes it back and
+    marks the question skipped, and ``reopen`` undoes a skip; ``is_open`` applies the pacing rule to one question given
+    the deck as the rows of ``Store.all_questions()``; ``active_hash``
+    names the question ``/active`` redirects to.  The tracker holds no
+    store reference, so it is shared safely between request threads.
     """
 
     def __init__(self):
         self._lock = threading.Lock()
         self._opened: dict[str, None] = {}
         self._active: str | None = None
+        self._skipped: set[str] = set()
 
     <<lecture progress methods>>
 @
@@ -3350,16 +3499,61 @@ what keeps a refreshing tab from moving the active question.
 def open(self, full_hash: str) -> bool:
     """Record that the lecturer opened ``full_hash``.
 
-    Returns ``True`` on a new opening and ``False`` on a repeat; only
-    a new opening moves the active question.
+    Returns ``True`` on a new opening and ``False`` on a repeat or a
+    skipped question; only a new opening moves the active question.
     """
 
     with self._lock:
-        if full_hash in self._opened:
+        if full_hash in self._opened or full_hash in self._skipped:
             return False
         self._opened[full_hash] = None
         self._active = full_hash
         return True
+@
+
+Closing relies on the opened set being an insertion-ordered [[dict]]
+rather than a [[set]].  A question is inserted only on a new opening,
+which is also the only time [[_active]] moves, so the active question is
+always the last key.  After a removal the new last key is the most
+recent opening that is still open, and recomputing [[_active]] from it
+gives the fallback without a separate history.  The question is marked
+skipped whether or not it was open, so a skip from a page that never
+opened it is just as sticky.
+
+<<lecture progress methods>>=
+def close(self, full_hash: str) -> bool:
+    """Skip ``full_hash``: take back its opening and keep it closed.
+
+    Returns ``True`` if the question was open.  The active question
+    falls back to the most recent opening still open, or ``None``.
+    """
+
+    with self._lock:
+        self._skipped.add(full_hash)
+        if full_hash not in self._opened:
+            return False
+        del self._opened[full_hash]
+        self._active = next(reversed(self._opened), None)
+        return True
+@
+
+Reopening forgets the skip and then opens the question like a first
+visit would, so it becomes active again.
+
+<<lecture progress methods>>=
+def reopen(self, full_hash: str) -> bool:
+    """Undo a skip of ``full_hash`` and open it."""
+
+    with self._lock:
+        self._skipped.discard(full_hash)
+    return self.open(full_hash)
+
+
+def is_skipped(self, full_hash: str) -> bool:
+    """Return whether the lecturer skipped ``full_hash``."""
+
+    with self._lock:
+        return full_hash in self._skipped
 @
 
 The rule walks backwards from the requested question.  Each step is
@@ -3369,8 +3563,9 @@ whose fate is its predecessor's (step back).  Reaching the front of the
 sequence on a [[lock=False]] question means nothing was waiting on the
 way, so it is open.  A hash that is not in the deck at all --- the store
 was replaced under a running server --- is open only if the lecturer
-opened it.  The opened set is copied under the lock so the walk itself
-runs without holding it.
+opened it.  A skipped question stops the walk as locked even when its
+[[lock]] flag would defer to its predecessor.  Both sets are copied
+under the lock so the walk itself runs without holding it.
 
 <<lecture progress methods>>=
 def is_open(self, full_hash: str, deck: list[dict[str, Any]]) -> bool:
@@ -3378,11 +3573,14 @@ def is_open(self, full_hash: str, deck: list[dict[str, Any]]) -> bool:
 
     with self._lock:
         opened = set(self._opened)
+        skipped = set(self._skipped)
     index = _deck_index(deck, full_hash)
     if index is None:
         return full_hash in opened
     while True:
         entry = deck[index]
+        if entry["hash"] in skipped:
+            return False
         if entry["hash"] in opened:
             return True
         if entry.get("lock", True):
@@ -3428,12 +3626,16 @@ def moved_past(self, full_hash: str, deck: list[dict[str, Any]]) -> bool:
 The admin index labels every question with the same rule, so the
 lecturer can see at a glance why a [[lock=False]] block is or is not
 open and which question [[/active]] points at.  A fresh server shows
-every question as locked.
+every question as locked.  Skipped questions get their own label: they
+are locked too, but unlike the others they will not open when the
+lecturer visits them.
 
 <<lecture progress methods>>=
 def status(self, full_hash: str, deck: list[dict[str, Any]]) -> str:
-    """Return ``active``, ``open`` or ``locked`` for ``full_hash``."""
+    """Return ``active``, ``open``, ``skipped`` or ``locked``."""
 
+    if self.is_skipped(full_hash):
+        return "skipped"
     if full_hash == self.active_hash():
         return "active"
     if self.is_open(full_hash, deck):
@@ -3542,6 +3744,76 @@ def test_lecture_progress_active_follows_new_openings_only():
     assert progress.active_hash() == "q3"
 @
 
+A skip closes the question and everything that follows it with
+[[lock=False]], and [[/active]] steps back to the previous opening, or
+to nothing when the skipped question was the only one.  Closing what was
+never opened leaves the active question alone.  The skip then stays put
+against later openings --- the refreshing projector tab --- until an
+explicit reopen, and a skipped follow-on locks the rest of its block.
+
+<<test functions>>=
+def test_lecture_progress_close_relocks_and_steps_active_back():
+    progress = LectureProgress()
+    deck = _deck(("q1", True), ("q2", True), ("q3", False), ("q4", True))
+    progress.open("q1")
+    progress.open("q2")
+
+    assert progress.is_open("q3", deck) is True
+    assert progress.close("q2") is True
+    assert progress.is_open("q2", deck) is False
+    assert progress.is_open("q3", deck) is False
+    assert progress.active_hash() == "q1"
+
+    assert progress.close("q4") is False
+    assert progress.active_hash() == "q1"
+
+
+def test_lecture_progress_skip_is_sticky_until_reopened():
+    progress = LectureProgress()
+    deck = _deck(("q1", True), ("q2", True))
+    progress.open("q1")
+    progress.open("q2")
+    progress.close("q2")
+
+    assert progress.open("q2") is False
+    assert progress.is_open("q2", deck) is False
+    assert progress.active_hash() == "q1"
+    assert progress.status("q2", deck) == "skipped"
+
+    assert progress.reopen("q2") is True
+    assert progress.is_open("q2", deck) is True
+    assert progress.active_hash() == "q2"
+    assert progress.status("q2", deck) == "active"
+
+
+def test_lecture_progress_skipped_follow_on_locks_its_block():
+    progress = LectureProgress()
+    deck = _deck(("q1", True), ("q2", False), ("q3", False))
+    progress.open("q1")
+    progress.close("q2")
+
+    assert progress.is_open("q1", deck) is True
+    assert progress.is_open("q2", deck) is False
+    assert progress.is_open("q3", deck) is False
+
+
+def test_lecture_progress_close_of_an_earlier_opening_keeps_active():
+    progress = LectureProgress()
+    progress.open("q1")
+    progress.open("q2")
+
+    assert progress.close("q1") is True
+    assert progress.active_hash() == "q2"
+
+
+def test_lecture_progress_close_of_the_only_opening_clears_active():
+    progress = LectureProgress()
+    progress.open("q1")
+
+    assert progress.close("q1") is True
+    assert progress.active_hash() is None
+@
+
 \enquote{Moved past} is strictly \enquote{a later question is active},
 and the status labels are the rule seen from the index.
 
@@ -3577,52 +3849,37 @@ offers a \enquote{Try again} link for browsers that throttle background
 refreshes.  The prompt is never echoed: the point of the page is that
 the question is not shown yet.
 
-The page also has to decide whether to offer [[/active]].  A respondent
-who just answered the current question and clicked \enquote{Next
-$\rightarrow$} is \emph{ahead} of the lecture; sending them to
-[[/active]] would bounce them back to the question they just answered.
-Only when the lecturer has opened a later question --- the slide was
-skipped --- does the link help, so the caller passes that fact in along
-with the message.  The same body serves [[/active]] itself before the
-lecture has started, which is why the message is a parameter.
+The page only ever means \enquote{wait}.  A respondent waiting on a
+question the lecture has already \emph{moved past} --- a skipped slide
+--- is not shown it at all: the gate redirects them to the current
+question instead (below).  So the page offers no way onward.  A link to
+[[/active]] here would be wrong for the respondent who is merely ahead
+of the room, because it would bounce them back to the question they just
+answered.  The same body serves [[/active]] itself before the lecture
+has started, which is why the message is a parameter.
 
 <<constants>>=
 LOCKED_REFRESH_SECONDS = 5
 <<functions>>=
-def _render_waiting_body(
-    message: str, self_path: str, *, onward: bool = False
-) -> str:
+def _render_waiting_body(message: str, self_path: str) -> str:
     retry = (
         f'<a class="retry-link" href="{escape(self_path)}">Try again</a>'
     )
-    forward = ""
-    if onward:
-        forward = (
-            '<a class="next-link" href="/active">Current question →</a>'
-        )
     return (
         f"<p>{escape(message)}</p>"
-        f'<nav class="question-nav">{retry}{forward}</nav>'
+        f'<nav class="question-nav">{retry}</nav>'
     )
 @
 
-The self link must be present in both shapes and the [[/active]] link in
-exactly one of them; a page that always offered [[/active]] would send
-the respondent who is ahead of the room back to the question they just
-answered.
+The self link must be present and the message escaped into a paragraph,
+and the page must not point at [[/active]].
 
 <<test functions>>=
-def test_render_waiting_body_offers_active_only_when_asked():
+def test_render_waiting_body_links_only_to_itself():
     waiting = server_module._render_waiting_body("Wait.", "/abcd")
     assert "<p>Wait.</p>" in waiting
     assert 'href="/abcd"' in waiting
     assert "/active" not in waiting
-
-    skipped = server_module._render_waiting_body(
-        "Moved on.", "/abcd", onward=True
-    )
-    assert 'href="/abcd"' in skipped
-    assert 'href="/active"' in skipped
 @
 
 The handler is generated from the store instance.  A closure is the simplest way
@@ -3891,6 +4148,17 @@ everything when the server runs with [[--no-lock]].  The live sequence
 is read once and reused for both the openness check and the
 \enquote{moved past} decision.
 
+A locked question the lecture has moved past was skipped, and it will
+stay locked.  Waiting for it is pointless, so the respondent is
+redirected to the current question at the same suffix and query, as
+[[/active]] would do.  This is what carries a phone along when the
+lecturer skips: a respondent who was ahead of the room sits on the next
+question's waiting page, and the page's next automatic refresh lands on
+the slide the lecturer jumped to.  Stale QR codes and bookmarks of
+skipped questions behave the same way.  [[moved_past]] holds only when
+the active question is in the deck, so the store has its prefix and the
+redirect target exists.
+
 The routes that reveal a question go through this resolver: the form,
 the pin image and the results page.  The thanks page and the answer
 [[POST]] deliberately do not.  Both can only be reached after the form
@@ -3911,17 +4179,22 @@ def _resolve_for_respondent(self, prefix: str) -> str | None:
     if progress.is_open(full_hash, deck):
         return full_hash
 
-    moved_past = progress.moved_past(full_hash, deck)
-    if moved_past:
-        message = "The lecture has moved past this question."
-    else:
-        message = "The lecturer has not opened this question yet."
+    if progress.moved_past(full_hash, deck):
+        parsed = urlparse(self.path)
+        rest = [segment for segment in parsed.path.split("/") if segment]
+        location = _active_location(store, progress, rest[1:], parsed.query)
+        if location is not None:
+            self._redirect(location)
+            return None
+
     self._send(
         HTTPStatus.OK,
         _page(
             "Locked",
             "Not yet",
-            _render_waiting_body(message, self.path, onward=moved_past),
+            _render_waiting_body(
+                "The lecturer has not opened this question yet.", self.path
+            ),
             refresh=True,
             refresh_seconds=LOCKED_REFRESH_SECONDS,
         ),
@@ -4023,6 +4296,9 @@ def _handle_question_get(self, segments: list[str], query: str):
         )
         return
 
+    if len(segments) == 2 and segments[1] == "next":
+        <<redirect to the respondent's next question>>
+
     if len(segments) == 2 and segments[1] == "image":
         <<serve the registered pin image>>
 
@@ -4038,8 +4314,11 @@ def _handle_question_get(self, segments: list[str], query: str):
             self._deny_admin("Results pages are")
             return
 
+        banner = ""
         if self._admin_allowed():
             progress.open(full_hash)
+            if progress.is_skipped(full_hash):
+                banner = _render_skipped_banner(store, full_hash)
 
         title = store.metadata(full_hash)["text"]
         window = _parse_window(query)
@@ -4048,11 +4327,12 @@ def _handle_question_get(self, segments: list[str], query: str):
             _page(
                 f"Results for {title}",
                 title,
-                _render_results(
+                banner
+                + _render_results(
                     store,
                     full_hash,
                     window=window,
-                    is_local=self._is_local(),
+                    admin=self._admin_allowed(),
                     allow_images=allow_images,
                     heatmap_bins=heatmap_bins,
                 ),
@@ -4109,13 +4389,29 @@ error page or a dropped connection; both get the self-refreshing waiting
 page, and a latecomer's phone turns into the first question by itself
 once the lecturer opens it.
 
+Building the target URL is shared with the two other places that send a
+respondent to the current question: the gate, for a skipped question,
+and the respondent's \enquote{Next $\rightarrow$}.  It returns [[None]]
+for both no-target cases so each caller picks its own fallback.
+
+<<functions>>=
+def _active_location(
+    store: Store, progress: LectureProgress, rest: list[str], query: str
+) -> str | None:
+    active = progress.active_hash()
+    if active is None:
+        return None
+    try:
+        prefix = store.metadata(active)["url_prefix"]
+    except KeyError:
+        return None
+    location = "/" + "/".join([prefix, *rest])
+    if query:
+        location += "?" + query
+    return location
 <<redirect to the active question>>=
-active = progress.active_hash()
-try:
-    prefix = store.metadata(active)["url_prefix"] if active else None
-except KeyError:
-    prefix = None
-if prefix is None:
+location = _active_location(store, progress, segments[1:], parsed.query)
+if location is None:
     self._send(
         HTTPStatus.OK,
         _page(
@@ -4128,9 +4424,47 @@ if prefix is None:
         headers={"Cache-Control": "no-store"},
     )
     return
-location = "/" + "/".join([prefix, *segments[1:]])
-if parsed.query:
-    location += "?" + parsed.query
+self._redirect(location)
+return
+@
+
+The respondent's \enquote{Next $\rightarrow$} resolves when it is
+clicked.  If the lecturer has opened a question later than this one, the
+respondent is behind the room and goes straight to the active question.
+That skips the slides the lecturer skipped, and also questions that were
+covered while this respondent was still typing, because the class is
+discussing the active one now.  Otherwise the respondent is level with or
+ahead of the lecture and steps to the next question in order.  If it is
+still locked, the gate shows the waiting page, which turns into the form
+once the lecturer opens it.  The route deliberately does not send this
+case to [[/active]], because that would bounce a fast respondent back to
+the question they have just answered.
+
+The lecturer and a [[--no-lock]] server get the plain next question:
+the lecturer is the one moving the lecture, and without the gate the
+room is free to work through the deck at its own pace.  The route
+answers 404 exactly where the link would not have been rendered, so a
+hand-typed URL cannot step past a [[next=False]] wrap-up question.  The
+prefix is resolved without the gate: the respondent got here from this
+question's thanks or results page.
+
+<<redirect to the respondent's next question>>=
+full_hash = self._resolve(segments[0])
+if full_hash is None:
+    return
+next_hash = store.next_question(full_hash)
+if next_hash is None or not store.question(full_hash).next:
+    self.send_error(HTTPStatus.NOT_FOUND)
+    return
+location = None
+if (
+    lock
+    and not self._admin_allowed()
+    and progress.moved_past(full_hash, store.all_questions())
+):
+    location = _active_location(store, progress, [], "")
+if location is None:
+    location = "/" + store.metadata(next_hash)["url_prefix"]
 self._redirect(location)
 return
 @
@@ -4169,7 +4503,7 @@ self._send_bytes(
 return
 @
 
-Submitting an answer is the only mutating route.  It first limits the request
+Submitting an answer is the only route that mutates the store.  It first limits the request
 body using the question-specific cap, then chooses the parser from the content
 type, delegates semantic validation to [[_parse_answer()]], records one answer,
 and redirects to either the private thanks page or the public results page.
@@ -4181,6 +4515,10 @@ would only trade a thanks page for an error page.
 def do_POST(self):
     parsed = urlparse(self.path)
     segments = [segment for segment in parsed.path.split("/") if segment]
+    if len(segments) == 2 and segments[1] == "skip":
+        <<skip the question and move on>>
+    if len(segments) == 2 and segments[1] == "reopen":
+        <<reopen the question>>
     if len(segments) != 1:
         self.send_error(HTTPStatus.NOT_FOUND)
         return
@@ -4227,6 +4565,69 @@ def do_POST(self):
         self._redirect(f"/{prefix}/results")
         return
     self._redirect(f"/{prefix}/thanks")
+@
+
+The lecturer's Skip button posts to [[/<prefix>/skip]].  Unlike an
+answer, a skip steers the room, so it is admin-only like the results
+page that carries the button.  It closes the question and then
+redirects to the next question's results page, and that visit opens the
+next question exactly as the lecturer's \enquote{Next $\rightarrow$}
+would.  One click thus does both halves of \enquote{we are not doing
+this one}.  The last question of the deck has no successor, so its skip
+lands on the index, where the lecturer can see the question listed as
+skipped.  Closing does not depend on [[--no-lock]]: the tracker
+records openings either way, and [[/active]] must not keep pointing at a
+skipped question.
+
+<<skip the question and move on>>=
+if not self._admin_allowed():
+    self._deny_admin("Skipping questions is")
+    return
+full_hash = self._resolve(segments[0])
+if full_hash is None:
+    return
+progress.close(full_hash)
+next_hash = store.next_question(full_hash)
+if next_hash is None:
+    self._redirect("/")
+    return
+self._redirect(f"/{store.metadata(next_hash)['url_prefix']}/results")
+return
+@
+
+Because a skip is sticky, the lecturer who changes their mind needs a
+way back, and the natural place is the page they are looking at.  The
+results page of a skipped question carries a banner saying so, with a
+Reopen button that posts to [[/<prefix>/reopen]].  It is a [[POST]]
+for the same reason Skip is: the page refreshes itself, and a reopen
+must happen once, on purpose.  The banner sits above the tally so the
+lecturer cannot miss that the room is not answering this question.
+
+<<functions>>=
+def _render_skipped_banner(store: Store, full_hash: str) -> str:
+    prefix = store.metadata(full_hash)["url_prefix"]
+    return (
+        '<div class="skipped-banner">'
+        "<p>Skipped: this question is locked for the room.</p>"
+        f'<form method="post" action="/{prefix}/reopen">'
+        '<button class="reopen-button" type="submit">Reopen</button>'
+        "</form></div>"
+    )
+@
+
+The reopen route mirrors the skip route: admin-only, then back to the
+same results page, now open and active.
+
+<<reopen the question>>=
+if not self._admin_allowed():
+    self._deny_admin("Reopening questions is")
+    return
+full_hash = self._resolve(segments[0])
+if full_hash is None:
+    return
+progress.reopen(full_hash)
+self._redirect(f"/{store.metadata(full_hash)['url_prefix']}/results")
+return
 @
 
 Creating the server is intentionally a thin wrapper around the threaded server
@@ -4662,7 +5063,8 @@ def test_thanks_page_renders_next_link_to_following_question(tmp_path):
         )
 
     assert response.status == 200
-    assert f'href="/{second_prefix}"' in body
+    assert f'href="/{first_prefix}/next"' in body
+    assert f'href="/{second_prefix}"' not in body
     assert "Next →" in body
 
 
@@ -4712,10 +5114,10 @@ def test_thanks_page_omits_next_link_when_question_opts_out(tmp_path):
 @
 
 The results-page navigation targets are the one place in the routing where the
-requester's address determines the URL: lecturers driving from localhost step
-through results pages, everyone else lands on the corresponding forms.  We
-exercise [[_render_results]] directly with both [[is_local]] settings because
-[[_request]] always originates from [[127.0.0.1]].
+requester's role determines the URL: the lecturer steps through results pages,
+everyone else lands on the corresponding forms.  We exercise
+[[_render_results]] directly with both [[admin]] settings, and check the
+token path over HTTP below.
 
 <<test functions>>=
 
@@ -4726,7 +5128,7 @@ def test_render_results_prev_link_targets_form_for_remote_clients(tmp_path):
     second_hash = store.resolve(second_prefix)
 
     rendered = server_module._render_results(
-        store, second_hash, is_local=False
+        store, second_hash, admin=False
     )
 
     assert f'href="/{first_prefix}"' in rendered
@@ -4740,7 +5142,7 @@ def test_render_results_prev_link_targets_results_for_localhost(tmp_path):
     second_hash = store.resolve(second_prefix)
 
     rendered = server_module._render_results(
-        store, second_hash, is_local=True
+        store, second_hash, admin=True
     )
 
     assert f'href="/{first_prefix}/results"' in rendered
@@ -4753,10 +5155,10 @@ def test_render_results_next_link_targets_form_for_remote_clients(tmp_path):
     first_hash = store.resolve(first_prefix)
 
     rendered = server_module._render_results(
-        store, first_hash, is_local=False
+        store, first_hash, admin=False
     )
 
-    assert f'href="/{second_prefix}"' in rendered
+    assert f'href="/{first_prefix}/next"' in rendered
     assert f'href="/{second_prefix}/results"' not in rendered
 
 
@@ -4767,7 +5169,7 @@ def test_render_results_next_link_targets_results_for_localhost(tmp_path):
     first_hash = store.resolve(first_prefix)
 
     rendered = server_module._render_results(
-        store, first_hash, is_local=True
+        store, first_hash, admin=True
     )
 
     assert f'href="/{second_prefix}/results"' in rendered
@@ -5184,11 +5586,49 @@ def test_admin_results_view_opens_the_question_for_respondents(tmp_path):
 @
 
 Skipping is a decision.  When the lecturer opens the first and third
-question, the second stays locked, and its waiting page now offers
-[[/active]] because the lecture has moved past it.
+question, the second stays locked, and a respondent asking for it is
+sent on to the third, keeping the suffix and query.  The lecturer still
+reaches the skipped question.
 
 <<test functions>>=
-def test_skipped_question_stays_locked_and_offers_active(tmp_path):
+def test_skipped_question_redirects_respondents_to_the_current_one(
+    tmp_path,
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first = store.register(MCQuestion("Q1", ("A", "B")))
+    second = store.register(MCQuestion("Q2", ("A", "B")))
+    third = store.register(MCQuestion("Q3", ("A", "B")))
+    client = {"remote": False}
+
+    with _running_server(
+        store, public_results=True, remote=client
+    ) as port:
+        _request(port, "GET", f"/{first}/results")
+        _request(port, "GET", f"/{third}/results")
+        client["remote"] = True
+        form, _body = _request(port, "GET", f"/{second}")
+        results, _body = _request(
+            port, "GET", f"/{second}/results?window=day"
+        )
+        client["remote"] = False
+        lecturer, body = _request(port, "GET", f"/{second}")
+
+    assert form.status == 303
+    assert form.getheader("Location") == f"/{third}"
+    assert results.status == 303
+    assert results.getheader("Location") == f"/{third}/results?window=day"
+    assert lecturer.status == 200
+    assert "Q2" in body
+@
+
+The Skip button over HTTP: the lecturer opens the first two questions,
+skips the second, and lands on the third's results page, which opens it.
+The second is locked again, so a respondent asking for it is sent on to
+the third, and [[/active]] follows the third.  On the last question the skip lands on the index, and
+[[/active]] steps back to the question before.
+
+<<test functions>>=
+def test_skip_closes_the_question_and_opens_the_next(tmp_path):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     first = store.register(MCQuestion("Q1", ("A", "B")))
     second = store.register(MCQuestion("Q2", ("A", "B")))
@@ -5197,16 +5637,207 @@ def test_skipped_question_stays_locked_and_offers_active(tmp_path):
 
     with _running_server(store, remote=client) as port:
         _request(port, "GET", f"/{first}/results")
-        _request(port, "GET", f"/{third}/results")
+        _request(port, "GET", f"/{second}/results")
+        skip, _body = _request(port, "POST", f"/{second}/skip")
+        _request(port, "GET", skip.getheader("Location"))
         client["remote"] = True
-        response, body = _request(port, "GET", f"/{second}")
+        skipped, _body = _request(port, "GET", f"/{second}")
+        opened, opened_body = _request(port, "GET", f"/{third}")
+        active, _body = _request(port, "GET", "/active")
+        client["remote"] = False
+        last, _body = _request(port, "POST", f"/{third}/skip")
+        after_last, _body = _request(port, "GET", "/active")
+
+    assert skip.status == 303
+    assert skip.getheader("Location") == f"/{third}/results"
+    assert skipped.status == 303
+    assert skipped.getheader("Location") == f"/{third}"
+    assert opened.status == 200
+    assert "Q3" in opened_body
+    assert active.getheader("Location") == f"/{third}"
+    assert last.status == 303
+    assert last.getheader("Location") == "/"
+    assert after_last.getheader("Location") == f"/{first}"
+@
+
+The skip survives a second window.  After the lecturer skips the second
+question from the laptop, a projector tab still showing its results page
+refreshes: that request must not reopen it, and the page must say it is
+skipped and offer Reopen.  Reopening opens it for the room and makes it
+active again.
+
+<<test functions>>=
+def test_skip_survives_a_refreshing_tab_until_reopened(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first = store.register(MCQuestion("Q1", ("A", "B")))
+    second = store.register(MCQuestion("Q2", ("A", "B")))
+    third = store.register(MCQuestion("Q3", ("A", "B")))
+    client = {"remote": False}
+
+    with _running_server(store, remote=client) as port:
+        _request(port, "GET", f"/{first}/results")
+        _request(port, "GET", f"/{second}/results")
+        _request(port, "POST", f"/{second}/skip")
+        _request(port, "GET", f"/{third}/results")
+        _response, projector = _request(port, "GET", f"/{second}/results")
+        refreshed_active, _body = _request(port, "GET", "/active")
+        _response, index = _request(port, "GET", "/")
+        reopen, _body = _request(port, "POST", f"/{second}/reopen")
+        _response, reopened = _request(port, "GET", f"/{second}/results")
+        client["remote"] = True
+        form, form_body = _request(port, "GET", f"/{second}")
         active, _body = _request(port, "GET", "/active")
 
-    assert response.status == 200
-    assert "Try again" in body
-    assert 'href="/active"' in body
-    assert active.status == 303
-    assert active.getheader("Location") == f"/{third}"
+    assert "Skipped" in projector
+    assert f'action="/{second}/reopen"' in projector
+    assert refreshed_active.getheader("Location") == f"/{third}"
+    assert "status-skipped" in index
+    assert reopen.status == 303
+    assert reopen.getheader("Location") == f"/{second}/results"
+    assert "skipped-banner" not in reopened
+    assert form.status == 200
+    assert "Q2" in form_body
+    assert active.getheader("Location") == f"/{second}"
+@
+
+Without the gate the skip has nothing to lock, but [[/active]] still
+follows the lecturer, so it must leave the skipped question as well.
+
+<<test functions>>=
+def test_skip_without_lock_still_moves_active(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first = store.register(MCQuestion("Q1", ("A", "B")))
+    second = store.register(MCQuestion("Q2", ("A", "B")))
+
+    with _running_server(store, lock=False) as port:
+        _request(port, "GET", f"/{first}/results")
+        _request(port, "GET", f"/{second}/results")
+        _request(port, "POST", f"/{second}/skip")
+        active, _body = _request(port, "GET", "/active")
+
+    assert active.getheader("Location") == f"/{first}"
+@
+
+Skipping steers the room, so a respondent cannot do it, nor reopen: the
+requests are refused and the question stays open.
+
+<<test functions>>=
+def test_respondents_cannot_skip(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first = store.register(MCQuestion("Q1", ("A", "B")))
+    client = {"remote": False}
+
+    with _running_server(store, remote=client) as port:
+        _request(port, "GET", f"/{first}/results")
+        client["remote"] = True
+        refused, _body = _request(port, "POST", f"/{first}/skip")
+        form, body = _request(port, "GET", f"/{first}")
+        reopen, _body = _request(port, "POST", f"/{first}/reopen")
+
+    assert refused.status == 403
+    assert reopen.status == 403
+    assert form.status == 200
+    assert "Q1" in body
+@
+
+The respondent's \enquote{Next $\rightarrow$} decides at click time.
+The test walks one deck through the cases.  First, a respondent level
+with the lecture steps to the next question in order and meets the
+waiting page there.  Then the lecturer opens the second question and
+skips ahead to the fourth: the same click on the first question now goes
+to the fourth.  Questions the lecturer covered are skipped too, because
+the room has moved on from them.  A respondent already on the fourth
+question steps on in order.
+
+<<test functions>>=
+def test_next_follows_the_lecturer_when_the_respondent_is_behind(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first = store.register(MCQuestion("Q1", ("A", "B")))
+    second = store.register(MCQuestion("Q2", ("A", "B")))
+    store.register(MCQuestion("Q3", ("A", "B")))
+    fourth = store.register(MCQuestion("Q4", ("A", "B")))
+    fifth = store.register(MCQuestion("Q5", ("A", "B")))
+    client = {"remote": False}
+
+    with _running_server(store, remote=client) as port:
+        _request(port, "GET", f"/{first}/results")
+        client["remote"] = True
+        level, _body = _request(port, "GET", f"/{first}/next")
+        client["remote"] = False
+        _request(port, "GET", f"/{second}/results")
+        _request(port, "GET", f"/{fourth}/results")
+        client["remote"] = True
+        behind, _body = _request(port, "GET", f"/{first}/next")
+        current, _body = _request(port, "GET", f"/{fourth}/next")
+
+    assert level.status == 303
+    assert level.getheader("Location") == f"/{second}"
+    assert behind.getheader("Location") == f"/{fourth}"
+    assert current.getheader("Location") == f"/{fifth}"
+@
+
+A [[lock=False]] follow-on is the next question in order, and it is
+open, so the respondent goes straight to its form.  The lecturer and a
+[[--no-lock]] server always get the plain next question.
+
+<<test functions>>=
+def test_next_steps_into_an_unlocked_follow_on(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first = store.register(MCQuestion("Q1", ("A", "B")))
+    second = store.register(MCQuestion("Q2", ("A", "B"), lock=False))
+    client = {"remote": False}
+
+    with _running_server(store, remote=client) as port:
+        _request(port, "GET", f"/{first}/results")
+        client["remote"] = True
+        response, _body = _request(port, "GET", f"/{first}/next")
+        form, body = _request(port, "GET", response.getheader("Location"))
+
+    assert response.getheader("Location") == f"/{second}"
+    assert form.status == 200
+    assert "Q2" in body
+
+
+def test_next_is_plain_for_the_lecturer_and_without_lock(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first = store.register(MCQuestion("Q1", ("A", "B")))
+    second = store.register(MCQuestion("Q2", ("A", "B")))
+    third = store.register(MCQuestion("Q3", ("A", "B")))
+
+    with _running_server(store) as port:
+        _request(port, "GET", f"/{third}/results")
+        lecturer, _body = _request(port, "GET", f"/{first}/next")
+
+    client = {"remote": False}
+    with _running_server(store, lock=False, remote=client) as port:
+        _request(port, "GET", f"/{third}/results")
+        client["remote"] = True
+        unlocked, _body = _request(port, "GET", f"/{first}/next")
+
+    assert lecturer.getheader("Location") == f"/{second}"
+    assert unlocked.getheader("Location") == f"/{second}"
+@
+
+The route answers 404 wherever the link would be missing: after the
+last question, and after a [[next=False]] wrap-up question, even when
+the lecturer has moved on.
+
+<<test functions>>=
+def test_next_is_not_found_where_the_link_is_missing(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first = store.register(MCQuestion("Q1", ("A", "B"), next=False))
+    store.register(MCQuestion("Q2", ("A", "B")))
+    third = store.register(MCQuestion("Q3", ("A", "B")))
+    client = {"remote": False}
+
+    with _running_server(store, remote=client) as port:
+        _request(port, "GET", f"/{third}/results")
+        client["remote"] = True
+        wrap_up, _body = _request(port, "GET", f"/{first}/next")
+        last, _body = _request(port, "GET", f"/{third}/next")
+
+    assert wrap_up.status == 404
+    assert last.status == 404
 @
 
 The gate covers every route that reveals the question.  A public-results
@@ -5453,6 +6084,49 @@ def test_admin_token_required_overrides_loopback_trust(tmp_path):
         server.shutdown()
         thread.join()
         server.server_close()
+@
+
+The lecturer's navigation row follows the same trust decision as the
+results page.  Behind a tunnel every visitor looks local, so a student
+reading a public results page must get the respondent's row --- no Skip,
+and a click-time Next --- while the lecturer with the admin cookie gets
+Skip and a Next that opens the following question.
+
+<<test functions>>=
+def test_lecturer_row_follows_admin_access_not_the_address(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first = store.register(MCQuestion("Q1", ("A", "B")))
+    second = store.register(MCQuestion("Q2", ("A", "B")))
+    server = create_server(
+        store,
+        host="127.0.0.1",
+        port=0,
+        public_results=True,
+        admin_token="s3cret",
+        require_token=True,
+    )
+    server.RequestHandlerClass._is_local = lambda self: True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+
+    try:
+        _response, lecturer = _request(
+            port,
+            "GET",
+            f"/{first}/results",
+            headers={"Cookie": "mentipy_admin=s3cret"},
+        )
+        _response, student = _request(port, "GET", f"/{first}/results")
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+    assert f'action="/{first}/skip"' in lecturer
+    assert f'href="/{second}/results"' in lecturer
+    assert "/skip" not in student
+    assert f'href="/{first}/next"' in student
 @
 
 The redirect must keep unrelated query parameters; otherwise opening the admin
