@@ -59,7 +59,9 @@ step through the whole slide, but if the lecturer later skips that
 slide the block must stay closed together with its first question.
 All three flags are purely presentation, so they are dropped before
 the hash is computed and editing any of them between rebuilds never
-orphans the recorded answers.
+orphans the recorded answers.  The same holds for the optional
+[[context]], the material the web form shows next to the prompt
+(\cref{sec:web-only-context}).
 
 The prompt [[text]] is shared too: every question type opens with it.
 It lives on the base as an ordinary positional field, which works
@@ -89,15 +91,20 @@ class Question:
     the post-submit navigation link, ``results`` is the tri-state
     per-question override of the server's public-results flag, and
     ``lock`` says whether the question waits for the lecturer to open
-    it (``False`` opens it together with its predecessor).  The flags
-    stay out of the canonical hash.  Each subclass declares a ``kind``
-    field whose default is its stable JSON tag.
+    it (``False`` opens it together with its predecessor).  ``context``
+    holds ``ContextSnippet`` and ``ContextDownload`` items that only
+    the web form shows.  The flags and the context stay out of the
+    canonical hash.  Each subclass declares a ``kind`` field whose
+    default is its stable JSON tag.
     """
 
     text: str
     next: bool = field(default=True, kw_only=True)
     results: bool | None = field(default=None, kw_only=True)
     lock: bool = field(default=True, kw_only=True)
+    context: tuple[ContextSnippet | ContextDownload, ...] = field(
+        default=(), kw_only=True
+    )
 
     <<question base methods>>
 @
@@ -107,15 +114,18 @@ class Question:
 Serialisation splits along the same line as the fields.  The base
 writes the [[kind]] tag and the prompt first, merges each subclass's
 [[_own_dict]] of kind-specific persistence fields, and appends the
-shared flags last, so that no question type can forget to persist
-them.  Keeping the shared keys explicit even
+shared flags and the context last, so that no question type can forget
+to persist them.  Keeping the shared keys explicit even
 at their default values is what lets the store treat any extra stored
 key as store-owned metadata during refresh --- in particular, a
 [[results]] override that is later removed from the slide source must
 be able to revert to the deferring [[None]] on the next recompile.
 
+The context is written even when it is empty for the same reason:
+deleting the context from a slide must clear it from the store.
+
 The default [[canonical_dict]] is the persistence shape minus the
-shared flags, which is the right identity for question types whose
+shared flags and the context, which is the right identity for question types whose
 every other field shapes the input contract.  Types with further
 presentation fields (word clouds, the pin questions) or
 historical-hash constraints (open questions) override it.
@@ -129,6 +139,7 @@ def to_dict(self) -> dict[str, Any]:
     result["next"] = self.next
     result["results"] = self.results
     result["lock"] = self.lock
+    result["context"] = [item.to_dict() for item in self.context]
     return result
 
 def canonical_dict(self) -> dict[str, Any]:
@@ -138,6 +149,7 @@ def canonical_dict(self) -> dict[str, Any]:
     result.pop("next")
     result.pop("results")
     result.pop("lock")
+    result.pop("context")
     return result
 
 def _own_dict(self) -> dict[str, Any]:
@@ -176,6 +188,204 @@ accidentally skip the base class and lose the shared flags.
 def test_all_question_kinds_share_the_question_base_class():
     for factory in QUESTION_FACTORIES:
         assert isinstance(factory(), Question)
+@
+
+\subsection{Web-only context}
+\label{sec:web-only-context}
+
+A slide has little room, but the phone a respondent answers on has a
+lot.  A peer-instruction question about a program built up over several
+slides can only show a fragment of it on the slide, while the whole
+program fits on the answer page.  The [[context]] field carries that
+material: a tuple of items that the web form shows between the prompt
+and the inputs, and that nothing else shows.  The slide stays the room's
+shared reference for the discussion after the vote, so the LaTeX side
+ignores the context entirely, and the projected results page leaves it
+out too.
+
+The context is presentation, not identity, and it stays out of the
+canonical hash like the flags.  That is the opposite of
+[[PinTextQuestion.content]], and the difference is deliberate.  A
+pin-text answer is a position \emph{in} the content, so a changed
+content is a different question.  An answer to a question with context
+is about the prompt and its options; the context is material tangled
+from the slides, and reformatting it or renaming a variable must not
+mint a new URL prefix, invalidate the printed QR codes and strand the
+answers already collected under the old hash.
+
+There are two kinds of item, because there are two sizes of material.
+A program of a page or two is best \emph{shown}: the respondent reads it
+while answering.  A data set of thousands of rows is useless on a phone
+screen and would bury the question, so it is \emph{offered} as a
+download instead.
+
+\paragraph{Shown snippets.}
+A snippet has the same three presentations as a pin-text target
+(\cref{sec:pin-text}): a Pygments lexer name for highlighted code,
+[[None]] for prose, and [[latex]] for text the authoring helper has
+passed through pandoc once, caching the HTML in [[html]] so that the
+server never needs pandoc.  An optional [[label]] names the snippet,
+because a context of two files is unreadable when the reader cannot
+tell where one ends and the next begins.
+
+<<classes>>=
+@dataclass(frozen=True)
+class ContextSnippet:
+    """One piece of web-only context shown on a question's answer page.
+
+    ``language`` selects the presentation: a Pygments lexer name for
+    highlighted code, ``None`` for prose, or ``"latex"`` for LaTeX
+    whose pandoc rendering is cached in ``html``.  ``label`` is an
+    optional caption, such as the file the snippet comes from.
+    """
+
+    text: str
+    language: str | None = None
+    label: str | None = None
+    html: str | None = None
+
+    <<context snippet methods>>
+@
+
+An empty snippet would render as an empty captioned box, which is always
+an authoring mistake, so it fails at construction like an empty pin-text
+target.
+
+<<context snippet methods>>=
+def __post_init__(self):
+    if not self.text.strip():
+        raise ValueError("context snippets need non-empty text")
+@
+
+<<test functions>>=
+
+def test_context_snippet_requires_text():
+    with pytest.raises(ValueError, match="context"):
+        ContextSnippet("")
+    with pytest.raises(ValueError, match="context"):
+        ContextSnippet("  \n", language="python")
+@
+
+\paragraph{Offered downloads.}
+A download carries no content at all, only the address of its bytes.
+The bytes live in the store's content-addressed sidecar, the one that
+already holds pin images (\cref{sec:pin-image}), and the item records
+their SHA-256 digest.  Putting a large file into the JSON store instead
+would make every answer slow, because the store is rewritten on every
+submission.  The [[filename]] is what the respondent's browser saves
+the file as, and [[size]] lets the page say how large the download is
+before anyone on a phone plan taps it.  A digest of the wrong shape is
+rejected here, at construction, because it later becomes part of a
+filesystem path; the store's lookup checks it again for the same
+reason.
+
+<<classes>>=
+@dataclass(frozen=True)
+class ContextDownload:
+    """A file offered for download on a question's answer page.
+
+    The bytes live in the store's content-addressed sidecar under
+    ``sha256``; ``filename`` is the name the browser saves them as,
+    ``size`` their length in bytes, and ``label`` an optional caption.
+    """
+
+    sha256: str
+    filename: str
+    size: int
+    label: str | None = None
+
+    <<context download methods>>
+@
+
+<<context download methods>>=
+def __post_init__(self):
+    if not is_sha256_hex(self.sha256):
+        raise ValueError("context downloads need a SHA-256 hex digest")
+    if not self.filename.strip():
+        raise ValueError("context downloads need a file name")
+@
+
+<<test functions>>=
+
+def test_context_download_validates_digest_and_filename():
+    with pytest.raises(ValueError, match="SHA-256"):
+        ContextDownload("../../etc/passwd", "data.csv", 10)
+    with pytest.raises(ValueError, match="file name"):
+        ContextDownload("0" * 64, " ", 10)
+@
+
+\paragraph{Serialisation.}
+Each item serialises as a flat JSON object with every key present, so a
+label or a cached rendering that disappears from the slide source also
+disappears from the store on the next recompile.  A [[type]] tag tells
+the two kinds apart, the same idea as a question's [[kind]] one level
+down.  Rebuilding tolerates missing optional keys, because a
+hand-edited store may well omit them, and an item without a tag is a
+shown snippet.
+
+<<context snippet methods>>=
+def to_dict(self) -> dict[str, Any]:
+    return {
+        "type": "text",
+        "text": self.text,
+        "language": self.language,
+        "label": self.label,
+        "html": self.html,
+    }
+
+@classmethod
+def from_dict(cls, data: Mapping[str, Any]) -> "ContextSnippet":
+    return cls(
+        text=str(data["text"]),
+        language=data.get("language"),
+        label=data.get("label"),
+        html=data.get("html"),
+    )
+<<context download methods>>=
+def to_dict(self) -> dict[str, Any]:
+    return {
+        "type": "download",
+        "sha256": self.sha256,
+        "filename": self.filename,
+        "size": self.size,
+        "label": self.label,
+    }
+
+@classmethod
+def from_dict(cls, data: Mapping[str, Any]) -> "ContextDownload":
+    return cls(
+        sha256=str(data["sha256"]),
+        filename=str(data["filename"]),
+        size=int(data["size"]),
+        label=data.get("label"),
+    )
+@
+
+An unknown tag fails loudly for the same reason an unknown question kind
+does: guessing would make a corrupted or future store look valid.
+
+<<functions>>=
+CONTEXT_TYPES = {"text": ContextSnippet, "download": ContextDownload}
+
+
+def context_from_dict(data: Mapping[str, Any]):
+    """Rebuild one context item from its stored JSON shape."""
+
+    context_type = data.get("type", "text")
+    item_class = CONTEXT_TYPES.get(context_type)
+    if item_class is None:
+        raise ValueError(f"unknown context type: {context_type}")
+    return item_class.from_dict(data)
+@
+
+<<test functions>>=
+
+def test_context_from_dict_rebuilds_both_types_and_rejects_others():
+    download = ContextDownload("a" * 64, "sales.csv", 2048, label="Data")
+    assert context_from_dict(download.to_dict()) == download
+    assert context_from_dict({"text": "Prose"}) == ContextSnippet("Prose")
+    with pytest.raises(ValueError, match="context type"):
+        context_from_dict({"type": "video", "text": "x"})
 @
 
 \section{Multiple Choice}
@@ -235,6 +445,7 @@ def test_mc_question_to_dict_includes_a_default_next_flag():
         "next": True,
         "results": None,
         "lock": True,
+        "context": [],
     }
 
 
@@ -367,6 +578,7 @@ def test_open_question_to_dict_includes_default_fields():
         "next": True,
         "results": None,
         "lock": True,
+        "context": [],
     }
 @
 
@@ -384,6 +596,7 @@ def test_open_question_to_dict_includes_a_configured_fence():
         "next": True,
         "results": None,
         "lock": True,
+        "context": [],
     }
 @
 
@@ -692,6 +905,7 @@ def test_word_cloud_to_dict_includes_all_fields():
         "next": True,
         "results": None,
         "lock": True,
+        "context": [],
     }
 @
 
@@ -1244,6 +1458,7 @@ def test_ranking_question_to_dict_includes_top_n():
         "next": True,
         "results": None,
         "lock": True,
+        "context": [],
     }
     partial = RankingQuestion(
         "Rank these", ("A", "B", "C"), top_n=2
@@ -1447,6 +1662,7 @@ def test_sniff_image_mime_detects_raster_and_rejects_svg():
 @
 
 \subsection{Pin-on-image}
+\label{sec:pin-image}
 
 The identity question for an image target is: \emph{which} image?  The
 answer must be the image \emph{bytes}, not the path.  A path changes
@@ -1565,6 +1781,7 @@ def from_image_bytes(
     next: bool = True,
     results: bool | None = None,
     lock: bool = True,
+    context: tuple[ContextSnippet | ContextDownload, ...] = (),
 ) -> "PinImageQuestion":
     """Build a pin-image question from raw image bytes.
 
@@ -1589,6 +1806,7 @@ def from_image_bytes(
         next=next,
         results=results,
         lock=lock,
+        context=context,
     )
 @
 
@@ -1679,6 +1897,7 @@ def test_pin_image_canonical_dict_drops_path_mime_and_next():
 @
 
 \subsection{Pin-on-text}
+\label{sec:pin-text}
 
 The text variant exists because the most natural pin targets in a
 lecture are often not figures but \emph{rendered text}: a code example
@@ -2063,7 +2282,7 @@ deferring to the server's global flag --- rather than being coerced to
 public results.  The [[lock]] flag goes the other way: an absent key
 reads as [[True]], so a store written before the lecturer-paced gate
 existed keeps every question waiting for the lecturer --- exactly what a
-freshly registered deck gets.
+freshly registered deck gets.  A missing [[context]] is simply no context.
 
 <<question base methods>>=
 @classmethod
@@ -2075,6 +2294,9 @@ def _shared_fields(cls, data: Mapping[str, Any]) -> dict[str, Any]:
             None if data.get("results") is None else bool(data["results"])
         ),
         "lock": bool(data.get("lock", True)),
+        "context": tuple(
+            context_from_dict(item) for item in data.get("context") or ()
+        ),
     }
 @
 
@@ -2242,6 +2464,7 @@ def test_mc_question_round_trip():
         "next": True,
         "results": None,
         "lock": True,
+        "context": [],
     }
 @
 
@@ -2267,6 +2490,7 @@ def test_open_question_round_trip_without_fence():
         "next": True,
         "results": None,
         "lock": True,
+        "context": [],
     }
 @
 
@@ -2293,6 +2517,7 @@ def test_open_question_round_trip_with_fence():
         "next": True,
         "results": None,
         "lock": True,
+        "context": [],
     }
 @
 
@@ -2324,6 +2549,7 @@ def test_scale_question_round_trip():
         "next": True,
         "results": None,
         "lock": True,
+        "context": [],
     }
 @
 
@@ -2365,6 +2591,7 @@ def test_word_cloud_round_trip_preserves_extra_stop_words_as_tuple():
         "next": True,
         "results": None,
         "lock": True,
+        "context": [],
     }
 @
 
@@ -2403,6 +2630,7 @@ def test_pin_image_round_trip_preserves_digest_and_contract():
         "next": True,
         "results": None,
         "lock": True,
+        "context": [],
     }
 @
 
@@ -2426,6 +2654,7 @@ def test_pin_text_round_trip_preserves_language_and_cached_html():
         "next": True,
         "results": None,
         "lock": True,
+        "context": [],
     }
 @
 
@@ -2483,6 +2712,39 @@ def test_question_from_dict_defaults_a_missing_lock_flag_to_waiting(
     data = factory().to_dict()
     del data["lock"]
     assert question_from_dict(data).lock is True
+@
+
+The context has to survive the same detour for every kind, with each
+snippet's label, language and cached HTML intact: a server restart that
+dropped it would leave respondents without the program the question is
+about.  A store written before context existed has no key at all and
+must read as no context.
+
+<<test functions>>=
+
+SAMPLE_CONTEXT = (
+    ContextSnippet(
+        "class Account:\n    pass\n", language="python", label="bank.py"
+    ),
+    ContextSnippet("A shop sells $x$ items.", language="latex", html="<p>x</p>"),
+    ContextSnippet("Plain prose\non two lines."),
+    ContextDownload("b" * 64, "sales.csv", 4096, label="Sales data"),
+)
+
+
+@pytest.mark.parametrize("factory", QUESTION_FACTORIES)
+def test_question_from_dict_round_trips_the_context(factory):
+    question = factory(context=SAMPLE_CONTEXT)
+    rebuilt = question_from_dict(question.to_dict())
+    assert rebuilt.context == SAMPLE_CONTEXT
+    assert rebuilt.to_dict() == question.to_dict()
+
+
+@pytest.mark.parametrize("factory", QUESTION_FACTORIES)
+def test_question_from_dict_reads_a_missing_context_as_none(factory):
+    data = factory(context=SAMPLE_CONTEXT).to_dict()
+    del data["context"]
+    assert question_from_dict(data).context == ()
 @
 
 \subsection{Hashing canonical JSON}
@@ -2632,6 +2894,22 @@ def test_question_hash_invariant_to_lock_flag_across_question_types():
         assert question_hash(factory()) == question_hash(
             factory(lock=False)
         )
+@
+
+The context is the change most likely to happen \emph{after} answers
+exist: the program it shows is tangled from the slides, so reformatting
+or a renamed variable rewrites it.  Adding, editing or removing context
+must therefore keep the hash, and with it the URL prefix, the printed QR
+codes and the answers already collected.
+
+<<test functions>>=
+
+def test_question_hash_invariant_to_context_across_question_types():
+    edited = (ContextSnippet("class Account:\n    balance = 0\n"),)
+    for factory in QUESTION_FACTORIES:
+        plain = question_hash(factory())
+        assert plain == question_hash(factory(context=SAMPLE_CONTEXT))
+        assert plain == question_hash(factory(context=edited))
 @
 
 The test root is intentionally small: the interesting details live next to the

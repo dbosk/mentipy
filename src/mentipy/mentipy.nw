@@ -20,6 +20,8 @@ the small surface we expect PythonTeX users and CLI users to care about.
 
 <<imports>>=
 from mentipy.latex import (
+    file_download,
+    file_snippet,
     mc,
     open_text,
     pin_image,
@@ -31,6 +33,8 @@ from mentipy.latex import (
     write_snippet,
 )
 from mentipy.questions import (
+    ContextDownload,
+    ContextSnippet,
     MCQuestion,
     OpenQuestion,
     PinImageQuestion,
@@ -68,6 +72,8 @@ from its own preamble without knowing which module owns it.
 __version__ = "0.2"
 
 __all__ = [
+    "ContextDownload",
+    "ContextSnippet",
     "MCQuestion",
     "OpenQuestion",
     "PinImageQuestion",
@@ -81,6 +87,8 @@ __all__ = [
     "activation_script",
     "base_dir",
     "create_venv",
+    "file_download",
+    "file_snippet",
     "get_base_dir",
     "install_package",
     "mc",
@@ -145,5 +153,9 @@ def test_package_facade_reexports_the_public_api():
     assert callable(base_dir)
     assert callable(resolve_path)
     assert callable(write_snippet)
+    assert ContextSnippet.__name__ == "ContextSnippet"
+    assert ContextDownload.__name__ == "ContextDownload"
+    assert callable(file_snippet)
+    assert callable(file_download)
     assert __version__ == "0.2"
 @

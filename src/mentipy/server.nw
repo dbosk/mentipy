@@ -25,6 +25,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import importlib
 import json
 import logging
+import mimetypes
 import os
 import secrets
 import sys
@@ -32,7 +33,15 @@ import threading
 from socketserver import ThreadingMixIn
 from string import Template
 from typing import Any
-from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
+import unicodedata
+from urllib.parse import (
+    parse_qs,
+    parse_qsl,
+    quote,
+    urlencode,
+    urlparse,
+    urlunparse,
+)
 
 from markdown_it import MarkdownIt
 from pygments import highlight as _pygments_highlight
@@ -41,6 +50,8 @@ from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
 
 from mentipy.questions import (
+    ContextDownload,
+    ContextSnippet,
     MCQuestion,
     OpenQuestion,
     PIN_COMMENT_MAX_CHARS,
@@ -271,6 +282,27 @@ pre code.highlight {
 .md-answer > :first-child { margin-top: 0; }
 .md-answer > :last-child { margin-bottom: 0; }
 .md-answer ul, .md-answer ol { margin: 0.25rem 0 0.25rem 1.5rem; }
+
+.context {
+  margin: 0 0 1rem;
+}
+.context-item {
+  margin: 0 0 0.75rem;
+}
+.context-item figcaption {
+  color: #666;
+  font-size: 0.85em;
+  margin: 0 0 0.25rem;
+}
+.context-item p {
+  white-space: pre-line;
+}
+.context-download {
+  border: 1px solid #4a90d9;
+  border-radius: 3px;
+  display: inline-block;
+  padding: 0.4rem 0.8rem;
+}
 
 .question-nav {
   align-items: center;
@@ -1359,6 +1391,209 @@ def test_render_index_labels_questions_when_given_progress(tmp_path):
     assert "status" not in server_module._render_index(store)
 @
 
+\subsection{The prompt and its context}
+\label{sec:prompt-and-context}
+
+Every form opens the same way: the prompt, then the question's web-only
+context (\cref{sec:web-only-context}), then the inputs.  The prompt
+comes first so that a long program cannot push the question off the
+screen, and the context comes before the inputs so that the respondent
+reads the premises before answering.  One helper builds that opening
+for every form, so that no question kind can leave the context out or
+put it somewhere else.
+
+<<functions>>=
+def _render_prompt(question: Question, prefix: str) -> str:
+    return f"<p>{escape(question.text)}</p>" + _render_context(
+        question, prefix
+    )
+@
+
+The context is a section of figures, one per item, with the item's
+label as the caption: a figure is exactly a self-contained block with
+an optional caption, so the markup says what the page shows.  A
+question without context gets no section at all, so the forms of every
+existing deck stay as they were.
+
+A download is a link to the question's context route, addressed by the
+item's position in the context (\cref{sec:context-downloads}).  The
+link text names the file and its size, because a respondent on a phone
+plan should know what a tap will cost before making it.
+
+<<functions>>=
+def _render_context(question: Question, prefix: str) -> str:
+    if not question.context:
+        return ""
+    items = "".join(
+        _render_context_item(item, index, prefix)
+        for index, item in enumerate(question.context)
+    )
+    return f'<section class="context">{items}</section>'
+
+
+def _render_context_item(
+    item: ContextSnippet | ContextDownload, index: int, prefix: str
+) -> str:
+    caption = ""
+    if item.label:
+        caption = f"<figcaption>{escape(item.label)}</figcaption>"
+    if isinstance(item, ContextDownload):
+        body = (
+            f'<a class="context-download" '
+            f'href="/{prefix}/context/{index}" download>'
+            f"Download {escape(item.filename)} "
+            f"({_format_size(item.size)})</a>"
+        )
+    else:
+        body = _render_text_body(item.text, item.language, item.html)
+    return f'<figure class="context-item">{caption}{body}</figure>'
+@
+
+A shown snippet and a pin-text target (\cref{sec:pin-targets}) present
+text by the same three-way rule, so they share one renderer.  A cached
+pandoc rendering is inserted as it is: it is the lecturer's own slide
+content passed through pandoc at registration, the same trust level as
+a served pin image.  Otherwise a [[language]] is highlighted through
+the same Pygments path the open-answer renderer uses, and plain prose
+is escaped.  The Pygments helper returns an empty string for lexer
+names it does not know, in which case we fall back to an escaped
+[[<pre>]] so that unknown languages still render their text safely.
+This fallback also covers a [[latex]] snippet whose registration ran
+without pandoc: Pygments knows a [[latex]] lexer, so respondents see
+highlighted source rather than nothing.  Prose keeps its line breaks
+through the style sheet ([[white-space: pre-line]] on context prose)
+rather than through [[<br>]] tags, which leaves a pin target's prose
+laid out exactly as before, so pins already placed on it keep their
+positions.
+
+<<functions>>=
+def _render_text_body(
+    text: str, language: str | None, html: str | None
+) -> str:
+    if html:
+        return html
+    if language:
+        return (
+            _highlight_code(text, language, "")
+            or f"<pre>{escape(text)}</pre>"
+        )
+    return f"<p>{escape(text)}</p>"
+@
+
+Sizes are rounded the way people read them: bytes below a kilobyte,
+then one decimal in kilo- or megabytes, in the decimal units phones
+show.
+
+<<functions>>=
+def _format_size(size: int) -> str:
+    if size < 1000:
+        return f"{size} bytes"
+    if size < 1_000_000:
+        return f"{size / 1000:.1f} kB"
+    return f"{size / 1_000_000:.1f} MB"
+@
+
+Every kind of question must show its context, and in the same place:
+after the prompt, so that a long program cannot bury the question, and
+before the inputs, so that the respondent reads the premises before
+answering.  The test runs the real form renderer for all seven kinds,
+because a kind that builds its own opening is exactly how one would be
+missed.  A question without context must not grow an empty section.
+
+<<test functions>>=
+CONTEXT_FACTORIES = [
+    pytest.param(
+        lambda **kw: MCQuestion("Pick one", ("A", "B"), **kw), id="mc"
+    ),
+    pytest.param(lambda **kw: OpenQuestion("Why?", **kw), id="open"),
+    pytest.param(lambda **kw: ScaleQuestion("Pace?", **kw), id="scale"),
+    pytest.param(
+        lambda **kw: WordCloudQuestion("Topic?", **kw), id="wordcloud"
+    ),
+    pytest.param(
+        lambda **kw: RankingQuestion("Rank these", ("A", "B"), **kw),
+        id="ranking",
+    ),
+    pytest.param(
+        lambda **kw: PinImageQuestion.from_image_bytes(
+            "Pin it", PNG_SAMPLE, **kw
+        ),
+        id="pinimage",
+    ),
+    pytest.param(
+        lambda **kw: PinTextQuestion("Pin it", "total =+ x", **kw),
+        id="pintext",
+    ),
+]
+
+
+@pytest.mark.parametrize("factory", CONTEXT_FACTORIES)
+def test_render_form_puts_the_context_between_prompt_and_inputs(
+    tmp_path, factory
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    question = factory(context=(ContextSnippet("x = 1", label="setup.py"),))
+    full_hash = store.resolve(store.register(question))
+    plain_store = Store(tmp_path / "plain.json", min_prefix=4)
+    plain_hash = plain_store.resolve(plain_store.register(factory()))
+
+    rendered = server_module._render_form(store, full_hash)
+
+    prompt = rendered.index(f"<p>{question.text}</p>")
+    context = rendered.index('<section class="context">')
+    assert prompt < context < rendered.index("<form")
+    assert "setup.py" in rendered
+    assert "context" not in server_module._render_form(
+        plain_store, plain_hash
+    )
+@
+
+Each item keeps its own presentation.  Code is highlighted through the
+same Pygments path as answers, the cached pandoc HTML is inserted as it
+is, prose keeps its line breaks, and everything the author typed into a
+label or into prose is escaped.  A download is a link to its route,
+with the file name and size in the link text.
+
+<<test functions>>=
+def test_render_context_shows_each_item_in_its_presentation():
+    question = MCQuestion(
+        "Pick one",
+        ("A", "B"),
+        context=(
+            ContextSnippet(
+                "def f():\n    return 1\n", language="python", label="f.py"
+            ),
+            ContextSnippet("a < b\nand c", label="<Notes>"),
+            ContextSnippet(
+                r"\emph{x}", language="latex", html="<p><em>x</em></p>"
+            ),
+            ContextDownload("c" * 64, "sales.csv", 2048, label="Sales"),
+        ),
+    )
+
+    rendered = server_module._render_context(question, "abcd")
+
+    assert "<figcaption>f.py</figcaption>" in rendered
+    assert 'class="language-python highlight"' in rendered
+    assert "<figcaption>&lt;Notes&gt;</figcaption>" in rendered
+    assert "<p>a &lt; b\nand c</p>" in rendered
+    assert "<p><em>x</em></p>" in rendered
+    assert 'href="/abcd/context/3"' in rendered
+    assert "Download sales.csv (2.0 kB)" in rendered
+    assert server_module._render_context(MCQuestion("Q", ("A",)), "a") == ""
+@
+
+The size is what someone on a phone plan decides by, so it is rounded
+the way people read sizes: bytes below a kilobyte, then one decimal in
+kilo- or megabytes.
+
+<<test functions>>=
+def test_format_size_reads_like_a_file_manager():
+    assert server_module._format_size(512) == "512 bytes"
+    assert server_module._format_size(2048) == "2.0 kB"
+    assert server_module._format_size(3_400_000) == "3.4 MB"
+@
+
 The form renderer mirrors the parser's input policy.  Open questions keep both
 the textarea and file picker visible because respondents may need a short note
 plus an uploaded artifact.  The [[accept]] list is only a browser hint, but it
@@ -1386,15 +1621,15 @@ def _render_form(store: Store, full_hash: str) -> str:
             for index, option in enumerate(question.options)
         )
         return (
-            f"<p>{escape(question.text)}</p>"
-            f'<form method="post" action="/{prefix}">{inputs}'
+            _render_prompt(question, prefix)
+            + f'<form method="post" action="/{prefix}">{inputs}'
             "<button type=\"submit\">Submit</button></form>"
         )
 
     if isinstance(question, OpenQuestion):
         return (
-            f"<p>{escape(question.text)}</p>"
-            f'<form method="post" action="/{prefix}" '
+            _render_prompt(question, prefix)
+            + f'<form method="post" action="/{prefix}" '
             'enctype="multipart/form-data">'
             f'<textarea name="value" maxlength="{question.max_chars}"></textarea>'
             '<input type="file" name="file" '
@@ -1404,8 +1639,8 @@ def _render_form(store: Store, full_hash: str) -> str:
 
     if isinstance(question, WordCloudQuestion):
         return (
-            f"<p>{escape(question.text)}</p>"
-            f'<form method="post" action="/{prefix}">'
+            _render_prompt(question, prefix)
+            + f'<form method="post" action="/{prefix}">'
             f'<textarea name="value" '
             f'maxlength="{question.max_chars}"></textarea>'
             "<button type=\"submit\">Submit</button></form>"
@@ -1430,7 +1665,7 @@ def _render_form(store: Store, full_hash: str) -> str:
         high_end_label = f"<p>High end: {escape(question.high_label)}</p>"
 
     return (
-        f"<p>{escape(question.text)}</p>"
+        _render_prompt(question, prefix)
         + f'<form method="post" action="/{prefix}">'
         + low_end_label
         + inputs
@@ -1476,30 +1711,24 @@ def _render_ranking_form(question: RankingQuestion, prefix: str) -> str:
     else:
         instructions = f"<p>Rank your top {question.top_n}.</p>"
     return (
-        f"<p>{escape(question.text)}</p>"
-        f"{instructions}"
+        _render_prompt(question, prefix)
+        + f"{instructions}"
         f'<form method="post" action="/{prefix}">{rows}'
         '<button type="submit">Submit</button></form>'
     )
 @
 
 \subsection{Pin targets and forms}
+\label{sec:pin-targets}
 
 Both pin forms and both pin results pages show the same \emph{target},
 so its renderer is shared.  For an image question the target is an
 [[<img>]] pointing at the bytes route, which keeps the HTML small and
 lets the browser cache the picture across the form and the results
-page.  For a text question the target depends on the presentation
-fields: a cached pandoc rendering is inserted as-is --- it is the
-lecturer's own slide content passed through pandoc at registration, the
-same trust level as the served image --- otherwise a [[language]] is
-highlighted through the same Pygments path the open-answer renderer
-uses, and plain prose is escaped.  The Pygments helper returns an empty
-string for lexer names it does not know, in which case we fall back to
-an escaped [[<pre>]] so unknown languages still render their content
-safely.  This fallback also covers a [[latex]]-mode question whose
-registration ran without pandoc: Pygments knows a [[latex]] lexer, so
-respondents see highlighted source rather than nothing.
+page.  For a text question the target is the content, presented by the
+same rule as a shown context snippet
+(\cref{sec:prompt-and-context}): the cached pandoc rendering, else
+highlighted code, else escaped prose.
 
 <<functions>>=
 def _render_pin_target(question, prefix: str) -> str:
@@ -1507,14 +1736,9 @@ def _render_pin_target(question, prefix: str) -> str:
         return (
             f'<img class="pin-target" src="/{prefix}/image" alt="">'
         )
-    if question.content_html:
-        content = question.content_html
-    elif question.language:
-        content = _highlight_code(
-            question.content, question.language, ""
-        ) or f"<pre>{escape(question.content)}</pre>"
-    else:
-        content = f"<p>{escape(question.content)}</p>"
+    content = _render_text_body(
+        question.content, question.language, question.content_html
+    )
     return (
         '<div class="pin-target pin-content">' + content + "</div>"
     )
@@ -1550,8 +1774,8 @@ def _render_pin_form(question, prefix: str) -> str:
             "pins; tap a pin to remove it.</p>"
         )
     return (
-        f"<p>{escape(question.text)}</p>"
-        f"{instructions}"
+        _render_prompt(question, prefix)
+        + f"{instructions}"
         "<noscript><p>This question needs JavaScript to record "
         "where you tap.</p></noscript>"
         f'<form method="post" action="/{prefix}">'
@@ -4317,6 +4541,9 @@ def _handle_question_get(self, segments: list[str], query: str):
     if len(segments) == 2 and segments[1] == "image":
         <<serve the registered pin image>>
 
+    if len(segments) == 3 and segments[1] == "context":
+        <<serve a context download>>
+
     if len(segments) == 2 and segments[1] == "results":
         full_hash = self._resolve_for_respondent(segments[0])
         if full_hash is None:
@@ -4516,6 +4743,111 @@ self._send_bytes(
     headers={"X-Content-Type-Options": "nosniff"},
 )
 return
+@
+
+\paragraph{Context downloads.}
+\label{sec:context-downloads}
+A download offered in a question's context
+(\cref{sec:web-only-context}) is served at [[/<prefix>/context/<i>]],
+where [[i]] is the item's position in the question's context.  The
+position rather than the content digest names the file, because a
+position can only name a file this question offers: a route taking a
+digest would serve any file in the store's sidecar through any
+question's prefix.  The route goes through the respondent gate like
+the pin image, since the data is part of what the question reveals.
+Everything that is not a stored download --- a shown snippet, a
+position past the end or not a number, bytes missing from the
+sidecar --- is the same 404.
+
+The response is an attachment, so the browser saves the file rather
+than rendering it on the server's origin, and [[nosniff]] stops it from
+guessing a type other than the one guessed from the file name.
+
+<<serve a context download>>=
+full_hash = self._resolve_for_respondent(segments[0])
+if full_hash is None:
+    return
+item = _context_download(store.question(full_hash), segments[2])
+data = store.load_image(item.sha256) if item is not None else None
+if data is None:
+    self.send_error(HTTPStatus.NOT_FOUND)
+    return
+content_type, _encoding = mimetypes.guess_type(item.filename)
+self._send_bytes(
+    HTTPStatus.OK,
+    data,
+    content_type=content_type or "application/octet-stream",
+    headers={
+        "Content-Disposition": _attachment_disposition(item.filename),
+        "X-Content-Type-Options": "nosniff",
+    },
+)
+return
+@
+
+The position comes from the URL, so it is checked for being a plain
+number before it is used; [[isdecimal]] also rejects a negative
+position, which Python indexing would otherwise read from the end.
+
+<<functions>>=
+def _context_download(
+    question: Question, position: str
+) -> ContextDownload | None:
+    if not position.isdecimal():
+        return None
+    index = int(position)
+    if index >= len(question.context):
+        return None
+    item = question.context[index]
+    return item if isinstance(item, ContextDownload) else None
+@
+
+The file name goes into a header, so it must not be able to end it.
+RFC~6266 gives the header two forms: a quoted ASCII [[filename]] for
+old clients and an RFC~5987 [[filename*]] in percent-encoded UTF-8,
+which modern browsers prefer.  The ASCII form drops accents
+(\enquote{försäljning} becomes \enquote{forsaljning}) and replaces
+quotes, backslashes and control characters, the only characters that
+could break out of the quoted string.  The encoded form keeps the name
+as the lecturer wrote it.
+
+<<functions>>=
+def _attachment_disposition(filename: str) -> str:
+    ascii_name = (
+        unicodedata.normalize("NFKD", filename)
+        .encode("ascii", "ignore")
+        .decode("ascii")
+    )
+    fallback = "".join(
+        character
+        if character.isprintable() and character not in '"\\'
+        else "_"
+        for character in ascii_name
+    )
+    return (
+        f'attachment; filename="{fallback or "download"}"; '
+        f"filename*=UTF-8''{quote(filename, safe='')}"
+    )
+@
+
+A file name with a quote, a backslash or a line break must stay inside
+the header in both forms: the fallback replaces the three, and the
+encoded form percent-encodes them.
+
+<<test functions>>=
+def test_attachment_disposition_keeps_the_name_inside_the_header():
+    disposition = server_module._attachment_disposition('a"b\\c\r\n.csv')
+
+    assert disposition == (
+        'attachment; filename="a_b_c__.csv"; '
+        "filename*=UTF-8''a%22b%5Cc%0D%0A.csv"
+    )
+    assert server_module._attachment_disposition("ö") == (
+        "attachment; filename=\"o\"; filename*=UTF-8''%C3%B6"
+    )
+    assert 'filename="download"' in server_module._attachment_disposition(
+        "日本"
+    )
 @
 
 Submitting an answer is the only route that mutates the store.  It first limits the request
@@ -4955,6 +5287,109 @@ def test_image_route_404s_for_non_pin_and_missing_bytes(tmp_path):
 
     assert not_pin.status == 404
     assert no_bytes.status == 404
+@
+
+The context download route hands the bytes back as an attachment.  The
+file name travels twice in [[Content-Disposition]]: an ASCII fallback
+for old clients and an RFC~5987 [[filename*]] that keeps the
+\enquote{ö} in a Swedish file name.  The content type comes from the
+file name, so a phone can offer a fitting app for it, and [[nosniff]]
+stops a browser from guessing anything else.
+
+<<test functions>>=
+SALES_CSV = b"month,total\njan,3\n"
+
+
+def _download_store(tmp_path, *, save=True):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    digest = hashlib.sha256(SALES_CSV).hexdigest()
+    if save:
+        store.save_image(SALES_CSV)
+    question = MCQuestion(
+        "Pick one",
+        ("A", "B"),
+        context=(
+            ContextSnippet("Prices are in SEK."),
+            ContextDownload(digest, "försäljning.csv", len(SALES_CSV)),
+        ),
+    )
+    return store, store.register(question)
+
+
+def test_context_route_serves_the_download_as_an_attachment(tmp_path):
+    store, prefix = _download_store(tmp_path)
+
+    with _running_server(store) as port:
+        response, payload = _request_bytes(
+            port, "GET", f"/{prefix}/context/1"
+        )
+
+    assert response.status == 200
+    assert payload == SALES_CSV
+    assert response.getheader("Content-Type") == "text/csv"
+    assert response.getheader("X-Content-Type-Options") == "nosniff"
+    assert response.getheader("Content-Disposition") == (
+        'attachment; filename="forsaljning.csv"; '
+        "filename*=UTF-8''f%C3%B6rs%C3%A4ljning.csv"
+    )
+@
+
+Every other request under [[context]] is a 404, whatever the reason: a
+shown snippet has no file, an index past the end or not a number names
+nothing, and missing sidecar bytes cannot be served.
+
+<<test functions>>=
+def test_context_route_404s_for_anything_but_a_stored_download(tmp_path):
+    store, prefix = _download_store(tmp_path)
+    orphan_store, orphan_prefix = _download_store(
+        tmp_path / "orphan", save=False
+    )
+
+    with _running_server(store) as port:
+        statuses = [
+            _request_bytes(port, "GET", f"/{prefix}/context/{index}")[
+                0
+            ].status
+            for index in ("0", "2", "-1", "one")
+        ]
+    with _running_server(orphan_store) as port:
+        orphan, _payload = _request_bytes(
+            port, "GET", f"/{orphan_prefix}/context/1"
+        )
+
+    assert statuses == [404, 404, 404, 404]
+    assert orphan.status == 404
+@
+
+A download is part of what the question reveals, so the lecturer-paced
+gate covers it like the pin image: a respondent cannot fetch the data
+before the lecturer opens the question.  The projected results page
+leaves the context out, as it belongs to the answer page alone.
+
+<<test functions>>=
+def test_locked_question_gates_context_downloads(tmp_path):
+    store, prefix = _download_store(tmp_path)
+
+    with _running_server(store, remote=True) as port:
+        response, payload = _request_bytes(
+            port, "GET", f"/{prefix}/context/1"
+        )
+
+    assert response.status == 200
+    assert b"Try again" in payload
+    assert SALES_CSV not in payload
+
+
+def test_results_page_leaves_the_context_out(tmp_path):
+    store, prefix = _download_store(tmp_path)
+
+    with _running_server(store) as port:
+        _form, form_body = _request(port, "GET", f"/{prefix}")
+        _results, results_body = _request(port, "GET", f"/{prefix}/results")
+
+    assert "Prices are in SEK." in form_body
+    assert "Prices are in SEK." not in results_body
+    assert "/context/" not in results_body
 @
 
 A pin submission travels the ordinary urlencoded POST path end to end:
@@ -6582,6 +7017,7 @@ def test_ambiguous_prefix_returns_multiple_choices(tmp_path, monkeypatch):
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import errno
+import hashlib
 import http.client
 import json
 import logging
