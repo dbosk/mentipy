@@ -299,10 +299,17 @@ pre code.highlight {
 }
 
 .skip-form {
+  display: flex;
   margin: 0 0 0 auto;
 }
+.skip-form:not(:last-child) .skip-button {
+  border-bottom-right-radius: 0;
+  border-top-right-radius: 0;
+}
 .skip-form + .next-link {
-  margin-left: 0.5rem;
+  border-bottom-left-radius: 0;
+  border-top-left-radius: 0;
+  margin-left: 0;
 }
 .skip-button {
   background: #888;
@@ -311,7 +318,9 @@ pre code.highlight {
   color: white;
   cursor: pointer;
   font: inherit;
+  margin: 0;
   padding: 0.5rem 1rem;
+  width: auto;
 }
 .skip-button:hover {
   background: #666;
@@ -337,7 +346,9 @@ pre code.highlight {
   color: white;
   cursor: pointer;
   font: inherit;
+  margin: 0;
   padding: 0.5rem 1rem;
+  width: auto;
 }
 .reopen-button:hover {
   background: #3a7dc0;
@@ -2753,7 +2764,11 @@ means for the pacing).  Closing changes server state, so Skip is a
 [[REFRESH_SECONDS]], and with a [[POST]] followed by a redirect neither
 that reload nor the back button can repeat the skip.  Skip is a lecturer
 control rather than part of the respondent's forward path, so it ignores
-[[question.next]] and is shown even on the last question.
+[[question.next]] and is shown even on the last question.  Skip and Next are
+the lecturer's two ways forward, so the style sheet sets them flush as one
+split button.  The form is a flex box so that it is exactly as tall as its
+button, and the joined corners are squared only when Next follows; on the
+last question Skip stands alone with all four corners rounded.
 
 <<functions>>=
 def _render_skip_form(store: Store, full_hash: str) -> str:
