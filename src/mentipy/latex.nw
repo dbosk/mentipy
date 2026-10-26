@@ -20,15 +20,22 @@ QR generation for the scannable target, and the question/store modules for the
 stable polling contract.
 
 <<imports>>=
+import ast
+from dataclasses import dataclass, replace
 import os
 from pathlib import Path
 import subprocess
-from typing import Iterable
+from typing import Iterable, Union
 import warnings
+
+from pygments.lexers import get_lexer_for_filename
+from pygments.util import ClassNotFound
 
 from mentipy.network import resolve_base_url
 from mentipy.qr import make_qr, sidecar_include_path
 from mentipy.questions import (
+    ContextDownload,
+    ContextSnippet,
     MCQuestion,
     OpenQuestion,
     PinImageQuestion,
@@ -705,6 +712,15 @@ the second and third helper says exactly that: open as soon as the
 question before you is open.  The fourth question, on the next slide,
 keeps the default and waits for the lecturer.
 
+Every wrapper also takes the web-only [[context]]
+(\cref{sec:web-only-context}).  Unlike the flags it is not passed
+through as given: [[_resolve_context]] (\cref{sec:context-helpers})
+turns files into snippets, runs pandoc for LaTeX snippets and moves
+download bytes into the store.  That last step is why each wrapper
+settles on its [[active_store]] before it builds the question: the
+download's bytes must land in the same store that the question is
+registered in.
+
 <<functions>>=
 def mc(
     text: str,
@@ -714,6 +730,7 @@ def mc(
     next: bool = True,
     results: bool | None = None,
     lock: bool = True,
+    context: ContextItem | Iterable[ContextItem] = (),
     store: Store | None = None,
     base_url: str | None = None,
     qr_dir: str | Path | None = None,
@@ -724,6 +741,7 @@ def mc(
 ) -> str:
     """Return LaTeX for a multiple-choice question."""
 
+    active_store = store or Store()
     return question(
         MCQuestion(
             text=text,
@@ -732,8 +750,9 @@ def mc(
             next=next,
             results=results,
             lock=lock,
+            context=_resolve_context(context, active_store),
         ),
-        store=store,
+        store=active_store,
         base_url=base_url,
         qr_dir=qr_dir,
         qr_format=qr_format,
@@ -756,6 +775,7 @@ def open_text(
     next: bool = True,
     results: bool | None = None,
     lock: bool = True,
+    context: ContextItem | Iterable[ContextItem] = (),
     store: Store | None = None,
     base_url: str | None = None,
     qr_dir: str | Path | None = None,
@@ -766,6 +786,7 @@ def open_text(
 ) -> str:
     """Return LaTeX for an open free-text question."""
 
+    active_store = store or Store()
     return question(
         OpenQuestion(
             text=text,
@@ -774,8 +795,9 @@ def open_text(
             next=next,
             results=results,
             lock=lock,
+            context=_resolve_context(context, active_store),
         ),
-        store=store,
+        store=active_store,
         base_url=base_url,
         qr_dir=qr_dir,
         qr_format=qr_format,
@@ -800,6 +822,7 @@ def scale(
     next: bool = True,
     results: bool | None = None,
     lock: bool = True,
+    context: ContextItem | Iterable[ContextItem] = (),
     store: Store | None = None,
     base_url: str | None = None,
     qr_dir: str | Path | None = None,
@@ -810,6 +833,7 @@ def scale(
 ) -> str:
     """Return LaTeX for a numeric scale question."""
 
+    active_store = store or Store()
     return question(
         ScaleQuestion(
             text=text,
@@ -820,8 +844,9 @@ def scale(
             next=next,
             results=results,
             lock=lock,
+            context=_resolve_context(context, active_store),
         ),
-        store=store,
+        store=active_store,
         base_url=base_url,
         qr_dir=qr_dir,
         qr_format=qr_format,
@@ -853,6 +878,7 @@ def word_cloud(
     next: bool = True,
     results: bool | None = None,
     lock: bool = True,
+    context: ContextItem | Iterable[ContextItem] = (),
     store: Store | None = None,
     base_url: str | None = None,
     qr_dir: str | Path | None = None,
@@ -872,6 +898,7 @@ def word_cloud(
     submission and whether respondents may see the live tally.
     """
 
+    active_store = store or Store()
     return question(
         WordCloudQuestion(
             text=text,
@@ -885,8 +912,9 @@ def word_cloud(
             next=next,
             results=results,
             lock=lock,
+            context=_resolve_context(context, active_store),
         ),
-        store=store,
+        store=active_store,
         base_url=base_url,
         qr_dir=qr_dir,
         qr_format=qr_format,
@@ -913,6 +941,7 @@ def ranking(
     next: bool = True,
     results: bool | None = None,
     lock: bool = True,
+    context: ContextItem | Iterable[ContextItem] = (),
     store: Store | None = None,
     base_url: str | None = None,
     qr_dir: str | Path | None = None,
@@ -929,6 +958,7 @@ def ranking(
     canonical identity.
     """
 
+    active_store = store or Store()
     return question(
         RankingQuestion(
             text=text,
@@ -937,8 +967,9 @@ def ranking(
             next=next,
             results=results,
             lock=lock,
+            context=_resolve_context(context, active_store),
         ),
-        store=store,
+        store=active_store,
         base_url=base_url,
         qr_dir=qr_dir,
         qr_format=qr_format,
@@ -970,6 +1001,7 @@ def pin_image(
     next: bool = True,
     results: bool | None = None,
     lock: bool = True,
+    context: ContextItem | Iterable[ContextItem] = (),
     store: Store | None = None,
     base_url: str | None = None,
     qr_dir: str | Path | None = None,
@@ -989,6 +1021,7 @@ def pin_image(
     """
 
     data = resolve_path(image_path).read_bytes()
+    active_store = store or Store()
     prompt = PinImageQuestion.from_image_bytes(
         text,
         data,
@@ -998,8 +1031,8 @@ def pin_image(
         next=next,
         results=results,
         lock=lock,
+        context=_resolve_context(context, active_store),
     )
-    active_store = store or Store()
     active_store.save_image(data)
     return question(
         prompt,
@@ -1039,7 +1072,7 @@ def _latex_content_to_html(content: str) -> str | None:
         return None
     except subprocess.CalledProcessError as error:
         warnings.warn(
-            "pandoc could not convert the pin-text content: "
+            "pandoc could not convert the LaTeX content: "
             + error.stderr.decode("utf-8", "replace")
         )
         return None
@@ -1057,6 +1090,7 @@ def pin_text(
     next: bool = True,
     results: bool | None = None,
     lock: bool = True,
+    context: ContextItem | Iterable[ContextItem] = (),
     store: Store | None = None,
     base_url: str | None = None,
     qr_dir: str | Path | None = None,
@@ -1079,6 +1113,7 @@ def pin_text(
     content_html = None
     if language == "latex":
         content_html = _latex_content_to_html(content)
+    active_store = store or Store()
     return question(
         PinTextQuestion(
             text=text,
@@ -1090,8 +1125,9 @@ def pin_text(
             next=next,
             results=results,
             lock=lock,
+            context=_resolve_context(context, active_store),
         ),
-        store=store,
+        store=active_store,
         base_url=base_url,
         qr_dir=qr_dir,
         qr_format=qr_format,
@@ -1099,6 +1135,227 @@ def pin_text(
         show_url=show_url,
         layout=layout,
     )
+@
+
+\section{Web-only context}
+\label{sec:context-helpers}
+
+The context the web form shows next to a question
+(\cref{sec:web-only-context}) should come from the files the slides are
+built from, never be retyped: a copy drifts the moment the program on
+the slides changes.  A literate deck tangles its programs into files,
+so the authoring side reads those.  Two kinds of file need two helpers.
+A program is \emph{shown}, by [[file_snippet]]; a data set too large
+to read on a phone is \emph{offered} for download, by
+[[file_download]].
+
+What to put in a question's context deserves one rule: only the
+premises.  A run of the program the question asks about, a file that
+run produces, or the contrasting version of the code gives the answer
+away, and so does anything the discussion after the vote will point
+at, which belongs on the slide.  The helpers cannot enforce this, so
+the docstrings say it.
+
+\subsection{Showing a file}
+
+[[file_snippet]] reads the whole file by default.  Often only part of
+it is relevant: the class [[Account]] from [[bank.py]], without the
+[[Bank]] that follows.  Line ranges would select that part, but they
+drift whenever the file above the range changes, and a literate
+program's tangled files change all the time.  A \emph{name} does not
+drift, so the helper takes [[name="Account"]], or a dotted
+[[name="Account.deposit"]] for a method, and finds it with [[ast]].
+The file is read through [[resolve_path]] like every other file
+Mentipy reads, so a deck bound into a book still finds its own files.
+
+The language defaults to Pygments' guess from the file name, the same
+lexer names the server highlights with, and to prose when Pygments has
+no lexer for the file.  The label defaults to the file name, with the
+definition's name after it when only part of the file is shown, so a
+context of several snippets says where each one comes from.
+
+<<functions>>=
+def file_snippet(
+    path: str | Path,
+    *,
+    name: str | None = None,
+    language: str | None = None,
+    label: str | None = None,
+) -> ContextSnippet:
+    """Return a context snippet that shows a file on the web form.
+
+    ``name`` selects one class or function by name, dotted for a
+    method (``"Account.deposit"``); by default the whole file is shown.
+    ``language`` defaults to Pygments' lexer for the file name and
+    ``label`` to the file name.  Show only the premises of the
+    question: never a run of the program asked about, its output or
+    the contrasting version.
+    """
+
+    source_path = Path(path)
+    text = resolve_path(source_path).read_text(encoding="utf-8")
+    if name is not None:
+        text = _python_definition(text, name, source_path)
+    if language is None:
+        language = _language_for(source_path)
+    if label is None:
+        label = source_path.name
+        if name is not None:
+            label += f": {name}"
+    return ContextSnippet(text, language=language, label=label)
+@
+
+Pygments raises [[ClassNotFound]] for a file name it has no lexer for;
+that is the prose case, not an error.
+
+<<functions>>=
+def _language_for(path: Path) -> str | None:
+    try:
+        lexer = get_lexer_for_filename(path.name)
+    except ClassNotFound:
+        return None
+    return lexer.aliases[0] if lexer.aliases else None
+@
+
+The lookup walks the dotted name one scope at a time: the module's
+top-level statements first, then the body of each class found.  The
+extracted span starts at the first decorator rather than at the
+[[def]] line, because [[ast]] numbers a decorated definition from its
+[[def]] and dropping [[@functools.cache]] would change what the
+respondent reads the code as doing.  Slicing the source lines, rather
+than unparsing the tree, keeps the author's comments and layout.  A
+method is dedented so it reads like the top-level code it is shown
+as, by the column its definition starts in rather than by the lines'
+common indentation: a docstring with lines in column 0 has no common
+indentation, and would leave the whole method indented.  On a miss the
+error names what the scope does contain, which is what the author
+needs to fix the spelling; a definition nested in an [[if]] or a
+[[try]] is not in any scope the walk visits, so the error says so
+rather than listing nothing.  A name only means something in Python
+source, so a file that does not parse is reported as such.
+
+<<functions>>=
+def _python_definition(source: str, name: str, path: Path) -> str:
+    lines = source.splitlines(keepends=True)
+    try:
+        scope = ast.parse(source, filename=str(path)).body
+    except SyntaxError as error:
+        raise ValueError(
+            f"{path}: a name needs a Python file, and this one does not"
+            f" parse as Python: {error.msg}"
+        ) from error
+    node = None
+    for part in name.split("."):
+        definitions = [
+            statement
+            for statement in scope
+            if isinstance(
+                statement,
+                (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+            )
+        ]
+        node = next(
+            (
+                definition
+                for definition in definitions
+                if definition.name == part
+            ),
+            None,
+        )
+        if node is None:
+            found = ", ".join(
+                definition.name for definition in definitions
+            ) or "no classes or functions at that level"
+            raise ValueError(
+                f"{path}: no class or function {name!r}; found: {found}"
+            )
+        scope = node.body
+    start = min(
+        [node.lineno]
+        + [decorator.lineno for decorator in node.decorator_list]
+    )
+    return "".join(
+        _strip_indent(line, node.col_offset)
+        for line in lines[start - 1 : node.end_lineno]
+    )
+
+
+def _strip_indent(line: str, indent: int) -> str:
+    leading = len(line) - len(line.lstrip(" \t"))
+    return line[min(indent, leading) :]
+@
+
+\subsection{Offering a file for download}
+
+A download's bytes belong in the store's sidecar, and the store is not
+known until the question helper runs, since the author passes it there
+and not to [[file_download]].  The helper therefore only records the
+request; [[_resolve_context]] reads the file and saves its bytes once
+the store is settled.  Reading late costs nothing, because both calls
+happen in the same PythonTeX block.
+
+<<functions>>=
+@dataclass(frozen=True)
+class _FileDownload:
+    path: Path
+    label: str | None
+
+
+def file_download(
+    path: str | Path, *, label: str | None = None
+) -> _FileDownload:
+    """Return a context item that offers a file for download.
+
+    Use it for files too large to read on a phone, such as a data set.
+    The file is read when the question helper registers the question,
+    and its bytes are stored next to the store, not in it.  The
+    respondent's browser saves it under its own file name.
+    """
+
+    return _FileDownload(Path(path), label)
+@
+
+\subsection{Resolving the context}
+
+The question helpers accept a list of items, or one item on its own:
+[[context=file_snippet("bank.py")]] reads more naturally than a
+one-element list.  A string counts as one item, not as a sequence of
+characters, and is shorthand for prose.  A [[latex]] snippet is passed
+through pandoc once, with the same helper and the same fallback as a
+pin-text target, so the server never needs pandoc.  An HTML rendering
+already present is kept, which lets an author supply their own.
+
+<<functions>>=
+ContextItem = Union[ContextSnippet, ContextDownload, _FileDownload, str]
+
+
+def _resolve_context(
+    context: ContextItem | Iterable[ContextItem], store: Store
+) -> tuple[ContextSnippet | ContextDownload, ...]:
+    if isinstance(
+        context, (str, ContextSnippet, ContextDownload, _FileDownload)
+    ):
+        context = (context,)
+    return tuple(_resolve_context_item(item, store) for item in context)
+
+
+def _resolve_context_item(
+    item: ContextItem, store: Store
+) -> ContextSnippet | ContextDownload:
+    if isinstance(item, str):
+        return ContextSnippet(item)
+    if isinstance(item, _FileDownload):
+        data = resolve_path(item.path).read_bytes()
+        return ContextDownload(
+            store.save_image(data), item.path.name, len(data), label=item.label
+        )
+    if isinstance(item, ContextSnippet):
+        if item.language == "latex" and item.html is None:
+            return replace(item, html=_latex_content_to_html(item.text))
+        return item
+    if isinstance(item, ContextDownload):
+        return item
+    raise TypeError(f"not a context item: {item!r}")
 @
 
 \section{Question snippets for Beamer frames}
@@ -1361,6 +1618,48 @@ def test_helpers_thread_lock_false_into_the_stored_question(
     question = store.question(entry["hash"])
 
     assert question.lock is False
+@
+
+The context travels the same route, but unlike the flags it is resolved
+on the way: a file becomes a highlighted snippet, a bare string becomes
+prose, and a download's bytes move into the store's sidecar.  Every
+helper must do all three, because a question of any kind can be about a
+program or a data set.
+
+<<test functions>>=
+SALES_CSV = b"month,total\njan,3\nfeb,5\n"
+
+
+@pytest.mark.parametrize("factory", HELPER_FACTORIES)
+def test_helpers_resolve_the_context_into_the_stored_question(
+    tmp_path, monkeypatch, factory
+):
+    monkeypatch.chdir(tmp_path)
+    Path("bank.py").write_text("class Account:\n    pass\n")
+    Path("sales.csv").write_bytes(SALES_CSV)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    factory(
+        context=[
+            file_snippet("bank.py"),
+            "Prices are in SEK.",
+            file_download("sales.csv", label="Sales"),
+        ],
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir=DEFAULT_QR_DIR,
+    )
+
+    [entry] = store.all_questions()
+    code, prose, download = store.question(entry["hash"]).context
+
+    assert code == ContextSnippet(
+        "class Account:\n    pass\n", language="python", label="bank.py"
+    )
+    assert prose == ContextSnippet("Prices are in SEK.")
+    assert (download.filename, download.label) == ("sales.csv", "Sales")
+    assert download.size == len(SALES_CSV)
+    assert store.load_image(download.sha256) == SALES_CSV
 @
 
 The word-cloud wrapper meets the same registration contract as
@@ -1677,6 +1976,200 @@ def test_pin_text_warns_and_degrades_without_pandoc(
     assert store.question(entry["hash"]).content_html is None
 @
 
+
+\subsection{Web-only context}
+
+The tests below run [[file_snippet]] on a real file with the shapes
+that matter: two classes, a method, and a decorated function.  Each
+extraction is compared with the exact text a respondent should see,
+because an off-by-one line range or a lost decorator is invisible to a
+weaker assertion.
+
+<<test functions>>=
+BANK_SOURCE = """import functools
+
+
+class Account:
+    \"\"\"A bank account.\"\"\"
+
+    def deposit(self, amount):
+        self.balance += amount
+
+
+class Bank:
+    pass
+
+
+@functools.cache
+def interest(rate):
+    return rate * 2
+"""
+
+
+@pytest.fixture
+def bank_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    Path("bank.py").write_text(BANK_SOURCE)
+
+
+def test_file_snippet_shows_a_whole_file_in_its_language(bank_file):
+    assert file_snippet("bank.py") == ContextSnippet(
+        BANK_SOURCE, language="python", label="bank.py"
+    )
+
+
+def test_file_snippet_takes_a_class_or_a_method_by_name(bank_file):
+    account = file_snippet("bank.py", name="Account")
+    deposit = file_snippet("bank.py", name="Account.deposit")
+
+    assert account.text == (
+        "class Account:\n"
+        '    """A bank account."""\n'
+        "\n"
+        "    def deposit(self, amount):\n"
+        "        self.balance += amount\n"
+    )
+    assert account.label == "bank.py: Account"
+    assert deposit.text == (
+        "def deposit(self, amount):\n    self.balance += amount\n"
+    )
+
+
+def test_file_snippet_keeps_the_decorators(bank_file):
+    assert file_snippet("bank.py", name="interest").text == (
+        "@functools.cache\ndef interest(rate):\n    return rate * 2\n"
+    )
+@
+
+A misspelt name must fail the slide build with the names that do exist,
+because the author's next step is to pick the right one.
+
+<<test functions>>=
+def test_file_snippet_names_the_candidates_on_a_miss(bank_file):
+    with pytest.raises(ValueError, match="Account, Bank, interest"):
+        file_snippet("bank.py", name="Ledger")
+    with pytest.raises(ValueError, match="deposit"):
+        file_snippet("bank.py", name="Account.withdraw")
+    with pytest.raises(ValueError, match="no classes or functions"):
+        file_snippet("bank.py", name="Bank.open")
+@
+
+A name only means something in Python source, so asking for one in any
+other file is an authoring error with a message of its own, not a raw
+[[SyntaxError]] from the parser.
+
+<<test functions>>=
+def test_file_snippet_rejects_a_name_in_a_file_that_is_not_python(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    Path("sales.csv").write_text("name,city\nAnna Berg,Umea\n")
+
+    with pytest.raises(ValueError, match="sales.csv.*Python"):
+        file_snippet("sales.csv", name="city")
+@
+
+A method is shown without the indentation of its class, also when its
+docstring has lines that start in column 0 --- which a common-prefix
+dedent would refuse to touch, leaving the whole method indented.
+
+<<test functions>>=
+def test_file_snippet_dedents_a_method_with_a_flush_left_docstring(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    Path("report.py").write_text(
+        "class Report:\n"
+        "    def render(self):\n"
+        '        """Render the report.\n'
+        "\n"
+        "Flush-left continuation.\n"
+        '        """\n'
+        "        return 1\n"
+    )
+
+    assert file_snippet("report.py", name="Report.render").text == (
+        "def render(self):\n"
+        '    """Render the report.\n'
+        "\n"
+        "Flush-left continuation.\n"
+        '    """\n'
+        "    return 1\n"
+    )
+@
+
+A file Pygments cannot name is shown as prose, and the author can
+override both the guess and the label.
+
+<<test functions>>=
+def test_file_snippet_guesses_and_accepts_overrides(bank_file):
+    Path("notes.unknownext").write_text("Read this first.")
+
+    assert file_snippet("notes.unknownext").language is None
+    overridden = file_snippet("bank.py", language="text", label="Bank")
+    assert (overridden.language, overridden.label) == ("text", "Bank")
+@
+
+A lone item needs no list: [[context=file_snippet("bank.py")]] reads
+naturally, and a bare string must not be split into one snippet per
+character.
+
+<<test functions>>=
+def test_a_single_context_item_needs_no_list(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    mc(
+        "Pick one",
+        ["A", "B"],
+        context="Prices are in SEK.",
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir=DEFAULT_QR_DIR,
+    )
+
+    [entry] = store.all_questions()
+    assert store.question(entry["hash"]).context == (
+        ContextSnippet("Prices are in SEK."),
+    )
+@
+
+A [[latex]] snippet gets the pin-text treatment: pandoc runs once and
+its HTML is cached on the snippet.  As in the pin-text test, the
+subprocess call is replaced, so that the test needs no pandoc and does
+not depend on one pandoc version's output.
+
+<<test functions>>=
+def test_a_latex_context_snippet_caches_pandoc_html(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    def fake_run(args, **kwargs):
+        assert args[0] == "pandoc"
+        assert kwargs["input"] == rb"A shop sells \emph{many} items."
+
+        class Completed:
+            stdout = b"<p>A shop sells <em>many</em> items.</p>"
+
+        return Completed()
+
+    monkeypatch.setattr("mentipy.latex.subprocess.run", fake_run)
+
+    mc(
+        "Pick one",
+        ["A", "B"],
+        context=[
+            ContextSnippet(r"A shop sells \emph{many} items.", language="latex")
+        ],
+        store=store,
+        base_url="http://example.test:8080",
+        qr_dir=DEFAULT_QR_DIR,
+    )
+
+    [entry] = store.all_questions()
+    [snippet] = store.question(entry["hash"]).context
+    assert snippet.html == "<p>A shop sells <em>many</em> items.</p>"
+@
 
 The scale wrapper should meet the same registration contract as the other
 helpers, and the default rendering path should still resolve a base URL when
@@ -2306,6 +2799,35 @@ def test_pin_image_reads_the_image_relative_to_the_base_dir(book, tmp_path):
 
     assert "\\includegraphics[width=\\linewidth]{pin.png}" in rendered
     assert (deck / "mentipy-images").is_dir()
+@
+
+Context files are read through the base directory as well, and a
+download's bytes land in the deck's store, not the book's.
+
+<<test functions>>=
+def test_context_files_are_read_relative_to_the_base_dir(book, tmp_path):
+    deck = tmp_path / "deck"
+    deck.mkdir()
+    (deck / "bank.py").write_text("x = 1\n")
+    (deck / "sales.csv").write_bytes(SALES_CSV)
+    set_base_dir("../deck")
+
+    mc(
+        "Pick one",
+        ["A", "B"],
+        context=[file_snippet("bank.py"), file_download("sales.csv")],
+        store=Store("mentipy.json", min_prefix=4),
+        base_url="http://example.test:8080",
+    )
+
+    deck_store = Store(deck / "mentipy.json")
+    [entry] = deck_store.all_questions()
+    code, download = deck_store.question(entry["hash"]).context
+    assert (code.text, code.label) == ("x = 1\n", "bank.py")
+    assert (deck / "mentipy-images" / download.sha256).read_bytes() == (
+        SALES_CSV
+    )
+    assert list(book.iterdir()) == []
 @
 
 This is the regression test for the server rewrite: a server started

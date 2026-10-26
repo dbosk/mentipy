@@ -148,6 +148,10 @@ def latex_pydoc_excerpt():
             lines.append(line)
         if stripped.startswith("write_snippet("):
             lines.append(line)
+        if stripped.startswith("file_snippet("):
+            lines.append(line)
+        if stripped.startswith("file_download("):
+            lines.append(line)
     return "\n".join(lines)
 
 
@@ -951,6 +955,117 @@ the form falls back to syntax-highlighted LaTeX source.
   presentation \emph{within} a single string-valued field family, the
   same separation the word cloud demonstrated with its visualisation
   knobs.
+}
+
+\subsection{Context on the Web Pages}
+
+A slide has little room, but the phone a student answers on has a lot.
+A question about a program that was built up over several slides can
+show only a fragment of it on the slide, while the whole program fits
+on the answer page.  Every question helper therefore takes a
+[[context]]: material that the answer page shows between the question
+and the inputs, and that the results page shows between the question
+and the results.  The slide, which has no room for it, does not show
+it.
+
+The context should come from the files the slides are built from, never
+be retyped, or it drifts the moment the program changes.
+[[file_snippet]] shows a file, highlighted by the language Pygments
+guesses from its name, and with [[name]] it shows a single class or
+function of it --- by name rather than by line numbers, because line
+numbers drift whenever the file above them changes:
+
+\begin{pyblock}
+from mentipy.latex import file_snippet
+
+with open("mentipy-obj/bank.py", "w", encoding="utf-8") as f:
+    f.write(
+        "class Account:\n"
+        "    def __init__(self):\n"
+        "        self.balance = 0\n"
+        "\n"
+        "    def deposit(self, amount):\n"
+        "        self.balance += amount\n"
+        "\n"
+        "\n"
+        "class Bank:\n"
+        "    def __init__(self):\n"
+        "        self.accounts = {}\n"
+    )
+
+account = file_snippet("mentipy-obj/bank.py", name="Account")
+print(account.label)
+print(account.text)
+\end{pyblock}
+
+The snippet is captioned with its file and name, and holds the class and
+nothing after it:
+\begin{center}
+\begin{minipage}{0.6\linewidth}
+\printpythontex[verbatim]
+\end{minipage}
+\end{center}
+
+A data set too large to read on a phone is better offered as a
+download: [[file_download]] stores the file next to [[mentipy.json]]
+and the answer page links to it, with its size, so a student on a
+phone plan knows what a tap costs.  A plain string is prose.  The
+question itself is an ordinary call with one more keyword:
+
+\begin{minted}{python}
+mc(
+    "What is the balance after the loop?",
+    ["0", "100", "It raises an error"],
+    context=[
+        file_snippet("bank.py", name="Account"),
+        file_download("transactions.csv", label="All transactions"),
+        "Each row of the file is one call to deposit.",
+    ],
+)
+\end{minted}
+
+The command line takes the files with [[--context]] and
+[[--context-download]], each repeatable:
+
+\begin{minted}{text}
+mentipy render mc "What is the balance after the loop?" \
+  "0" "100" "It raises an error" \
+  --context bank.py --context-download transactions.csv
+\end{minted}
+
+The context is part of the question's identity, as a pin-text target
+is: two \enquote{What is printed?} questions with different programs in
+their context are two questions, each with its own URL, QR code and
+answers.  Only the premises count --- the text of a snippet and the
+bytes of a download --- so a new caption or file name keeps the
+question.  Editing the program does not: reformatting it, or renaming a
+variable in it, makes a new question with a new QR code, which the next
+compile prints, and the answers collected before the edit stay with the
+old one.
+
+What belongs in the context is the premises and nothing more.  A run of
+the program the question asks about, a file that run produces, or the
+contrasting version of the code gives the answer away, and anything the
+discussion after the vote points at belongs on the slide.
+
+\ltnote{%
+  \textbf{Variation pattern}: Contrast between surfaces.
+
+  \textbf{What varies}: Where the material appears: the answer page
+  and the results page show the context, while the slide does not.
+  Within the context, the item kind varies --- a shown file, a part of a
+  file by name, an offered download, prose --- each matched to how much
+  a student can read on a phone.
+
+  \textbf{What stays invariant}: The question kind and the keyword:
+  every kind takes the same [[context]], and the same premises always
+  give the same question.
+
+  \textbf{What this reveals}: The context is the web pages' share of
+  the question, the part the slide has no room for.  The identity
+  paragraph contrasts a new caption or file name, which keeps the
+  question, with an edited program, which makes a new one; the reader
+  learns to separate how the premises are shown from what they are.
 }
 
 \subsection{Sequencing Questions}
