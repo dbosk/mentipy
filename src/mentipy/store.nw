@@ -115,6 +115,7 @@ STORE_TEMPLATE = {"questions": {}, "answers": {}, "registration_counter": 0}
 QR_TARGETS_KEY = "qr_targets"
 REGISTRATION_COUNTER_KEY = "registration_counter"
 REGISTRATION_SERIAL_KEY = "registration_serial"
+SERVER_STARTED_KEY = "server_started"
 @
 
 The environment override makes tests cheap and also gives power users a simple
@@ -499,6 +500,25 @@ def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 @
 
+Reading a timestamp back is the inverse.  [[datetime.fromisoformat]]
+only learnt to parse the [[Z]] suffix in Python~3.11, so rather than
+raise the supported Python floor or pull in [[dateutil]], the parser
+substitutes [[+00:00]] back, undoing what the writer did.  Comparisons
+must go through the parsed value, never the strings: [[isoformat]] drops
+the microseconds when they are zero, so the string [[...00Z]] sorts
+after [[...00.000001Z]] although it is earlier.  A naive value, from a
+hand-edited file, is taken as UTC.
+
+<<functions>>=
+def parse_timestamp(timestamp: str) -> datetime:
+    """Return the stored UTC ``timestamp`` as an aware datetime."""
+
+    moment = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment
+@
+
 Humans read answer logs in the room's local time, not in the storage time zone.
 Formatting is therefore a separate public helper: stored data remains stable,
 while every human-facing renderer can use the same local-time presentation.
@@ -507,10 +527,7 @@ while every human-facing renderer can use the same local-time presentation.
 def format_timestamp(timestamp: str) -> str:
     """Return ``timestamp`` formatted in the local timezone."""
 
-    moment = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-
+    moment = parse_timestamp(timestamp)
     return moment.astimezone().strftime("%Y-%m-%d %H:%M")
 @
 
@@ -2102,9 +2119,9 @@ classroom poll.
 \begin{description}
 \item[Time-window filtering] A question reused across lectures, or even
   across years, accumulates every answer it has ever received under the
-  same canonical hash.  The lecturer wants to see \emph{just this hour}
-  or \emph{just today} as easily as the lifetime view, without that
-  pooling becoming an obstacle.
+  same canonical hash.  The lecturer wants to see \emph{just this
+  lecture}, \emph{just this hour} or \emph{just today} as easily as the
+  lifetime view, without that pooling becoming an obstacle.
 \item[Descriptive statistics] Counts alone do not tell a lecturer whether
   the class agrees, splits, or drifts; means and standard deviations make
   scale results actionable, and a mode callout makes multiple-choice
@@ -2117,17 +2134,47 @@ because the CLI export and the JSON results endpoint still need it;
 aggregated counts and statistics ride on top so HTML, JSON, and CLI
 consumers all read the same numbers.
 
+Three windows are lengths of time counted back from now.  The fourth,
+the \emph{session}, starts when the server last started instead.  That
+is the lecture: a sliding hour drops a question asked before the break
+in a two-hour slot to zero votes by the time it is discussed after it,
+while the session keeps it.  The server is the only writer of answers,
+so its start bounds every answer of the lecture, and nothing the author
+does during the lecture, recompiling a deck included, moves it.  A
+restart does begin a new session, as it relocks the deck; the longer
+windows remain for that case.
+
 <<constants>>=
 RESULTS_WINDOW_DELTAS = {
     "hour": timedelta(hours=1),
     "day": timedelta(days=1),
     "all": None,
 }
+RESULTS_WINDOWS = ("session", *RESULTS_WINDOW_DELTAS)
+@
+
+The start time lives in the store file, next to the answers it bounds,
+rather than in the server's memory, because [[mentipy view]] and
+[[mentipy watch]] read the store from another process and must cut at
+the same moment as the projected page.  It is a single timestamp that
+each start overwrites; the lecture's progress, which questions are
+open, stays in the server's memory as before.
+
+<<store methods>>=
+def mark_server_start(self):
+    """Record now as the start of the server session."""
+
+    with self._lock:
+        data = self._data()
+        data[SERVER_STARTED_KEY] = _timestamp()
+        self._write(data)
 @
 
 Unknown values fall back to [[\"all\"]] so a stray query string can never
 wedge the page; the explicit allow-list also keeps the policy auditable
-in one place.
+in one place.  A session window on a store that no server has started,
+one written by an older version, has no start to cut at and falls back
+the same way.
 
 <<store methods>>=
 def results(self, full_hash: str,
@@ -2135,9 +2182,10 @@ def results(self, full_hash: str,
     """Return aggregated results for ``full_hash``.
 
     The optional ``window`` keyword filters the answer log by recency.
-    Accepted values are ``"hour"`` (the last 60 minutes), ``"day"``
-    (the last 24 hours), and ``"all"`` (default; the entire history).
-    Unknown values are treated as ``"all"``.
+    Accepted values are ``"session"`` (since the server last started),
+    ``"hour"`` (the last 60 minutes), ``"day"`` (the last 24 hours),
+    and ``"all"`` (default; the entire history).  Unknown values, and
+    ``"session"`` before any server start, are treated as ``"all"``.
     """
 
     <<load metadata and apply window filter>>
@@ -2161,12 +2209,9 @@ def results(self, full_hash: str,
 
 Loading metadata is unchanged from the previous implementation; the new
 behaviour is the window filter.  We compute the cutoff once and keep
-answers whose ISO timestamp is at or after it.  The writer always emits
-the [[Z]] suffix for UTC, but [[datetime.fromisoformat]] only learnt to
-parse [[Z]] in Python~3.11.  Rather than raise the supported Python
-floor or pull in [[dateutil]], we substitute [[Z]] back to [[+00:00]]
-before parsing --- the inverse of the substitution the writer applied
-when emitting the timestamp.
+answers whose timestamp is at or after it.  A window without a cutoff,
+whether everything was asked for or no cutoff can be found, applies as
+[[\"all\"]].
 
 <<load metadata and apply window filter>>=
 data = self._data()
@@ -2174,26 +2219,48 @@ meta = data["questions"][full_hash]
 question = question_from_dict(meta)
 all_answers = list(data["answers"].get(full_hash, []))
 
-delta = RESULTS_WINDOW_DELTAS.get(window)
-if window == "all" or delta is None:
+cutoff = _window_cutoff(data, window)
+if cutoff is None:
+    applied_window = "all"
     answers = all_answers
 else:
-    cutoff = datetime.now(timezone.utc) - delta
+    applied_window = window
     answers = [
         answer for answer in all_answers
-        if datetime.fromisoformat(answer["ts"].replace("Z", "+00:00"))
-        >= cutoff
+        if parse_timestamp(answer["ts"]) >= cutoff
     ]
+@
+
+The start time is the one value in the store that nothing checks on the
+way in, and the file is edited by hand at times.  A start that is not
+a timestamp counts as no start, so the window falls back to everything
+like an unknown one, rather than breaking every default results page.
+
+<<functions>>=
+def _window_cutoff(data: dict[str, Any], window: str) -> datetime | None:
+    if window == "session":
+        return _session_start(data)
+    delta = RESULTS_WINDOW_DELTAS.get(window)
+    if delta is None:
+        return None
+    return datetime.now(timezone.utc) - delta
+
+
+def _session_start(data: dict[str, Any]) -> datetime | None:
+    started = data.get(SERVER_STARTED_KEY)
+    if not isinstance(started, str):
+        return None
+    try:
+        return parse_timestamp(started)
+    except ValueError:
+        return None
 @
 
 The base structure echoes back which window actually applied so HTML
 and JSON consumers can render the right active filter; mismatched values
-collapse to [[\"all\"]] before they reach the response.
+have collapsed to [[\"all\"]] before they reach the response.
 
 <<assemble base results dict>>=
-applied_window = (
-    window if window in RESULTS_WINDOW_DELTAS else "all"
-)
 results = {
     "hash": full_hash,
     "url_prefix": meta["url_prefix"],
@@ -2472,6 +2539,101 @@ def test_results_window_filter_keeps_only_recent_answers(tmp_path):
     assert all_time["total"] == 2
     assert last_hour["window"] == "hour"
     assert all_time["window"] == "all"
+@
+
+The session window is the one a lecture needs: everything since the
+server last started.  An answer recorded a moment before the start is
+well inside the last hour, so only a cut at the start itself leaves it
+out.  A second start, a restart, begins a new session.
+
+<<test functions>>=
+def test_results_session_window_counts_answers_since_the_server_start(
+    tmp_path,
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(MCQuestion("Pick", ("A", "B"))))
+    store.record(full_hash, 0)
+    store.mark_server_start()
+    store.record(full_hash, 1)
+
+    session = store.results(full_hash, window="session")
+    everything = store.results(full_hash, window="all")
+    store.mark_server_start()
+    restarted = store.results(full_hash, window="session")
+
+    assert session["window"] == "session"
+    assert session["total"] == 1
+    assert session["counts"] == [0, 1]
+    assert everything["total"] == 2
+    assert restarted["total"] == 0
+
+
+def test_results_session_window_without_a_server_start_counts_everything(
+    tmp_path,
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(OpenQuestion("Why?")))
+    store.record(full_hash, "because")
+
+    results = store.results(full_hash, window="session")
+
+    assert results["window"] == "all"
+    assert results["total"] == 1
+@
+
+A start time written without microseconds, as [[isoformat]] does when
+they happen to be zero, must still order correctly against one with
+them; comparing the strings would put [[...00Z]] after
+[[...00.000001Z]].  The parser is checked on its own and where the
+window uses it: as strings, the answer half a second after the start
+below would sort before it and drop out of the session.
+
+<<test functions>>=
+def test_parse_timestamp_orders_whole_and_fractional_seconds():
+    whole = parse_timestamp("2026-10-27T09:58:00Z")
+    fraction = parse_timestamp("2026-10-27T09:58:00.000001Z")
+
+    assert whole < fraction
+    assert whole.tzinfo is not None
+
+
+def test_results_session_window_compares_moments_not_strings(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(OpenQuestion("Why?")))
+    store.record(full_hash, "before")
+    store.record(full_hash, "after")
+    data = store._data()
+    data[SERVER_STARTED_KEY] = "2026-10-27T09:58:00Z"
+    data["answers"][full_hash][0]["ts"] = "2026-10-27T09:57:59.900000Z"
+    data["answers"][full_hash][1]["ts"] = "2026-10-27T09:58:00.500000Z"
+    store._write(data)
+
+    results = store.results(full_hash, window="session")
+
+    assert [answer["value"] for answer in results["answers"]] == ["after"]
+@
+
+The start time is the one value in the store that nothing validates on
+the way in, and a hand-edited file can hold anything.  An unreadable
+start must not take down every default results page; like an unknown
+window, it falls back to everything.
+
+<<test functions>>=
+@pytest.mark.parametrize("started", ["yesterday", 12, ""])
+def test_results_session_window_with_a_bad_start_counts_everything(
+    tmp_path, started
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(OpenQuestion("Why?")))
+    store.record(full_hash, "because")
+    data = store._data()
+    data[SERVER_STARTED_KEY] = started
+    store._write(data)
+
+    results = store.results(full_hash, window="session")
+
+    assert results["window"] == "all"
+    assert results["total"] == 1
 @
 
 Unknown window names should not break result rendering.  Falling back to the
