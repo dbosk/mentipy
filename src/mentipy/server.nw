@@ -294,7 +294,7 @@ pre code.highlight {
 .md-answer ul, .md-answer ol { margin: 0.25rem 0 0.25rem 1.5rem; }
 
 .context {
-  margin: 0 0 1rem;
+  margin: 1.5rem 0 1rem;
 }
 .context-item {
   margin: 0 0 0.75rem;
@@ -1419,22 +1419,25 @@ def test_render_index_labels_questions_when_given_progress(tmp_path):
 \subsection{The prompt and its context}
 \label{sec:prompt-and-context}
 
-Every form opens the same way: the prompt, then the question's
-context (\cref{sec:web-only-context}), then the inputs.  The prompt
-comes first so that a long program cannot push the question off the
-screen, and the context comes before the inputs so that the respondent
-reads the premises before answering.  One helper builds that opening
-for every form, so that no question kind can leave the context out or
-put it somewhere else, and so that the prompt's inline code
-(\cref{sec:inline-code}) is rendered the same way on every form.  The
-results page shows the same context under its heading
+Every form is laid out the same way: the prompt, then the inputs with
+the Submit button, then the question's context
+(\cref{sec:web-only-context}).  The question and its options are one
+unit, read together, while the context is reference material the
+respondent scrolls down to and back from.  With the context between
+them, a long program pushed the options so far below the question that
+the two could no longer be seen together; repeating the question under
+the context would have fixed that only by looking odd under a short
+one.  Last on the page, the context can be as long as it needs to be.
+The form assembler (\cref{sec:form-assembly}) places all three parts
+for every kind, so that no kind can leave the context out or put it
+somewhere else, and this helper renders the prompt's inline code
+(\cref{sec:inline-code}) the same way on every form.  The results page
+shows the same context after the aggregate results
 (\cref{sec:results-page}).
 
 <<functions>>=
-def _render_prompt(question: Question, prefix: str) -> str:
-    return f"<p>{_render_inline(question.text)}</p>" + _render_context(
-        question, prefix
-    )
+def _render_prompt(question: Question) -> str:
+    return f"<p>{_render_inline(question.text)}</p>"
 @
 
 The context is a section of figures, one per item, with the item's
@@ -1529,11 +1532,11 @@ def _format_size(size: int) -> str:
 @
 
 Every kind of question must show its context, and in the same place:
-after the prompt, so that a long program cannot bury the question, and
-before the inputs, so that the respondent reads the premises before
-answering.  The test runs the real form renderer for all seven kinds,
-because a kind that builds its own opening is exactly how one would be
-missed.  A question without context must not grow an empty section.
+after the whole form, so that a long program can push neither the
+question nor its options and Submit button apart.  The test runs the
+real form renderer for all seven kinds, because a kind that builds its
+own page is exactly how one would be missed.  A question without
+context must not grow an empty section.
 
 <<test functions>>=
 CONTEXT_FACTORIES = [
@@ -1563,7 +1566,7 @@ CONTEXT_FACTORIES = [
 
 
 @pytest.mark.parametrize("factory", CONTEXT_FACTORIES)
-def test_render_form_puts_the_context_between_prompt_and_inputs(
+def test_render_form_puts_the_context_after_the_inputs(
     tmp_path, factory
 ):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
@@ -1575,8 +1578,9 @@ def test_render_form_puts_the_context_between_prompt_and_inputs(
     rendered = server_module._render_form(store, full_hash)
 
     prompt = rendered.index(f"<p>{question.text}</p>")
-    context = rendered.index('<section class="context">')
-    assert prompt < context < rendered.index("<form")
+    form = rendered.index("<form")
+    form_end = rendered.index("</form>")
+    assert prompt < form < form_end < rendered.index('<section class="context">')
     assert "setup.py" in rendered
     assert "context" not in server_module._render_form(
         plain_store, plain_hash
@@ -1682,13 +1686,24 @@ not produce sensible cloud entries (the file body is either one giant
 token or a fragmented mass of source-level identifiers), so the form
 matches what the parser actually accepts.
 
+\label{sec:form-assembly}%
+The page around the inputs is the same for every kind, so it is
+assembled in one place: the prompt, the kind's own form, then the
+context (\cref{sec:prompt-and-context}).  The kinds render only their
+form.
+
 <<functions>>=
-
-
 def _render_form(store: Store, full_hash: str) -> str:
     question = store.question(full_hash)
     prefix = store.metadata(full_hash)["url_prefix"]
+    return (
+        _render_prompt(question)
+        + _render_inputs(question, prefix)
+        + _render_context(question, prefix)
+    )
 
+
+def _render_inputs(question: Question, prefix: str) -> str:
     if isinstance(question, MCQuestion):
         input_type = "checkbox" if question.multi else "radio"
         inputs = "".join(
@@ -1697,15 +1712,13 @@ def _render_form(store: Store, full_hash: str) -> str:
             for index, option in enumerate(question.options)
         )
         return (
-            _render_prompt(question, prefix)
-            + f'<form method="post" action="/{prefix}">{inputs}'
+            f'<form method="post" action="/{prefix}">{inputs}'
             "<button type=\"submit\">Submit</button></form>"
         )
 
     if isinstance(question, OpenQuestion):
         return (
-            _render_prompt(question, prefix)
-            + f'<form method="post" action="/{prefix}" '
+            f'<form method="post" action="/{prefix}" '
             'enctype="multipart/form-data">'
             f'<textarea name="value" maxlength="{question.max_chars}"></textarea>'
             '<input type="file" name="file" '
@@ -1715,8 +1728,7 @@ def _render_form(store: Store, full_hash: str) -> str:
 
     if isinstance(question, WordCloudQuestion):
         return (
-            _render_prompt(question, prefix)
-            + f'<form method="post" action="/{prefix}">'
+            f'<form method="post" action="/{prefix}">'
             f'<textarea name="value" '
             f'maxlength="{question.max_chars}"></textarea>'
             "<button type=\"submit\">Submit</button></form>"
@@ -1741,8 +1753,7 @@ def _render_form(store: Store, full_hash: str) -> str:
         high_end_label = f"<p>High end: {escape(question.high_label)}</p>"
 
     return (
-        _render_prompt(question, prefix)
-        + f'<form method="post" action="/{prefix}">'
+        f'<form method="post" action="/{prefix}">'
         + low_end_label
         + inputs
         + high_end_label
@@ -1787,8 +1798,7 @@ def _render_ranking_form(question: RankingQuestion, prefix: str) -> str:
     else:
         instructions = f"<p>Rank your top {question.top_n}.</p>"
     return (
-        _render_prompt(question, prefix)
-        + f"{instructions}"
+        f"{instructions}"
         f'<form method="post" action="/{prefix}">{rows}'
         '<button type="submit">Submit</button></form>'
     )
@@ -1850,8 +1860,7 @@ def _render_pin_form(question, prefix: str) -> str:
             "pins; tap a pin to remove it.</p>"
         )
     return (
-        _render_prompt(question, prefix)
-        + f"{instructions}"
+        f"{instructions}"
         "<noscript><p>This question needs JavaScript to record "
         "where you tap.</p></noscript>"
         f'<form method="post" action="/{prefix}">'
@@ -3665,34 +3674,41 @@ def _render_pin_stats(
                 target, summary["pins"], bins=heatmap_bins
             )
         )
+    return "".join(parts)
+@
+
+The comments are a list that grows with the room, like the answers to
+an open question, so the results page places them after the context
+(\cref{sec:results-page}) and they render on their own.
+
+<<functions>>=
+def _render_pin_comments(summary: dict[str, Any]) -> str:
     comments = [
         pin["comment"]
         for pin in summary["pins"]
         if pin.get("comment")
     ]
-    if comments:
-        parts.append("<h2>Comments</h2><ul>")
-        parts.extend(
-            f"<li>{escape(comment)}</li>" for comment in comments
-        )
-        parts.append("</ul>")
-    return "".join(parts)
+    if not comments:
+        return ""
+    items = "".join(f"<li>{escape(comment)}</li>" for comment in comments)
+    return f"<h2>Comments</h2><ul>{items}</ul>"
 @
 
 The top-level renderer reads the window-filtered summary from the store
-and dispatches to the per-type helpers.  The question's context comes
-first, right under the page's heading, in the order the answer form
-uses: the prompt, its premises, then what the room made of them.  The
-results page is what the lecturer projects while the room answers and
-what the discussion after the vote points at, so the program the
-question is about belongs there; the respondents see the same premises
-the lecturer is talking over.  The price is that a long context pushes
-the window filter and the numbers below the fold of the projected
-page, which a deck with a long program pays for by scrolling.  The
-window filter comes next, so the
-lecturer can rescope next to the results; the total responses
-line follows because that is the first number every lecturer asks for;
-then come the type-specific stats and the visualization.  The optional
+and dispatches to the per-type helpers.  The page follows the answer
+form's order: the prompt as the heading, then what the room made of it,
+then the context.  The window filter comes first, so the lecturer can
+rescope next to the results; the total responses line follows because
+that is the first number every lecturer asks for; then come the
+type-specific stats and the visualization.  The results page is what
+the lecturer projects while the room answers and what the discussion
+after the vote points at, so the program the question is about belongs
+there too, and the respondents see the same premises the lecturer is
+talking over.  It comes after the aggregate, because a long program
+above the numbers would push them below the fold of the projected page.
+It comes before the lists that grow with the room, the answers to an
+open question and the comments on pins: a long list above it would bury
+the program instead.  The optional
 [[admin]] keyword lets the caller communicate whether the requester is
 the lecturer, which controls the trailing navigation row: the lecturer
 lands on neighbouring results pages and gets the Skip button, everyone else
@@ -3722,13 +3738,13 @@ def _render_results(
     question = store.question(full_hash)
 
     parts = [
-        _render_context(question, summary["url_prefix"]),
         _render_window_filter(
             summary["url_prefix"], summary["window"]
         ),
         f'<p>Total responses: '
         f'<strong>{summary["total"]}</strong></p>',
     ]
+    answer_lists = []
 
     if isinstance(question, MCQuestion):
         parts.append(_render_mc_stats(question, summary))
@@ -3751,7 +3767,7 @@ def _render_results(
         parts.append(_render_bar_chart(labels, counts, percentages))
     elif isinstance(question, OpenQuestion):
         parts.append(_render_open_stats(summary))
-        parts.append(
+        answer_lists.append(
             _render_open_answers(
                 summary["answers"], allow_images=allow_images
             )
@@ -3767,7 +3783,10 @@ def _render_results(
                 question, summary, heatmap_bins=heatmap_bins
             )
         )
+        answer_lists.append(_render_pin_comments(summary))
 
+    parts.append(_render_context(question, summary["url_prefix"]))
+    parts.extend(answer_lists)
     parts.append(
         _render_question_nav(store, full_hash, results=admin, window=window)
     )
@@ -5759,17 +5778,66 @@ def test_skipped_question_does_not_hand_out_another_questions_file(
     assert SALES_CSV not in payload
 
 
-def test_results_page_shows_the_context_above_the_results(tmp_path):
+def test_results_page_shows_the_context_below_the_results(tmp_path):
     store, prefix = _download_store(tmp_path)
+    nav_store = Store(tmp_path / "nav.json", min_prefix=4)
+    nav_store.register(OpenQuestion("Before"))
+    nav_prefix = nav_store.register(
+        MCQuestion("Pick one", ("A", "B"), context=(ContextSnippet("x = 1"),))
+    )
 
     with _running_server(store) as port:
         _results, results_body = _request(port, "GET", f"/{prefix}/results")
+    with _running_server(nav_store) as port:
+        _results, nav_body = _request(port, "GET", f"/{nav_prefix}/results")
 
     context = results_body.index('<section class="context">')
-    assert context < results_body.index("Total responses")
-    assert results_body.index("<h1>") < context
+    assert results_body.index("<h1>") < results_body.index("Total responses")
+    assert results_body.index("Total responses") < context
+    assert results_body.index('class="bar-chart"') < context
     assert "Prices are in SEK." in results_body
     assert f'href="/{prefix}/context/1"' in results_body
+    assert (
+        nav_body.index('<section class="context">')
+        < nav_body.index('class="question-nav"')
+    )
+@
+
+The answers to an open question and the comments on pins are lists that
+grow with the room, so they come after the context: the context sits
+between what the room made of the question, in aggregate, and the
+individual answers.
+
+<<test functions>>=
+def test_results_page_puts_answer_lists_after_the_context(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    open_prefix = store.register(
+        OpenQuestion("What does it print?", context=(ContextSnippet("print(1)"),))
+    )
+    pin_prefix = store.register(
+        PinTextQuestion(
+            "Pin the bug",
+            "total =+ x",
+            allow_comment=True,
+            context=(ContextSnippet("total = 0"),),
+        )
+    )
+
+    with _running_server(store, lock=False) as port:
+        store.record(store.resolve(open_prefix), "It prints one.")
+        store.record(
+            store.resolve(pin_prefix),
+            [{"x": 0.5, "y": 0.5, "comment": "plus sign"}],
+        )
+        _, open_body = _request(port, "GET", f"/{open_prefix}/results")
+        _, pin_body = _request(port, "GET", f"/{pin_prefix}/results")
+
+    open_context = open_body.index('<section class="context">')
+    assert open_body.index("Avg length:") < open_context
+    assert open_context < open_body.index("It prints one.")
+    pin_context = pin_body.index('<section class="context">')
+    assert pin_body.index('class="pin-overlay"') < pin_context
+    assert pin_context < pin_body.index("<h2>Comments</h2>")
 @
 
 A pin submission travels the ordinary urlencoded POST path end to end:
