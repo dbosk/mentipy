@@ -973,8 +973,8 @@ The statistic callouts share one low-level formatter.  It builds Rich
 look like terminal style markup are still shown literally.  The same rule
 holds wherever the lecturer's or the students' text reaches Rich: the
 table cells of the bar chart, the ranking, the word cloud and the pin
-comments are [[Text]] objects too, and the headings are printed with
-markup off.
+comments are [[Text]] objects too, which Rich neither parses for markup
+nor scans for emoji codes, and the heading is printed with both off.
 
 <<functions>>=
 def _stats_line(pairs: list[tuple[str, str]]) -> Text:
@@ -1582,13 +1582,28 @@ multiple-choice mode and option percentages, scale descriptive
 statistics and bucket percentages, word-cloud frequency tables,
 ranking mean ranks, pin heatmaps, and open-text average answer length
 before the transcript.  Every kind opens with the same heading, so it
-is printed once, before the dispatch.  The prompt in it is the
-lecturer's text, and Rich would read a bracketed index in it, such as
-the \texttt{[i]} of \texttt{xs[i]}, as style markup and drop it; the
-heading is therefore printed with markup off.  Highlighting stays on,
-so the counts keep their colour.
+is printed once, before the dispatch, by a helper that the
+open-question watcher shares.
+
+The prompt in the heading is the lecturer's text, and Rich reads two
+things in a printed string that a programming prompt is full of: a
+bracketed word as style markup, which drops the \texttt{[i]} of
+\texttt{xs[i]}, and a word between colons as an emoji code, which
+turns the \texttt{:b:} of \texttt{s[a:b:c]} into a symbol.  The
+heading is therefore printed with both off.  Highlighting stays on, so
+the counts keep their colour.
 
 <<functions>>=
+def _print_heading(results: dict, *, console: Console):
+    lines = [
+        results["question"]["text"],
+        f"Prefix: {results['url_prefix']}",
+        f"Responses: {results['total']}",
+        "",
+    ]
+    console.print("\n".join(lines), markup=False, emoji=False)
+
+
 def _render_results(
     results: dict,
     *,
@@ -1596,13 +1611,7 @@ def _render_results(
     pin_heat: str = DEFAULT_PIN_HEAT,
 ):
     question = results["question"]
-    lines = [
-        question["text"],
-        f"Prefix: {results['url_prefix']}",
-        f"Responses: {results['total']}",
-        "",
-    ]
-    console.print("\n".join(lines), markup=False)
+    _print_heading(results, console=console)
 
     if question["kind"] == "mc":
         _render_terminal_mc_stats(question, results, console=console)
@@ -3311,12 +3320,14 @@ Square brackets are everyday text in a programming course: an index
 such as \texttt{xs[i]} in a prompt, a lookup as an option, a student's
 comment on a pin.  Rich reads a bracketed word in a printed string as
 style markup and swallows it, so \texttt{[i]} turns into italics and
-disappears.  Each case puts brackets where one renderer prints them:
-the heading every kind shares, a bar label, a ranking row, a word-cloud
-row (split at commas only, since the default splitter would break the
-word at its brackets) and a pin comment.  The multiple-choice answer goes to the first
-option, so the second option, the one with markup-like brackets, is
-printed by the bar chart alone and not also by the mode line.
+disappears.  Rich also replaces emoji codes, and a slice is full of
+them: the \texttt{:b:} in \texttt{s[a:b:c]} becomes a symbol.  Each
+case puts such text where one renderer prints it: the heading every
+kind shares, a bar label, a ranking row, a word-cloud row (split at
+commas only, since the default splitter would break the word at its
+brackets) and a pin comment.  The multiple-choice answer goes to the
+first option, so the second option, the one with markup-like brackets,
+is printed by the bar chart alone and not also by the mode line.
 
 <<test functions>>=
 BRACKET_CASES = [
@@ -3325,6 +3336,12 @@ BRACKET_CASES = [
         0,
         ["What does `xs[i]` return?", "[bold]b[/bold]"],
         id="mc",
+    ),
+    pytest.param(
+        OpenQuestion("What does `s[a:b:c]` select?"),
+        "every c-th item",
+        ["What does `s[a:b:c]` select?"],
+        id="slice",
     ),
     pytest.param(
         RankingQuestion("Rank the lookups", ("`d[k]`", "`d.get(k)`")),
@@ -3469,17 +3486,7 @@ def watch(
 
     try:
         if initial_results["question"]["kind"] == "open":
-            console.print(
-                "\n".join(
-                    [
-                        initial_results["question"]["text"],
-                        f"Prefix: {initial_results['url_prefix']}",
-                        f"Responses: {initial_results['total']}",
-                        "",
-                    ]
-                ),
-                markup=False,
-            )
+            _print_heading(initial_results, console=console)
             if initial_results["answers"]:
                 _render_terminal_open_stats(initial_results, console=console)
                 _render_open_answers(initial_results["answers"], console=console)
@@ -3550,15 +3557,15 @@ def test_watch_command_redraws_aggregate_questions(tmp_path, monkeypatch):
     assert result.stdout.count("1 (50%)") >= 2
 @
 
-The open-question watcher prints its own heading, so the brackets get
-a check of their own there.
+The open-question watcher prints the heading on its own path, so the
+brackets and the slice get a check of their own there.
 
 <<test functions>>=
 def test_watch_prints_square_brackets_in_an_open_prompt(
     tmp_path, monkeypatch
 ):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
-    prefix = store.register(OpenQuestion("What does `xs[i]` return?"))
+    prefix = store.register(OpenQuestion("Is `xs[i]` in `xs[a:b:c]`?"))
 
     def stop(_interval):
         raise KeyboardInterrupt
@@ -3570,7 +3577,7 @@ def test_watch_prints_square_brackets_in_an_open_prompt(
     )
 
     assert result.exit_code == 0, result.output
-    assert "What does `xs[i]` return?" in result.stdout
+    assert "Is `xs[i]` in `xs[a:b:c]`?" in result.stdout
 @
 
 Open answers exercise the append-only path.  The first snapshot gives context;
