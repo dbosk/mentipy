@@ -107,6 +107,15 @@ media query.  That keeps the common case --- a student answering on a phone
 --- readable on narrow screens, while still restoring the denser
 multi-column layout when enough width exists.
 
+One rule serves the lecturer instead: the navigation row of the
+lecturer's results page, the only row that carries the Skip form, sticks
+to the bottom of the window.  A long program or a long list of answers
+would otherwise stand between the lecturer and Next.  Sticky rather than
+fixed, the row rests in its own place once the page is scrolled to its
+end, so it never covers the last answer and the page needs no padding
+for it.  The selector finds the row by its Skip form, so no markup marks
+the lecturer's page.
+
 <<constants>>=
 STYLE_CSS = """
 *, *::before, *::after {
@@ -310,6 +319,14 @@ pre code.highlight {
   display: flex;
   justify-content: space-between;
   margin: 1rem 0;
+}
+.question-nav:has(.skip-form) {
+  background: white;
+  border-top: 1px solid #ddd;
+  bottom: 0;
+  margin: 1rem 0 0;
+  padding: 0.5rem 0;
+  position: sticky;
 }
 
 .prev-link,
