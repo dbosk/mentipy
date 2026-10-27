@@ -880,7 +880,7 @@ def _render_terminal_bar_chart(
                 shown_label = shown_label[:label_width]
 
         table.add_row(
-            shown_label,
+            Text(shown_label),
             Bar(
                 TERMINAL_BAR_SIZE,
                 0,
@@ -981,7 +981,11 @@ def test_terminal_bar_chart_aligns_count_and_percentage_text():
 
 The statistic callouts share one low-level formatter.  It builds Rich
 [[Text]] directly rather than parsing markup strings, so option labels that
-look like terminal style markup are still shown literally.
+look like terminal style markup are still shown literally.  The same rule
+holds wherever the lecturer's or the students' text reaches Rich: the
+table cells of the bar chart, the ranking, the word cloud and the pin
+comments are [[Text]] objects too, which Rich neither parses for markup
+nor scans for emoji codes, and the heading is printed with both off.
 
 <<functions>>=
 def _stats_line(pairs: list[tuple[str, str]]) -> Text:
@@ -1195,7 +1199,7 @@ def _render_terminal_wordcloud(results: dict, *, console: Console):
     for entry in frequencies[:TERMINAL_WORDCLOUD_TOP_N]:
         word, count = entry[0], entry[1]
         table.add_row(
-            str(word),
+            Text(str(word)),
             str(count),
             f"{int(count) / denominator * 100:.1f}%",
         )
@@ -1299,7 +1303,7 @@ def _render_terminal_ranking_stats(
             else:
                 label = label[:label_width]
         table.add_row(
-            label,
+            Text(label),
             Bar(
                 TERMINAL_BAR_SIZE,
                 0,
@@ -1350,7 +1354,7 @@ def _render_terminal_pin_stats(
         table = Table("x", "y", "Comment")
         for pin in comments:
             table.add_row(
-                f"{pin['x']:.2f}", f"{pin['y']:.2f}", pin["comment"]
+                f"{pin['x']:.2f}", f"{pin['y']:.2f}", Text(pin["comment"])
             )
         console.print(table)
 @
@@ -1606,9 +1610,29 @@ The full result renderer is shared by [[view]] and the first frame of
 multiple-choice mode and option percentages, scale descriptive
 statistics and bucket percentages, word-cloud frequency tables,
 ranking mean ranks, pin heatmaps, and open-text average answer length
-before the transcript.
+before the transcript.  Every kind opens with the same heading, so it
+is printed once, before the dispatch, by a helper that the
+open-question watcher shares.
+
+The prompt in the heading is the lecturer's text, and Rich reads two
+things in a printed string that a programming prompt is full of: a
+bracketed word as style markup, which drops the \texttt{[i]} of
+\texttt{xs[i]}, and a word between colons as an emoji code, which
+turns the \texttt{:b:} of \texttt{s[a:b:c]} into a symbol.  The
+heading is therefore printed with both off.  Highlighting stays on, so
+the counts keep their colour.
 
 <<functions>>=
+def _print_heading(results: dict, *, console: Console):
+    lines = [
+        results["question"]["text"],
+        f"Prefix: {results['url_prefix']}",
+        _responses_line(results),
+        "",
+    ]
+    console.print("\n".join(lines), markup=False, emoji=False)
+
+
 def _render_results(
     results: dict,
     *,
@@ -1616,15 +1640,9 @@ def _render_results(
     pin_heat: str = DEFAULT_PIN_HEAT,
 ):
     question = results["question"]
-    lines = [
-        question["text"],
-        f"Prefix: {results['url_prefix']}",
-        _responses_line(results),
-        "",
-    ]
+    _print_heading(results, console=console)
 
     if question["kind"] == "mc":
-        console.print("\n".join(lines))
         _render_terminal_mc_stats(question, results, console=console)
         _render_terminal_bar_chart(
             [str(option) for option in question["options"]],
@@ -1635,7 +1653,6 @@ def _render_results(
         return
 
     if question["kind"] == "scale":
-        console.print("\n".join(lines))
         _render_terminal_scale_stats(results, console=console)
         values = list(range(int(question["low"]), int(question["high"]) + 1))
         counts = [int(results["counts"].get(value, 0)) for value in values]
@@ -1649,23 +1666,19 @@ def _render_results(
         return
 
     if question["kind"] == "wordcloud":
-        console.print("\n".join(lines))
         _render_terminal_wordcloud(results, console=console)
         return
 
     if question["kind"] == "ranking":
-        console.print("\n".join(lines))
         _render_terminal_ranking_stats(question, results, console=console)
         return
 
     if question["kind"] in ("pinimage", "pintext"):
-        console.print("\n".join(lines))
         _render_terminal_pin_stats(
             question, results, console=console, pin_heat=pin_heat
         )
         return
 
-    console.print("\n".join(lines))
     _render_terminal_open_stats(results, console=console)
 
     if results["answers"]:
@@ -3356,6 +3369,71 @@ def test_view_command_prints_a_snapshot_once(tmp_path, monkeypatch):
     assert "**important**" not in result.stdout
 @
 
+Square brackets are everyday text in a programming course: an index
+such as \texttt{xs[i]} in a prompt, a lookup as an option, a student's
+comment on a pin.  Rich reads a bracketed word in a printed string as
+style markup and swallows it, so \texttt{[i]} turns into italics and
+disappears.  Rich also replaces emoji codes, and a slice is full of
+them: the \texttt{:b:} in \texttt{s[a:b:c]} becomes a symbol.  Each
+case puts such text where one renderer prints it: the heading every
+kind shares, a bar label, a ranking row, a word-cloud row (split at
+commas only, since the default splitter would break the word at its
+brackets) and a pin comment.  The multiple-choice answer goes to the
+first option, so the second option, the one with markup-like brackets,
+is printed by the bar chart alone and not also by the mode line.
+
+<<test functions>>=
+BRACKET_CASES = [
+    pytest.param(
+        MCQuestion("What does `xs[i]` return?", ("`a[i]`", "[bold]b[/bold]")),
+        0,
+        ["What does `xs[i]` return?", "[bold]b[/bold]"],
+        id="mc",
+    ),
+    pytest.param(
+        OpenQuestion("What does `s[a:b:c]` select?"),
+        "every c-th item",
+        ["What does `s[a:b:c]` select?"],
+        id="slice",
+    ),
+    pytest.param(
+        RankingQuestion("Rank the lookups", ("`d[k]`", "`d.get(k)`")),
+        [1, 0],
+        ["`d[k]`"],
+        id="ranking",
+    ),
+    pytest.param(
+        WordCloudQuestion("One phrase?", separators=","),
+        "a[b]c",
+        ["a[b]c"],
+        id="cloud",
+    ),
+    pytest.param(
+        PinTextQuestion("Pin the bug", "total =+ x", allow_comment=True),
+        [{"x": 0.5, "y": 0.5, "comment": "use xs[i] here"}],
+        ["use xs[i] here"],
+        id="pin-comment",
+    ),
+]
+
+
+@pytest.mark.parametrize("question, answer, expected", BRACKET_CASES)
+def test_view_prints_square_brackets_literally(
+    tmp_path, question, answer, expected
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(question)
+    store.record(store.resolve(prefix), answer)
+
+    result = CliRunner().invoke(
+        cli, ["view", prefix, "--store", str(store.path)]
+    )
+
+    assert result.exit_code == 0, result.output
+    for text in expected:
+        assert text in result.stdout
+@
+
 The heat channel travels flag over config key into the shared
 renderer.  Stubbing [[_render_results_snapshot]] keeps these tests
 about the wiring, not the colours --- the rendering itself is pinned
@@ -3520,16 +3598,7 @@ def watch(
 
     try:
         if initial_results["question"]["kind"] == "open":
-            console.print(
-                "\n".join(
-                    [
-                        initial_results["question"]["text"],
-                        f"Prefix: {initial_results['url_prefix']}",
-                        _responses_line(initial_results),
-                        "",
-                    ]
-                )
-            )
+            _print_heading(initial_results, console=console)
             if initial_results["answers"]:
                 _render_terminal_open_stats(initial_results, console=console)
                 _render_open_answers(initial_results["answers"], console=console)
@@ -3614,6 +3683,29 @@ def test_watch_command_redraws_aggregate_questions(tmp_path, monkeypatch):
     assert "A" in result.stdout
     assert "B" in result.stdout
     assert result.stdout.count("1 (50%)") >= 2
+@
+
+The open-question watcher prints the heading on its own path, so the
+brackets and the slice get a check of their own there.
+
+<<test functions>>=
+def test_watch_prints_square_brackets_in_an_open_prompt(
+    tmp_path, monkeypatch
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Is `xs[i]` in `xs[a:b:c]`?"))
+
+    def stop(_interval):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("mentipy.cli.time.sleep", stop)
+
+    result = CliRunner().invoke(
+        cli, ["watch", prefix, "--store", str(store.path)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Is `xs[i]` in `xs[a:b:c]`?" in result.stdout
 @
 
 A restart moves the session window forward while the watcher runs, so
