@@ -1450,10 +1450,14 @@ answers, so the default keeps the room on this lecture's votes, also
 for a question asked before the break and discussed after it; the
 chosen window stays while you step through the deck with Previous,
 Next and Skip.  Restarting the server starts a new count, as it
-relocks the deck.  [[mentipy view]] and [[mentipy watch]] count the
-same answers, and [[--window hour]], [[day]] or [[all]] picks another
-window there.  The JSON export ([[/<prefix>/results.json]]) and
-[[mentipy export]] count every answer unless asked for a window.
+relocks the deck, and so does starting a second server on the same
+store, even on another port, so the first server's page drops to the
+answers since the second one started.  [[mentipy view]] and
+[[mentipy watch]] count the same answers, since the last server start
+even when no server is running, and [[--window hour]], [[day]] or
+[[all]] picks another window there.  The JSON export
+([[/<prefix>/results.json]]) counts every answer unless asked for a
+window, and [[mentipy export]] always does.
 
 The [[--results]] flag only sets the default.  Every question helper
 accepts a [[results]] keyword that overrides it for that question alone:

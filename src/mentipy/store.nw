@@ -2231,15 +2231,29 @@ else:
     ]
 @
 
+The start time is the one value in the store that nothing checks on the
+way in, and the file is edited by hand at times.  A start that is not
+a timestamp counts as no start, so the window falls back to everything
+like an unknown one, rather than breaking every default results page.
+
 <<functions>>=
 def _window_cutoff(data: dict[str, Any], window: str) -> datetime | None:
     if window == "session":
-        started = data.get(SERVER_STARTED_KEY)
-        return parse_timestamp(started) if started else None
+        return _session_start(data)
     delta = RESULTS_WINDOW_DELTAS.get(window)
     if delta is None:
         return None
     return datetime.now(timezone.utc) - delta
+
+
+def _session_start(data: dict[str, Any]) -> datetime | None:
+    started = data.get(SERVER_STARTED_KEY)
+    if not isinstance(started, str):
+        return None
+    try:
+        return parse_timestamp(started)
+    except ValueError:
+        return None
 @
 
 The base structure echoes back which window actually applied so HTML
@@ -2543,14 +2557,14 @@ def test_results_session_window_counts_answers_since_the_server_start(
     store.record(full_hash, 1)
 
     session = store.results(full_hash, window="session")
-    restarted_before = store.results(full_hash, window="all")
+    everything = store.results(full_hash, window="all")
     store.mark_server_start()
     restarted = store.results(full_hash, window="session")
 
     assert session["window"] == "session"
     assert session["total"] == 1
     assert session["counts"] == [0, 1]
-    assert restarted_before["total"] == 2
+    assert everything["total"] == 2
     assert restarted["total"] == 0
 
 
@@ -2570,7 +2584,9 @@ def test_results_session_window_without_a_server_start_counts_everything(
 A start time written without microseconds, as [[isoformat]] does when
 they happen to be zero, must still order correctly against one with
 them; comparing the strings would put [[...00Z]] after
-[[...00.000001Z]].
+[[...00.000001Z]].  The parser is checked on its own and where the
+window uses it: as strings, the answer half a second after the start
+below would sort before it and drop out of the session.
 
 <<test functions>>=
 def test_parse_timestamp_orders_whole_and_fractional_seconds():
@@ -2579,6 +2595,45 @@ def test_parse_timestamp_orders_whole_and_fractional_seconds():
 
     assert whole < fraction
     assert whole.tzinfo is not None
+
+
+def test_results_session_window_compares_moments_not_strings(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(OpenQuestion("Why?")))
+    store.record(full_hash, "before")
+    store.record(full_hash, "after")
+    data = store._data()
+    data[SERVER_STARTED_KEY] = "2026-10-27T09:58:00Z"
+    data["answers"][full_hash][0]["ts"] = "2026-10-27T09:57:59.900000Z"
+    data["answers"][full_hash][1]["ts"] = "2026-10-27T09:58:00.500000Z"
+    store._write(data)
+
+    results = store.results(full_hash, window="session")
+
+    assert [answer["value"] for answer in results["answers"]] == ["after"]
+@
+
+The start time is the one value in the store that nothing validates on
+the way in, and a hand-edited file can hold anything.  An unreadable
+start must not take down every default results page; like an unknown
+window, it falls back to everything.
+
+<<test functions>>=
+@pytest.mark.parametrize("started", ["yesterday", 12, ""])
+def test_results_session_window_with_a_bad_start_counts_everything(
+    tmp_path, started
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(OpenQuestion("Why?")))
+    store.record(full_hash, "because")
+    data = store._data()
+    data[SERVER_STARTED_KEY] = started
+    store._write(data)
+
+    results = store.results(full_hash, window="session")
+
+    assert results["window"] == "all"
+    assert results["total"] == 1
 @
 
 Unknown window names should not break result rendering.  Falling back to the

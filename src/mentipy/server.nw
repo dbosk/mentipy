@@ -2308,9 +2308,9 @@ lecture or an earlier year shares its canonical hash and its answer
 pool, and the room should see this lecture's votes rather than every
 vote ever cast.  The session rather than the last hour, because a
 question asked before the break in a two-hour slot would otherwise
-have lost its votes by the time it is discussed after the break.  That holds for the
-lecturer and the respondents alike, so the projected tally and a
-respondent's own view agree.  The filter form switches to
+have lost its votes by the time it is discussed after the break.  That
+holds for the lecturer and the respondents alike, so the projected
+tally and a respondent's own view agree.  The filter form switches to
 \enquote{All time} when the lecturer wants the history.  The JSON
 export is for analysis after the fact, so it keeps the store's own
 default of everything.
@@ -5266,6 +5266,9 @@ Creating the server is also where the session starts: the store records
 the moment, so the default results window, here and in the terminal
 views, counts the answers from this server on.  Every server start is
 marked, the test servers included, so they exercise the same default.
+The mark comes after the bind, so a server that never got its port
+leaves the previous session alone, and a mark that fails closes the
+socket before the error reaches the caller, so the port is free again.
 
 <<functions>>=
 
@@ -5298,7 +5301,11 @@ def create_server(
             lock=lock,
         ),
     )
-    store.mark_server_start()
+    try:
+        store.mark_server_start()
+    except BaseException:
+        server.server_close()
+        raise
     return server
 @
 
@@ -5336,6 +5343,41 @@ def serve(
         server.serve_forever()
     finally:
         server.server_close()
+@
+
+If the start cannot be written, a store on a read-only file system for
+instance, creation fails, and it must not keep the port it has already
+bound: the lecturer's next attempt, on a writable store, would find the
+port taken.  The failure is injected, since a read-only file system
+cannot be set up portably in a test.  The test holds on to the
+failure until after the second attempt: its traceback keeps the failed
+server object alive, so a socket left open would still hold the port,
+where a collected one would have been closed by the garbage collector.
+
+<<test functions>>=
+def test_create_server_releases_the_port_when_the_start_cannot_be_written(
+    tmp_path, monkeypatch
+):
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    broken = Store(tmp_path / "broken.json", min_prefix=4)
+
+    def refuse():
+        raise PermissionError("read-only store")
+
+    monkeypatch.setattr(broken, "mark_server_start", refuse)
+
+    with pytest.raises(PermissionError) as failure:
+        create_server(broken, host="127.0.0.1", port=port)
+    server = create_server(
+        Store(tmp_path / "mentipy.json", min_prefix=4),
+        host="127.0.0.1",
+        port=port,
+    )
+    server.server_close()
+    assert failure.value.args == ("read-only store",)
 @
 
 Let's verify that expected socket disconnects are logged as warnings instead of
@@ -7388,6 +7430,7 @@ import hashlib
 import http.client
 import json
 import logging
+import socket
 import threading
 
 import mentipy.server as server_module

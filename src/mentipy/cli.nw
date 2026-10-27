@@ -25,6 +25,7 @@ mostly as wiring.
 <<imports>>=
 from contextlib import contextmanager
 import csv
+from datetime import datetime
 import ipaddress
 import io
 import json
@@ -1136,7 +1137,7 @@ new answer batch.
 
 <<functions>>=
 def _render_open_watch_update(results: dict, *, console: Console):
-    pairs = [("Responses", str(results["total"]))]
+    pairs = [("Responses", _responses_count(results))]
     avg = results.get("avg_length")
     if avg is not None:
         pairs.append(("Avg length", f"{avg:.0f} chars"))
@@ -1590,19 +1591,27 @@ def test_terminal_pin_text_heatmap_can_colour_the_foreground():
 The heading's response count names its window unless it is everything,
 in the words of the results page's filter.  A lecturer who looks at the
 terminal after a restart, or after the break with another window, would
-otherwise read a small count as lost answers.
+otherwise read a small count as lost answers.  The session is the
+\emph{last} start: with no server running, [[mentipy view]] after the
+lecture still counts that lecture's answers.  The open-question
+watcher prints the count again with every new answer, and names the
+window there too.
 
 <<constants>>=
 RESULTS_WINDOW_NAMES = {
-    "session": "since the server started",
+    "session": "since the last server start",
     "hour": "last hour",
     "day": "last day",
 }
 <<functions>>=
-def _responses_line(results: dict) -> str:
-    line = f"Responses: {results['total']}"
+def _responses_count(results: dict) -> str:
+    count = str(results["total"])
     name = RESULTS_WINDOW_NAMES.get(results.get("window", "all"))
-    return f"{line} ({name})" if name else line
+    return f"{count} ({name})" if name else count
+
+
+def _responses_line(results: dict) -> str:
+    return f"Responses: {_responses_count(results)}"
 @
 
 The full result renderer is shared by [[view]] and the first frame of
@@ -3521,7 +3530,7 @@ def test_view_defaults_to_the_answers_since_the_server_start(tmp_path):
     )
 
     assert session.exit_code == 0, session.output
-    assert "Responses: 1 (since the server started)" in session.stdout
+    assert "Responses: 1 (since the last server start)" in session.stdout
     assert "Responses: 2\n" in everything.stdout
     assert "Responses: 2 (last hour)" in hour.stdout
 
@@ -3630,7 +3639,7 @@ def watch(
 @
 
 <<functions>>=
-def _latest_answer_time(answers: list[dict]):
+def _latest_answer_time(answers: list[dict]) -> datetime | None:
     return parse_timestamp(str(answers[-1]["ts"])) if answers else None
 
 
@@ -3711,7 +3720,10 @@ def test_watch_prints_square_brackets_in_an_open_prompt(
 A restart moves the session window forward while the watcher runs, so
 the window holds fewer answers than the watcher has already printed.
 An answer arriving after the restart is still new and must appear,
-numbered within the new window.
+numbered within the new window, and the count printed with it names
+its window as the heading does, so the drop reads as a new session.
+An answer from before the first start is outside the window from the
+first frame on.
 
 <<test functions>>=
 def test_watch_appends_open_answers_across_a_server_restart(
@@ -3720,6 +3732,7 @@ def test_watch_appends_open_answers_across_a_server_restart(
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(OpenQuestion("Comment?"))
     full_hash = store.resolve(prefix)
+    store.record(full_hash, "from an earlier lecture")
     store.mark_server_start()
     store.record(full_hash, "before the restart")
     sleeps = 0
@@ -3740,9 +3753,11 @@ def test_watch_appends_open_answers_across_a_server_restart(
     )
 
     assert result.exit_code == 0, result.output
+    assert "from an earlier lecture" not in result.stdout
     assert "before the restart" in result.stdout
     assert "after the restart" in result.stdout
     assert result.stdout.count("Answer 1 -") == 2
+    assert result.stdout.count("1 (since the last server start)") == 2
 @
 
 Whether an answer is new is decided on the moments, not the strings.
@@ -3785,7 +3800,7 @@ def test_watch_redraws_in_the_session_window(tmp_path, monkeypatch):
     )
 
     assert result.exit_code == 0, result.output
-    assert "Responses: 1 (since the server started)" in result.stdout
+    assert "Responses: 1 (since the last server start)" in result.stdout
 @
 
 Open answers exercise the append-only path.  The first snapshot gives context;
