@@ -80,6 +80,7 @@ from mentipy.store import (
     HEATMAP_BINS_CONFIG,
     DEFAULT_PIN_HEAT,
     PIN_HEAT_CONFIG,
+    RESULTS_WINDOWS,
     QUESTION_ENVIRONMENT_CONFIG,
     SHOW_URL_CONFIG,
     SSH_TUNNEL_CONFIG,
@@ -88,6 +89,7 @@ from mentipy.store import (
     VENV_CONFIG,
     format_timestamp,
     get_setting,
+    parse_timestamp,
     set_setting,
 )
 from mentipy.venv import activation_script, create_venv, install_package
@@ -212,6 +214,10 @@ PIN_HEAT_HELP = (
     "Heat channel for pin-text results: background or foreground. "
     f"Defaults to config setting {PIN_HEAT_CONFIG}."
 )
+RESULTS_WINDOW_HELP = (
+    "Answers to count: session (since the server last started),"
+    " hour, day or all."
+)
 ROOT_HELP_EPILOG = (
     "Copyright (c) 2026 Daniel Bosk\n\n"
     "License: MIT\n\n"
@@ -270,6 +276,9 @@ WATCH_INTERVAL_OPTION = typer.Option(
     help="Refresh interval in seconds.",
 )
 PIN_HEAT_OPTION = typer.Option(None, "--pin-heat", help=PIN_HEAT_HELP)
+RESULTS_WINDOW_OPTION = typer.Option(
+    "session", "--window", help=RESULTS_WINDOW_HELP
+)
 EXPORT_FORMAT_OPTION = typer.Option(
     "json",
     help="Output format: json or csv.",
@@ -348,6 +357,7 @@ LAYOUT_OPTION.autocompletion = _choice_completer(LAYOUT_CHOICES)
 QR_FORMAT_OPTION.autocompletion = _choice_completer(QR_FORMAT_CHOICES)
 EXPORT_FORMAT_OPTION.autocompletion = _choice_completer(EXPORT_FORMAT_CHOICES)
 PIN_HEAT_OPTION.autocompletion = _choice_completer(PIN_HEAT_CHOICES)
+RESULTS_WINDOW_OPTION.autocompletion = _choice_completer(RESULTS_WINDOWS)
 @
 
 <<test functions>>=
@@ -358,6 +368,7 @@ PIN_HEAT_OPTION.autocompletion = _choice_completer(PIN_HEAT_CHOICES)
         (QR_FORMAT_OPTION, QR_FORMAT_CHOICES),
         (EXPORT_FORMAT_OPTION, EXPORT_FORMAT_CHOICES),
         (PIN_HEAT_OPTION, PIN_HEAT_CHOICES),
+        (RESULTS_WINDOW_OPTION, RESULTS_WINDOWS),
     ],
 )
 def test_shared_options_advertise_choice_completion(option, expected):
@@ -1572,6 +1583,24 @@ def test_terminal_pin_text_heatmap_can_colour_the_foreground():
     assert "48;2;" not in output
 @
 
+The heading's response count names its window unless it is everything,
+in the words of the results page's filter.  A lecturer who looks at the
+terminal after a restart, or after the break with another window, would
+otherwise read a small count as lost answers.
+
+<<constants>>=
+RESULTS_WINDOW_NAMES = {
+    "session": "since the server started",
+    "hour": "last hour",
+    "day": "last day",
+}
+<<functions>>=
+def _responses_line(results: dict) -> str:
+    line = f"Responses: {results['total']}"
+    name = RESULTS_WINDOW_NAMES.get(results.get("window", "all"))
+    return f"{line} ({name})" if name else line
+@
+
 The full result renderer is shared by [[view]] and the first frame of
 [[watch]].  It uses the same summary fields as the HTML page:
 multiple-choice mode and option percentages, scale descriptive
@@ -1590,7 +1619,7 @@ def _render_results(
     lines = [
         question["text"],
         f"Prefix: {results['url_prefix']}",
-        f"Responses: {results['total']}",
+        _responses_line(results),
         "",
     ]
 
@@ -1774,11 +1803,14 @@ def _render_results_snapshot(
     *,
     console: Console | None = None,
     pin_heat: str = DEFAULT_PIN_HEAT,
+    window: str = "all",
 ):
     console = console or _result_console()
     full_hash = _resolve_full_hash(store, prefix)
     _render_results(
-        store.results(full_hash), console=console, pin_heat=pin_heat
+        store.results(full_hash, window=window),
+        console=console,
+        pin_heat=pin_heat,
     )
 @
 
@@ -3252,6 +3284,25 @@ def _pin_heat_mode(value: str | None) -> str:
     return mode
 @
 
+Both display commands also take the window, which defaults to the
+results page's: the answers since the server last started.  A reused
+question shares its answer pool with every earlier lecture, and the
+terminal tally the lecturer reads beside the projector should match the
+projected one.  The store would quietly read an unknown window as
+everything; a word typed on the command line is rejected instead, like
+the pin heat.
+
+<<functions>>=
+def _results_window(value: str) -> str:
+    if value not in RESULTS_WINDOWS:
+        raise typer.BadParameter(
+            f"window must be one of {', '.join(RESULTS_WINDOWS)},"
+            f" got {value!r}",
+            param_hint="--window",
+        )
+    return value
+@
+
 The view command is the one-shot form of the live display.  The watcher then
 adds only the refresh loop and screen clearing, so the two commands cannot drift
 apart in how they render counts, Markdown, or timestamps.
@@ -3265,6 +3316,7 @@ def view(
     ),
     store: Optional[str] = STORE_OPTION,
     pin_heat: Optional[str] = PIN_HEAT_OPTION,
+    window: str = RESULTS_WINDOW_OPTION,
 ):
     """Show current results for ``prefix`` in the terminal."""
 
@@ -3272,6 +3324,7 @@ def view(
         _configured_store(store),
         prefix,
         pin_heat=_pin_heat_mode(pin_heat),
+        window=_results_window(window),
     )
 @
 
@@ -3363,6 +3416,55 @@ def test_view_pin_heat_defaults_to_the_config_key(tmp_path, monkeypatch):
     assert captured["pin_heat"] == "foreground"
 @
 
+The terminal view shares the results page's default window, the
+answers since the server last started, so the lecturer's terminal and
+the projected page agree on a reused question.  An answer from a moment
+before the start is inside the last hour, so only the session window
+leaves it out; [[--window all]] brings it back.  The heading says which
+window applies, since a view after a restart can otherwise look like
+lost answers.
+
+<<test functions>>=
+def test_view_defaults_to_the_answers_since_the_server_start(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, 0)
+    store.mark_server_start()
+    store.record(full_hash, 1)
+    runner = CliRunner()
+
+    session = runner.invoke(cli, ["view", prefix, "--store", str(store.path)])
+    everything = runner.invoke(
+        cli, ["view", prefix, "--store", str(store.path), "--window", "all"]
+    )
+    hour = runner.invoke(
+        cli, ["view", prefix, "--store", str(store.path), "--window", "hour"]
+    )
+
+    assert session.exit_code == 0, session.output
+    assert "Responses: 1 (since the server started)" in session.stdout
+    assert "Responses: 2\n" in everything.stdout
+    assert "Responses: 2 (last hour)" in hour.stdout
+
+
+def test_view_rejects_an_unknown_window(tmp_path):
+    result = CliRunner().invoke(
+        cli,
+        [
+            "view",
+            "abcd",
+            "--store",
+            str(tmp_path / "mentipy.json"),
+            "--window",
+            "week",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "week" in result.output
+@
+
 A hand-edited config file is the most likely source of a bad value, so
 the rejection test goes through the config key rather than the flag.
 
@@ -3387,6 +3489,14 @@ questions redraw because their meaning is in changing counts; open questions
 print the initial view once and then append only newly arrived answers, avoiding
 screen flutter while keeping a chronological transcript visible.
 
+An answer is new when it is later than the last one printed, not when
+the window has grown past the count printed so far.  A window can
+shrink while the watcher runs: a restart moves the session's start
+forward, and a sliding hour drops its oldest answers.  Counting would
+then print an old answer again or hide a new one until the window grew
+back.  Recency is never in doubt, because the store appends answers in
+the order they arrive.
+
 <<cli setup>>=
 @cli.command()
 def watch(
@@ -3397,14 +3507,16 @@ def watch(
     store: Optional[str] = STORE_OPTION,
     interval: float = WATCH_INTERVAL_OPTION,
     pin_heat: Optional[str] = PIN_HEAT_OPTION,
+    window: str = RESULTS_WINDOW_OPTION,
 ):
     """Show live results for ``prefix`` in the terminal."""
 
     heat_mode = _pin_heat_mode(pin_heat)
+    window = _results_window(window)
     active_store = _configured_store(store)
     full_hash = _resolve_full_hash(active_store, prefix)
     console = _result_console()
-    initial_results = active_store.results(full_hash)
+    initial_results = active_store.results(full_hash, window=window)
 
     try:
         if initial_results["question"]["kind"] == "open":
@@ -3413,7 +3525,7 @@ def watch(
                     [
                         initial_results["question"]["text"],
                         f"Prefix: {initial_results['url_prefix']}",
-                        f"Responses: {initial_results['total']}",
+                        _responses_line(initial_results),
                         "",
                     ]
                 )
@@ -3421,30 +3533,46 @@ def watch(
             if initial_results["answers"]:
                 _render_terminal_open_stats(initial_results, console=console)
                 _render_open_answers(initial_results["answers"], console=console)
-            seen = len(initial_results["answers"])
+            last_seen = _latest_answer_time(initial_results["answers"])
             while True:
                 time.sleep(interval)
-                results = active_store.results(full_hash)
+                results = active_store.results(full_hash, window=window)
                 answers = results["answers"]
-                if len(answers) > seen:
+                fresh = _answers_after(answers, last_seen)
+                if fresh:
                     _render_open_watch_update(results, console=console)
                     _render_open_answers(
-                        answers[seen:],
+                        fresh,
                         console=console,
-                        start=seen + 1,
+                        start=len(answers) - len(fresh) + 1,
                     )
-                    seen = len(answers)
+                    last_seen = _latest_answer_time(fresh)
         else:
             while True:
                 typer.echo(CLEAR_SCREEN, nl=False)
                 _render_results(
-                    active_store.results(full_hash),
+                    active_store.results(full_hash, window=window),
                     console=console,
                     pin_heat=heat_mode,
                 )
                 time.sleep(interval)
     except KeyboardInterrupt:
         return
+@
+
+<<functions>>=
+def _latest_answer_time(answers: list[dict]):
+    return parse_timestamp(str(answers[-1]["ts"])) if answers else None
+
+
+def _answers_after(answers: list[dict], moment) -> list[dict]:
+    if moment is None:
+        return answers
+    return [
+        answer
+        for answer in answers
+        if parse_timestamp(str(answer["ts"])) > moment
+    ]
 @
 
 The live command keeps refreshing until interrupted.  For multiple-choice
@@ -3486,6 +3614,86 @@ def test_watch_command_redraws_aggregate_questions(tmp_path, monkeypatch):
     assert "A" in result.stdout
     assert "B" in result.stdout
     assert result.stdout.count("1 (50%)") >= 2
+@
+
+A restart moves the session window forward while the watcher runs, so
+the window holds fewer answers than the watcher has already printed.
+An answer arriving after the restart is still new and must appear,
+numbered within the new window.
+
+<<test functions>>=
+def test_watch_appends_open_answers_across_a_server_restart(
+    tmp_path, monkeypatch
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    full_hash = store.resolve(prefix)
+    store.mark_server_start()
+    store.record(full_hash, "before the restart")
+    sleeps = 0
+
+    def restart_then_stop(_interval):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 1:
+            store.mark_server_start()
+            store.record(full_hash, "after the restart")
+            return
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("mentipy.cli.time.sleep", restart_then_stop)
+
+    result = CliRunner().invoke(
+        cli, ["watch", prefix, "--store", str(store.path)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "before the restart" in result.stdout
+    assert "after the restart" in result.stdout
+    assert result.stdout.count("Answer 1 -") == 2
+@
+
+Whether an answer is new is decided on the moments, not the strings.
+A stored timestamp whose microseconds are zero has none written, so as
+a string the earlier answer below sorts after the later one, and a
+string comparison would never report the later answer as new.
+
+<<test functions>>=
+def test_answers_after_compares_moments_not_strings():
+    answers = [
+        {"ts": "2026-10-27T09:58:00Z", "value": "first"},
+        {"ts": "2026-10-27T09:58:00.500000Z", "value": "second"},
+    ]
+
+    fresh = mentipy.cli._answers_after(
+        answers, parse_timestamp("2026-10-27T09:58:00Z")
+    )
+
+    assert fresh == answers[1:]
+@
+
+The redrawing watcher counts in the same window as the one-shot view.
+
+<<test functions>>=
+def test_watch_redraws_in_the_session_window(tmp_path, monkeypatch):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+    full_hash = store.resolve(prefix)
+    store.record(full_hash, 0)
+    store.mark_server_start()
+    store.record(full_hash, 1)
+
+    def stop(_interval):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("mentipy.cli.time.sleep", stop)
+
+    result = CliRunner().invoke(
+        cli, ["watch", prefix, "--store", str(store.path)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Responses: 1 (since the server started)" in result.stdout
 @
 
 Open answers exercise the append-only path.  The first snapshot gives context;

@@ -68,7 +68,7 @@ from mentipy.questions import (
     smooth_pin_grid,
     sniff_image_mime,
 )
-from mentipy.store import DEFAULT_HEATMAP_BINS, Store
+from mentipy.store import DEFAULT_HEATMAP_BINS, RESULTS_WINDOWS, Store
 @
 
 \section{Page shell and shared helpers}
@@ -2287,7 +2287,7 @@ A classroom polling tool benefits from one extra concern that a generic
 dashboard would not need: a \emph{time window} the lecturer can scope
 to, so a question reused across lectures (or even across years, all
 sharing the same canonical hash) can be inspected as \enquote{just this
-hour} or \enquote{everything ever}.  The store already filters and
+lecture} or \enquote{everything ever}.  The store already filters and
 aggregates by window, so the renderer only chooses a window from the
 query string, asks the store, and lays out the result.
 
@@ -2302,10 +2302,13 @@ We allow only the strings the store accepts; anything else collapses to
 the caller's default before it reaches the store.
 
 The default depends on who reads the result.  The results page is what
-the room sees, during a lecture, so it opens on the last hour: a
-question reused from an earlier lecture or an earlier year shares its
-canonical hash and its answer pool, and the room should see this
-lecture's votes rather than every vote ever cast.  That holds for the
+the room sees, during a lecture, so it opens on the session, the
+answers since the server started: a question reused from an earlier
+lecture or an earlier year shares its canonical hash and its answer
+pool, and the room should see this lecture's votes rather than every
+vote ever cast.  The session rather than the last hour, because a
+question asked before the break in a two-hour slot would otherwise
+have lost its votes by the time it is discussed after the break.  That holds for the
 lecturer and the respondents alike, so the projected tally and a
 respondent's own view agree.  The filter form switches to
 \enquote{All time} when the lecturer wants the history.  The JSON
@@ -2313,22 +2316,22 @@ export is for analysis after the fact, so it keeps the store's own
 default of everything.
 
 <<constants>>=
-RESULTS_PAGE_WINDOW = "hour"
+RESULTS_PAGE_WINDOW = "session"
 <<functions>>=
 def _parse_window(query_string: str, *, default: str = "all") -> str:
     candidate = parse_qs(query_string).get("window", [default])[0]
-    if candidate in {"hour", "day", "all"}:
+    if candidate in RESULTS_WINDOWS:
         return candidate
     return default
 @
 
 A window the lecturer picked must survive the lecturer's own steps
 through the deck: Previous, Next, Skip and Reopen all lead to another
-results page, which would otherwise fall back to the last hour and hide
+results page, which would otherwise fall back to the session and hide
 the older votes the lecturer asked to see.  Those controls therefore
 carry the window as a query string, and only when it differs from the
 default, so the everyday URLs stay as they were.  The parser has
-already reduced the window to one of three fixed words, so it needs no
+already reduced the window to one of four fixed words, so it needs no
 quoting.
 
 <<functions>>=
@@ -2343,6 +2346,7 @@ def test_parse_window_keeps_known_values_and_falls_back():
     assert server_module._parse_window("window=hour") == "hour"
     assert server_module._parse_window("window=day") == "day"
     assert server_module._parse_window("window=all") == "all"
+    assert server_module._parse_window("window=session") == "session"
     assert server_module._parse_window("") == "all"
     assert server_module._parse_window("window=garbage") == "all"
     assert server_module._parse_window("", default="hour") == "hour"
@@ -2363,6 +2367,7 @@ writing any client-side state.
 <<functions>>=
 def _render_window_filter(prefix: str, current: str) -> str:
     options = [
+        ("session", "Since server start"),
         ("hour", "Last hour"),
         ("day", "Last day"),
         ("all", "All time"),
@@ -2386,6 +2391,7 @@ def _render_window_filter(prefix: str, current: str) -> str:
 <<test functions>>=
 def test_window_filter_marks_only_the_current_selection():
     rendered = server_module._render_window_filter("abcd", "hour")
+    assert '<option value="session">Since server start</option>' in rendered
     assert 'value="hour" selected' in rendered
     assert 'value="day" selected' not in rendered
     assert 'value="all" selected' not in rendered
@@ -3428,7 +3434,7 @@ def test_lecturer_nav_carries_a_chosen_window(tmp_path):
         store, second_hash, results=True, window="all"
     )
     default = server_module._render_question_nav(
-        store, second_hash, results=True, window="hour"
+        store, second_hash, results=True, window=RESULTS_PAGE_WINDOW
     )
 
     assert f'href="/{first_prefix}/results?window=all"' in chosen
@@ -5256,6 +5262,10 @@ image policy, the admin-token policy, and the [[lock]] policy inside the
 handler closure.  These
 policies are passed in rather than read from configuration here so the server
 stays agnostic about where its settings come from---the CLI owns that decision.
+Creating the server is also where the session starts: the store records
+the moment, so the default results window, here and in the terminal
+views, counts the answers from this server on.  Every server start is
+marked, the test servers included, so they exercise the same default.
 
 <<functions>>=
 
@@ -5271,9 +5281,12 @@ def create_server(
     heatmap_bins: int = DEFAULT_HEATMAP_BINS,
     lock: bool = True,
 ) -> ThreadingHTTPServer:
-    """Return a configured mentipy HTTP server."""
+    """Return a configured mentipy HTTP server.
 
-    return ThreadingHTTPServer(
+    Records the start of the server session in ``store``.
+    """
+
+    server = ThreadingHTTPServer(
         (host, port),
         _build_handler(
             store,
@@ -5285,6 +5298,8 @@ def create_server(
             lock=lock,
         ),
     )
+    store.mark_server_start()
+    return server
 @
 
 The blocking [[serve()]] helper owns server shutdown.  Even on interruption the
@@ -7001,13 +7016,13 @@ read it back through the live results page in both modes.
 def test_results_page_honours_allow_images_flag(tmp_path):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(OpenQuestion("Comment?", max_chars=5000))
-    store.record(
-        store.resolve(prefix),
-        "![pic](https://example.com/p.png)",
-    )
 
     server = create_server(
         store, host="127.0.0.1", port=0, allow_images=True
+    )
+    store.record(
+        store.resolve(prefix),
+        "![pic](https://example.com/p.png)",
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -7063,7 +7078,7 @@ def test_results_page_includes_window_filter_form(tmp_path):
     assert 'value="hour"' in body
     assert 'value="day"' in body
     assert 'value="all"' in body
-    assert 'value="hour" selected' in body
+    assert 'value="session" selected' in body
 
 
 def test_results_page_window_query_filters_recent_only(tmp_path):
@@ -7094,29 +7109,23 @@ def test_results_page_window_query_filters_recent_only(tmp_path):
     assert 'value="all" selected' in all_time
 @
 
-With an answer two hours old, the results page without a window shows
-only the recent answer, to the lecturer and to a respondent alike,
-while the JSON export still counts both.
+With one answer from before the server started, a moment earlier and
+so well inside the last hour, and one answer after, the results page
+without a window shows only the later answer, to the lecturer and to a
+respondent alike, while the JSON export still counts both.
 
 <<test functions>>=
-def test_results_page_defaults_to_the_last_hour_and_export_to_all(
+def test_results_page_defaults_to_the_server_session_and_export_to_all(
     tmp_path,
 ):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(MCQuestion("Pick one", ("A", "B")))
     full_hash = store.resolve(prefix)
     store.record(full_hash, 0)
-    store.record(full_hash, 1)
-
-    data = store._data()
-    aged = (
-        datetime.now(timezone.utc) - timedelta(hours=2)
-    ).isoformat().replace("+00:00", "Z")
-    data["answers"][full_hash][0]["ts"] = aged
-    store._write(data)
 
     client = {"remote": False}
     with _running_server(store, public_results=True, remote=client) as port:
+        store.record(full_hash, 1)
         _, lecturer = _request(port, "GET", f"/{prefix}/results")
         client["remote"] = True
         _, respondent = _request(port, "GET", f"/{prefix}/results")
@@ -7125,7 +7134,7 @@ def test_results_page_defaults_to_the_last_hour_and_export_to_all(
 
     for page in (lecturer, respondent):
         assert "Total responses: <strong>1</strong>" in page
-        assert 'value="hour" selected' in page
+        assert 'value="session" selected' in page
     assert json.loads(export)["total"] == 2
 @
 
@@ -7141,10 +7150,9 @@ def test_results_page_renders_bar_chart_for_scale(tmp_path):
         ScaleQuestion("How clear?", low=1, high=5)
     )
     full_hash = store.resolve(prefix)
-    for value in [3, 3, 4, 5]:
-        store.record(full_hash, value)
-
     with _running_server(store) as port:
+        for value in [3, 3, 4, 5]:
+            store.record(full_hash, value)
         _, body = _request(port, "GET", f"/{prefix}/results")
 
     assert 'class="bar-fill"' in body
@@ -7165,9 +7173,8 @@ def test_results_page_open_question_renders_md_without_timestamp(
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(OpenQuestion("Comment?"))
     full_hash = store.resolve(prefix)
-    store.record(full_hash, "**important** observation")
-
     with _running_server(store) as port:
+        store.record(full_hash, "**important** observation")
         _, body = _request(port, "GET", f"/{prefix}/results")
 
     assert "<strong>important</strong>" in body
@@ -7195,10 +7202,9 @@ def test_results_page_wordcloud_svg_escapes_words_and_shows_frequencies(
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(WordCloudQuestion("Words?", render="svg"))
     full_hash = store.resolve(prefix)
-    store.record(full_hash, "<script>")
-    store.record(full_hash, "linear")
-
     with _running_server(store) as port:
+        store.record(full_hash, "<script>")
+        store.record(full_hash, "linear")
         _, body = _request(port, "GET", f"/{prefix}/results")
 
     assert "<svg" in body
@@ -7219,9 +7225,8 @@ def test_results_page_wordcloud_scaled_uses_sized_spans_and_shows_frequencies(
         WordCloudQuestion("Words?", render="scaled")
     )
     full_hash = store.resolve(prefix)
-    store.record(full_hash, "apple apple banana")
-
     with _running_server(store) as port:
+        store.record(full_hash, "apple apple banana")
         _, body = _request(port, "GET", f"/{prefix}/results")
 
     assert 'class="wordcloud-scaled"' in body
@@ -7240,9 +7245,8 @@ def test_results_page_wordcloud_table_emits_counts_and_percentages(tmp_path):
         WordCloudQuestion("Words?", render="table")
     )
     full_hash = store.resolve(prefix)
-    store.record(full_hash, "apple banana apple")
-
     with _running_server(store) as port:
+        store.record(full_hash, "apple banana apple")
         _, body = _request(port, "GET", f"/{prefix}/results")
 
     assert "wordcloud-table" in body
