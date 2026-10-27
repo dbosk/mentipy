@@ -996,9 +996,9 @@ A question about a program that was built up over several slides can
 show only a fragment of it on the slide, while the whole program fits
 on the answer page.  Every question helper therefore takes a
 [[context]]: material that the answer page shows after the question
-and its options, and that the results page shows after the results,
-before any list of individual answers.  The slide, which has no room for it, does not show
-it.
+and its options, and that the results page shows after the aggregate
+results, before any list of individual answers.  The slide, which has
+no room for it, does not show it.
 
 The context should come from the files the slides are built from, never
 be retyped, or it drifts the moment the program changes.
