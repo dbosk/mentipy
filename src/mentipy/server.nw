@@ -3981,7 +3981,19 @@ tab halfway through a response, and phones can switch networks while the server
 is writing.  The stdlib thread mixin already keeps the process alive in these
 cases, but its default [[handle_error()]] prints a traceback for every dropped
 socket.  We recognize the usual disconnect errnos and turn only those failures
-into warnings so genuine application bugs still keep their tracebacks.
+into warnings.
+
+Every other exception is a genuine bug, and it goes through the logger
+too, as an error with its traceback, rather than through the
+superclass, whose printer writes to standard error directly.  The
+logger lets the command decide where the report belongs.  Under
+[[mentipy serve]] nothing configures logging, so Python's last-resort
+handler prints the message and the full traceback to standard error,
+just as the superclass did: nothing is hidden.  Under
+[[mentipy present]] the banner's handler takes the record instead and
+shows the message, with the exception's own text, in its warning line,
+so a failing request cannot print a traceback over the lecturer's
+display.
 
 <<constants>>=
 LOGGER = logging.getLogger(__name__)
@@ -4014,7 +4026,11 @@ def handle_error(self, request, client_address):
             err,
         )
         return
-    super().handle_error(request, client_address)
+    LOGGER.exception(
+        "unexpected error while handling request from %s: %s",
+        client_address,
+        err,
+    )
 @
 
 Whether respondents see a live tally is decided per question.  The
@@ -6031,11 +6047,12 @@ def test_server_logs_expected_network_errors(
     )
 @
 
-Unexpected exceptions should still use the normal error path so real bugs keep
-their tracebacks during development.
+Unexpected exceptions are logged as errors with their tracebacks, not
+handed to the superclass, whose printer writes to standard error
+directly.
 
 <<test functions>>=
-def test_server_delegates_unexpected_errors_to_superclass(
+def test_server_logs_unexpected_errors_with_their_traceback(
     tmp_path, monkeypatch, caplog
 ):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
@@ -6060,8 +6077,13 @@ def test_server_delegates_unexpected_errors_to_superclass(
     finally:
         server.server_close()
 
-    assert fallback_calls == [(request, ("127.0.0.1", 4321))]
-    assert not caplog.records
+    assert not fallback_calls
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelno == logging.ERROR
+    assert caplog.records[0].exc_info[0] is RuntimeError
+    assert caplog.records[0].getMessage().startswith(
+        "unexpected error while handling request"
+    )
 @
 
 The tests use a real ephemeral TCP port so that they exercise the routing stack
