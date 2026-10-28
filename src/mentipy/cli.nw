@@ -4041,9 +4041,13 @@ latecomers type, and reads the response without following it:
 \begin{description}
 \item[A 303 redirect] names the active question in its [[Location]]
   header, whose first path segment is the question's prefix.
-\item[A 200] is the self-refreshing waiting page: the lecturer has not
-  opened anything yet.  Only the status is read, never the page's
-  wording, which belongs to the web pages.
+\item[A 200 marked [[X-Mentipy-Active: waiting]] ] is the
+  self-refreshing waiting page: the lecturer has not opened anything
+  yet.  The watcher reads the status and that header, never the page's
+  wording, which belongs to the web pages and may be translated.  The
+  header is what tells the waiting page from any other 200: a web
+  server that answers every path with a page of its own would
+  otherwise pass for a lecture that has not started.
 \item[Anything else, or no answer at all,] means the address does not
   reach a Mentipy server, usually because it has not started yet or
   has stopped.
@@ -4062,7 +4066,10 @@ redirect handler turned that off.  The timeout matters because the
 watcher is a loop: a server that accepts the connection but never
 answers, or a firewall that drops the packets, would otherwise freeze
 it; with the timeout the request fails like a refused connection and
-the next tick tries again.
+the next tick tries again.  A [[ValueError]] is caught too, as a
+backstop: the startup check below should already have refused an
+address the request cannot encode, but if it misses one, the loop
+reports it rather than crashing in the middle of the lecture.
 
 <<imports>>=
 import http.client
@@ -4071,6 +4078,7 @@ from typing import NamedTuple
 import urllib.parse
 <<constants>>=
 ACTIVE_REQUEST_TIMEOUT = 5
+ACTIVE_STATE_HEADER = "X-Mentipy-Active"
 <<functions>>=
 class _LectureState(NamedTuple):
     """What the server says about the lecture: a question, or why not."""
@@ -4096,7 +4104,7 @@ def _active_state(server: str) -> _LectureState:
             response.read()
         finally:
             connection.close()
-    except (OSError, http.client.HTTPException) as error:
+    except (OSError, http.client.HTTPException, ValueError) as error:
         return _LectureState("unreachable", str(error) or type(error).__name__)
 
     if response.status == HTTPStatus.SEE_OTHER:
@@ -4104,7 +4112,10 @@ def _active_state(server: str) -> _LectureState:
         segments = [segment for segment in location.path.split("/") if segment]
         if segments:
             return _LectureState("question", segments[0])
-    if response.status == HTTPStatus.OK:
+    if (
+        response.status == HTTPStatus.OK
+        and response.getheader(ACTIVE_STATE_HEADER) == "waiting"
+    ):
         return _LectureState("waiting")
     return _LectureState(
         "unreachable",
@@ -4113,16 +4124,15 @@ def _active_state(server: str) -> _LectureState:
 @
 
 \paragraph{Which server.}
-The address defaults to [[localhost]] at [[mentipy.port]], the port
-that [[mentipy serve]] binds unless told otherwise, because the watcher
-normally runs on the lecture machine beside the server.  [[--server]]
-reaches any other: a server started with [[--port]], one on another
-machine, or the public URL of a tunnel.  The address is checked once,
-at startup.  A typo such as a missing scheme would otherwise not fail;
-it would turn into a watcher that retries for the rest of the lecture.
-Only the scheme, host and port are used.  A Mentipy server always sits
-at the root of its address, since its own redirects, the one from
-[[/active]] included, are paths from the root.
+The default is the address [[mentipy serve]] would bind with the same
+configuration, since the watcher normally runs on the lecture machine
+beside the server: [[mentipy.port]], on [[localhost]].  When
+[[mentipy.host]] binds the server to one address rather than to every
+interface ([[0.0.0.0]] or [[::]]), [[localhost]] may not reach it, and
+the watcher asks that address instead; an IPv6 address goes in
+brackets, as a URL requires.  [[--server]] reaches any other: a server
+started with [[--port]], one on another machine, or the public URL of a
+tunnel.
 
 <<constants>>=
 WATCH_SERVER_OPTION = typer.Option(
@@ -4131,26 +4141,95 @@ WATCH_SERVER_OPTION = typer.Option(
     metavar="URL",
     help=(
         "Server whose active question a watch without PREFIX follows."
-        f" Defaults to http://localhost:<{PORT_CONFIG}>."
+        f" Defaults to http://localhost:<{PORT_CONFIG}>, or to the"
+        f" address in {HOST_CONFIG} when it names one."
     ),
     show_default=False,
 )
+WILDCARD_HOSTS = ("0.0.0.0", "::")
+<<functions>>=
+def _default_watch_server() -> str:
+    host = get_setting(HOST_CONFIG, DEFAULT_HOST)
+    if not host or host in WILDCARD_HOSTS:
+        host = "localhost"
+    elif ":" in host:
+        host = f"[{host}]"
+    return f"http://{host}:{_configured_port(None)}"
+@
+
+The address is checked once, at startup, as thoroughly as the request
+will treat it.  A typo would otherwise not fail: [[http://a b:8080]]
+parses, and the watcher would retry it for the rest of the lecture, or
+a name such as [[exa_mple..com]] would crash the loop from inside the
+request, since the IDNA codec refuses its empty label with a
+[[ValueError]].  So the check parses the URL, requires an HTTP scheme,
+a host and a numeric port, and accepts a host that is an IP address or
+a name that encodes to letters, digits, dots, hyphens and underscores.
+Every refusal along the way is a [[ValueError]], which becomes the one
+[[BadParameter]].
+
 <<functions>>=
 def _watch_server_url(server: str | None) -> str:
-    url = server or f"http://localhost:{_configured_port(None)}"
-    parts = urllib.parse.urlsplit(url)
-    try:
-        parts.port
-    except ValueError:
-        valid = False
-    else:
-        valid = parts.scheme in ("http", "https") and bool(parts.hostname)
-    if not valid:
+    url = server or _default_watch_server()
+    parts = _http_url_parts(url)
+    if parts is None:
         raise typer.BadParameter(
             f"expected a URL such as http://localhost:8080, got {url!r}",
             param_hint="--server",
         )
+    ignored = _ignored_url_parts(parts)
+    if ignored:
+        typer.echo(
+            f"Warning: watch uses only the scheme, host and port of"
+            f" {url}; it ignores {ignored}.",
+            err=True,
+        )
     return url
+
+
+def _http_url_parts(url: str) -> urllib.parse.SplitResult | None:
+    try:
+        parts = urllib.parse.urlsplit(url)
+        parts.port
+        host = parts.hostname
+        if parts.scheme not in ("http", "https") or not host:
+            return None
+        if not _valid_host(host):
+            return None
+    except ValueError:
+        return None
+    return parts
+
+
+def _valid_host(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    name = host.encode("idna").decode("ascii")
+    return all(char.isalnum() or char in "-._" for char in name)
+@
+
+Only the scheme, host and port are used.  A Mentipy server always sits
+at the root of its address, since its own redirects, the one from
+[[/active]] included, are paths from the root.  A path, a query, a
+fragment or a user name in [[--server]] therefore has no use, but
+dropping it silently would hide a misunderstanding, such as a server
+believed to live under [[/mentipy]] behind a proxy, so the watcher
+says what it ignores and carries on.
+
+<<functions>>=
+def _ignored_url_parts(parts: urllib.parse.SplitResult) -> str:
+    userinfo, at, _host = parts.netloc.rpartition("@")
+    ignored = userinfo + at
+    if parts.path not in ("", "/"):
+        ignored += parts.path
+    if parts.query:
+        ignored += "?" + parts.query
+    if parts.fragment:
+        ignored += "#" + parts.fragment
+    return ignored
 @
 
 \paragraph{The follow loop.}
@@ -4173,7 +4252,10 @@ does not clear the screen, so the last tally stays readable above it.
 The prefix from the server is resolved in the watcher's own store.  If
 it is not there, the watcher reads a different store from the one the
 server serves, and the message says so instead of failing on a
-mismatch the lecturer cannot see.
+mismatch the lecturer cannot see.  Such a switch leaves no watcher
+behind, so the loop tries it again on every tick until the store has
+the question: the lecturer may fix the store, or recompile the deck
+against it, while the server keeps naming the same question.
 
 <<functions>>=
 def _follow_active_question(
@@ -4188,7 +4270,7 @@ def _follow_active_question(
     watcher = None
     while True:
         state = _active_state(server)
-        if state != shown:
+        if state != shown or (state.kind == "question" and watcher is None):
             shown = state
             watcher = _switch_to(
                 state, store, server, watcher_for, console=console
@@ -4299,7 +4381,9 @@ append-only refresh within one question, and an answer from an earlier
 lecture checks that the window travels into the watcher.  Then the
 lecturer opens a multiple-choice question and the watcher must switch
 to it.  The prompt of the open question is printed exactly once: a
-refresh that started over would print it again.  The screen is cleared
+refresh that started over would print it again.  A quiet tick after
+the late answer checks the cursor: the answer is printed once, not on
+every refresh after it arrived.  The screen is cleared
 before the first question, which a prefix watch of an open question
 never does, so the clear comes from the switch.
 
@@ -4324,6 +4408,7 @@ def test_watch_follows_the_lecturer_to_the_next_question(
         _play_the_lecture(
             monkeypatch,
             lambda: store.record(store.resolve(first), "late answer"),
+            lambda: None,
             move_on,
         )
         result = CliRunner().invoke(
@@ -4334,6 +4419,7 @@ def test_watch_follows_the_lecturer_to_the_next_question(
     assert result.exit_code == 0, result.output
     assert "from an earlier lecture" not in out
     assert out.count("Comment?") == 1
+    assert out.count("late answer") == 1
     assert out.index("[clear]") < out.index("Comment?")
     assert (
         out.index("early answer")
@@ -4466,11 +4552,26 @@ def test_watch_gives_up_on_a_server_that_never_answers(
     )
 @
 
+The startup check is meant to catch every address the request would
+choke on, but the loop must not depend on it being complete.  A
+[[ValueError]] from the request, here the IDNA codec's refusal of an
+empty label, is reported and retried like a refused connection.
+
+<<test functions>>=
+def test_active_state_reports_a_host_the_request_cannot_encode():
+    state = mentipy.cli._active_state("http://exa_mple..com")
+
+    assert state.kind == "unreachable"
+@
+
 An address that answers but is not a Mentipy server is reported with
 the status it got, rather than read as a lecture that has not started.
 The stand-in is a plain standard-library server.  It answers 404, the
-reply of any web server that has no [[/active]], or redirects to its
-root, a 303 that names no question.
+reply of any web server that has no [[/active]]; or redirects to its
+root, a 303 that names no question; or answers 200 with a page of its
+own, which lacks the header that marks Mentipy's waiting page.  The
+real waiting page, header included, is the one the tests above wait
+on.
 
 <<test functions>>=
 def _not_mentipy(status, location=None):
@@ -4493,6 +4594,7 @@ def _not_mentipy(status, location=None):
     [
         (404, None, "answered 404 Not Found to /active"),
         (303, "/", "answered 303 See Other to /active"),
+        (200, None, "answered 200 OK to /active"),
     ],
 )
 def test_watch_reports_a_server_that_does_not_know_active(
@@ -4524,6 +4626,27 @@ def test_watch_reports_a_server_that_does_not_know_active(
     assert "The active question" not in result.stdout
 @
 
+An [[https]] address must be spoken to over TLS.  The test points one
+at the plain-HTTP test server: the handshake fails and the watcher
+reports it, where a plain connection would have found the waiting
+page.
+
+<<test functions>>=
+def test_watch_speaks_tls_to_an_https_address(tmp_path, monkeypatch):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    with _serving(store) as server:
+        secure = server.replace("http://", "https://")
+        _play_the_lecture(monkeypatch)
+        result = CliRunner().invoke(
+            cli, ["watch", "--store", str(store.path), "--server", secure]
+        )
+
+    assert result.exit_code == 0, result.output
+    assert f"Cannot follow the lecture at {secure}" in result.stdout
+    assert "No question is open yet" not in result.stdout
+@
+
 Under [[--public ssh]] the server takes admin rights from the token
 alone, even for local requests.  The lecturer's browser carries the
 token as a cookie; the watcher carries nothing and still follows.
@@ -4547,9 +4670,13 @@ def test_watch_follows_without_the_admin_token(tmp_path, monkeypatch):
 @
 
 Without [[--server]] the watcher asks [[localhost]] at the configured
-port.  The test points the setting at a real server on a free port,
-which also checks that [[localhost]] reaches a server bound to the
-IPv4 loopback address.
+port, unless [[mentipy.host]] binds the server to one address; then it
+asks that address, the only one the server listens on.  The first
+test points the port setting at a real server on a free port, which
+also checks that [[localhost]] reaches a server bound to the IPv4
+loopback address.  The second needs nothing listening: the message
+about the refused connection names the address the watcher chose, and
+an IPv6 address must arrive in brackets or the URL would not parse.
 
 <<test functions>>=
 def test_watch_asks_localhost_at_the_configured_port(tmp_path, monkeypatch):
@@ -4567,11 +4694,39 @@ def test_watch_asks_localhost_at_the_configured_port(tmp_path, monkeypatch):
     assert f"No question is open yet at http://localhost:{port}." in (
         result.stdout
     )
+
+
+@pytest.mark.parametrize(
+    "bound, asked",
+    [("127.0.0.1", "127.0.0.1"), ("::1", "[::1]"), ("0.0.0.0", "localhost")],
+)
+def test_watch_asks_the_configured_bind_address(
+    tmp_path, monkeypatch, bound, asked
+):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    set_setting("host", bound)
+    set_setting("port", port)
+    _stop_at_the_first_sleep(monkeypatch)
+
+    result = CliRunner().invoke(
+        cli, ["watch", "--store", str(tmp_path / "mentipy.json")]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert f"Cannot follow the lecture at http://{asked}:{port}:" in (
+        result.stdout
+    )
 @
 
 A watcher reading another store than the server's learns a prefix it
 cannot resolve.  It names the problem and keeps running, since the
-lecturer can fix the store without restarting the lecture.
+lecturer can fix the store without restarting the lecture.  The second
+test is that fix: the question reaches the watcher's store after the
+first tick, as when the lecturer recompiles the deck against it, and
+the watcher must then show it without the lecture moving on.
 
 <<test functions>>=
 def test_watch_names_an_active_question_missing_from_its_store(
@@ -4590,15 +4745,96 @@ def test_watch_names_an_active_question_missing_from_its_store(
 
     assert result.exit_code == 0, result.output
     assert f"The active question {prefix} is not in {other}" in result.stdout
+
+
+def test_watch_shows_the_active_question_once_its_store_has_it(
+    tmp_path, monkeypatch
+):
+    question = MCQuestion("Pick one", ("A", "B"))
+    served = Store(tmp_path / "served.json", min_prefix=4)
+    prefix = served.register(question)
+    other = Store(tmp_path / "other.json", min_prefix=4)
+
+    with _serving(served) as server:
+        _open_for_the_room(server, prefix)
+        _play_the_lecture(monkeypatch, lambda: other.register(question))
+        result = CliRunner().invoke(
+            cli, ["watch", "--store", str(other.path), "--server", server]
+        )
+
+    out = result.stdout
+    assert result.exit_code == 0, result.output
+    assert out.index(f"The active question {prefix} is not in") < (
+        out.index("Pick one")
+    )
 @
 
 The two misuses of the options fail at once, before any request: a
-prefix with [[--server]], and an address that is not an HTTP URL.
+prefix with [[--server]], and an address that is not an HTTP URL.  The
+bad addresses cover each check: no scheme, a scheme other than HTTP, no
+host, a port that is no number, an unclosed IPv6 bracket, a name with
+an empty label, which the IDNA codec refuses, and a host with a space,
+which the codec accepts.  The
+sleep stub turns a regression that starts watching anyway into a quick
+failure rather than a hanging test.
 
 <<test functions>>=
-def test_watch_rejects_a_prefix_together_with_a_server(tmp_path):
+def test_watch_warns_that_it_ignores_more_than_the_address(
+    tmp_path, monkeypatch
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+
+    with _serving(store) as server:
+        _play_the_lecture(monkeypatch)
+        result = CliRunner().invoke(
+            cli,
+            [
+                "watch",
+                "--store",
+                str(store.path),
+                "--server",
+                server + "/mentipy?x=1",
+            ],
+        )
+        plain = CliRunner().invoke(
+            cli, ["watch", "--store", str(store.path), "--server", server + "/"]
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "ignores /mentipy?x=1" in result.output
+    assert "No question is open yet" in result.output
+    assert "ignores" not in plain.output
+
+
+@pytest.mark.parametrize(
+    "server", ["http://lecturer@localhost:8080", "http://localhost:8080#x"]
+)
+def test_watch_warns_about_userinfo_and_fragments(
+    tmp_path, monkeypatch, server
+):
+    _stop_at_the_first_sleep(monkeypatch)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "watch",
+            "--store",
+            str(tmp_path / "mentipy.json"),
+            "--server",
+            server,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "ignores" in result.output
+
+
+def test_watch_rejects_a_prefix_together_with_a_server(
+    tmp_path, monkeypatch
+):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+    _stop_at_the_first_sleep(monkeypatch)
 
     result = CliRunner().invoke(
         cli,
@@ -4617,9 +4853,21 @@ def test_watch_rejects_a_prefix_together_with_a_server(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "server", ["localhost:8080", "ftp://localhost", "http://", "http://h:x"]
+    "server",
+    [
+        "localhost:8080",
+        "ftp://localhost",
+        "http://",
+        "http://h:x",
+        "http://[::1",
+        "http://exa_mple..com",
+        "http://a b:8080",
+    ],
 )
-def test_watch_rejects_a_server_that_is_not_an_http_url(tmp_path, server):
+def test_watch_rejects_a_server_that_is_not_an_http_url(
+    tmp_path, monkeypatch, server
+):
+    _stop_at_the_first_sleep(monkeypatch)
     result = CliRunner().invoke(
         cli,
         [
