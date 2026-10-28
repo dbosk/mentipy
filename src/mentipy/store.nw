@@ -147,6 +147,59 @@ DEFAULT_LOCALE = "en"
 DEFAULT_SETTINGS[LOCALE_CONFIG] = DEFAULT_LOCALE
 @
 
+\subsection{The browser command}
+\label{sec:open-command}
+
+[[mentipy present]] opens the lecturer's admin page by running a
+command with the page's URL.  No one command works everywhere, so the
+default depends on the platform: [[xdg-open]] on Linux and the other
+Unix systems, the freedesktop.org launcher that desktops provide;
+[[open]] on macOS, which has no [[xdg-open]]; and [[explorer]] on
+Windows, which opens a URL in the default browser.  The setting
+[[mentipy.open_command]] replaces the default, for a particular browser
+or a window of its own; [[present --open-with]] replaces both for one
+run.
+
+The default is resolved when it is used, by one small function, rather
+than computed into a constant when the module is imported.  The table
+of defaults therefore holds [[None]] for the key, which still lists it
+in [[mentipy config]], and the tests can try every platform by
+changing [[sys.platform]].
+
+<<imports>>=
+import sys
+<<constants>>=
+OPEN_COMMAND_CONFIG = "mentipy.open_command"
+DEFAULT_SETTINGS[OPEN_COMMAND_CONFIG] = None
+<<functions>>=
+def default_open_command() -> str:
+    """Return the platform's command for opening a URL in a browser."""
+
+    if sys.platform == "darwin":
+        return "open"
+    if sys.platform == "win32":
+        return "explorer"
+    return "xdg-open"
+@
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    "platform, command",
+    [
+        ("linux", "xdg-open"),
+        ("freebsd14", "xdg-open"),
+        ("darwin", "open"),
+        ("win32", "explorer"),
+    ],
+)
+def test_default_open_command_follows_the_platform(
+    monkeypatch, platform, command
+):
+    monkeypatch.setattr(sys, "platform", platform)
+
+    assert default_open_command() == command
+@
+
 The environment override makes tests cheap and also gives power users a simple
 escape hatch when they want a project-local config file.
 
@@ -2807,6 +2860,7 @@ def test_results_empty_window_collapses_stats_to_none(tmp_path):
 <<test [[store.py]]>>=
 import os
 import pytest
+import sys
 import time
 
 from mentipy.questions import *

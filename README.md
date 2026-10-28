@@ -127,6 +127,18 @@ mentipy present --store ./mentipy.json
 mentipy present --store ./mentipy.json --public ssh
 ```
 
+Once the server listens, `present` also opens its admin index in your
+browser and goes straight on to the watch. The command depends on the
+platform: `xdg-open` on Linux and other Unix systems, `open` on macOS
+and `explorer` on Windows. Set `mentipy.open_command` to use another
+(a `{url}` in it marks where the URL goes, otherwise it is appended),
+pass `--open-with CMD` for one run, or `--no-open` to skip the step:
+
+```sh
+mentipy config mentipy.open_command --set "firefox --new-window"
+mentipy present --store ./mentipy.json --no-open
+```
+
 Use `--results` when respondents should land on the live results page after
 submitting an answer:
 

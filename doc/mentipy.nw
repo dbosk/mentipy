@@ -1613,6 +1613,24 @@ the address, as [[serve]] does, before it starts watching.  Ctrl-C
 stops both the watch and the server, closing a tunnel or port mapping
 on the way out.
 
+Once the server listens, [[present]] also opens its admin index in the
+lecturer's browser, through the server's loopback address (with the
+admin token under [[--public ssh]]), and goes straight on to the watch
+without waiting for the browser.  The command depends on the platform:
+[[xdg-open]] on Linux and the other Unix systems, [[open]] on macOS
+and [[explorer]] on Windows.  The setting [[mentipy.open_command]]
+names another, split as a shell would split it; a [[{url}]] in it marks
+where the URL goes, and without one the URL is appended.
+[[--open-with]] overrides the setting for one run, and [[--no-open]]
+skips the step.  A command that cannot be started only adds a warning
+to the status line.
+
+\begin{minted}{text}
+mentipy config mentipy.open_command --set "firefox --new-window"
+mentipy present --store ./mentipy.json --open-with "chromium --app={url}"
+mentipy present --store ./mentipy.json --no-open
+\end{minted}
+
 Some slides carry several questions and one QR code.  Respondents reach
 the second and third question through the navigation row, so those must
 open together with the first rather than wait for their own results

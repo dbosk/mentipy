@@ -75,6 +75,7 @@ from mentipy.store import (
     DEFAULT_VENV_PATH,
     HOST_CONFIG,
     LOCALE_CONFIG,
+    OPEN_COMMAND_CONFIG,
     MIN_PREFIX_CONFIG,
     PUBLIC_BASE_URL_CONFIG,
     PORT_CONFIG,
@@ -91,6 +92,7 @@ from mentipy.store import (
     STORE_CONFIG,
     Store,
     VENV_CONFIG,
+    default_open_command,
     format_timestamp,
     get_setting,
     parse_timestamp,
@@ -126,6 +128,12 @@ CONFIG_KEY_HELP = (
         " sv. mentipy serve --locale overrides it for one run.",
     ),
     (MIN_PREFIX_CONFIG, "Minimum issued hash-prefix length in the store."),
+    (
+        OPEN_COMMAND_CONFIG,
+        "Command mentipy present runs to open the admin page; {url} marks"
+        " the URL, else it goes last (default: xdg-open, open on macOS,"
+        " explorer on Windows). --open-with overrides it for one run.",
+    ),
     (PORT_CONFIG, "Bind port and fallback port for auto-resolved URLs."),
     (
         PUBLIC_BASE_URL_CONFIG,
@@ -2433,14 +2441,16 @@ def present(
     interval: float = WATCH_INTERVAL_OPTION,
     pin_heat: Optional[str] = PIN_HEAT_OPTION,
     window: str = RESULTS_WINDOW_OPTION,
+    open_browser: bool = OPEN_BROWSER_OPTION,
+    open_with: Optional[str] = OPEN_WITH_OPTION,
 ):
     """Run the polling server and follow the lecture in this terminal.
 
-    Starts the server as `mentipy serve` does, then shows, like a bare
-    `mentipy watch`, the answers to the question the lecturer has
-    opened.  The start-up lines stay on screen above it; under
-    `--public ssh` they include the admin link, so keep this terminal
-    off the projector.
+    Starts the server as `mentipy serve` does, opens its admin index in
+    a browser, then shows, like a bare `mentipy watch`, the answers to
+    the question the lecturer has opened.  The start-up lines stay on
+    screen above it; under `--public ssh` they include the admin link,
+    so keep this terminal off the projector.
     """
 
     heat_mode = _pin_heat_mode(pin_heat)
@@ -2450,6 +2460,9 @@ def present(
     chosen_port = _configured_port(port)
     active_store = _configured_store(store)
     public_mode = _parse_public_mode(ctx, public, command="present")
+    open_command = (
+        _chosen_open_command(open_with) if open_browser else None
+    )
 
     def runner(lines, store, host, port, **options):
         _present_runner(
@@ -2460,6 +2473,7 @@ def present(
             interval=interval,
             window=window,
             pin_heat=heat_mode,
+            open_command=open_command,
             **options,
         )
 
@@ -2512,20 +2526,27 @@ def _present_runner(
     interval: float,
     window: str,
     pin_heat: str,
+    open_command: str | None,
     **options,
 ):
     with _reporting_bind_errors(host, port):
         server = create_server(store, host, port, **options)
     banner = _PresentBanner(lines)
+    server_url = _server_url_for(host, server.server_address[1])
     with _logging_into(banner):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
+            if open_command is not None:
+                _open_browser(
+                    open_command,
+                    _admin_index_url(server_url, options.get("admin_token")),
+                )
             typer.echo(str(banner))
             console = _result_console()
             _follow_active_question(
                 store,
-                _server_url_for(host, server.server_address[1]),
+                server_url,
                 _watcher_factory(
                     store,
                     window=window,
@@ -2542,6 +2563,97 @@ def _present_runner(
             server.shutdown()
             thread.join()
             server.server_close()
+@
+
+\paragraph{Opening the browser.}
+Once the server listens, [[present]] opens its admin index in the
+lecturer's browser, so the lecture starts with one command and the
+results pages are a click away.  The order is the point: after the
+bind, so a port in use never sends the browser to a server that is not
+there, and before the watch, which then runs until Ctrl-C.  The URL is
+the loopback address of the server's own index, the address the watch
+asks, not the public URL: it needs no round trip through a tunnel, and
+it works before anyone outside can reach the server.  Under
+[[--public ssh]] a loopback request is no longer admin, so the URL
+carries the run's token; the server answers it as it answers the admin
+link in the banner, by setting the admin cookie and redirecting to the
+bare index, so the token leaves the address bar at once.
+
+The command comes from [[--open-with]], else from
+[[mentipy.open_command]], else from the platform's default
+(\cref{sec:open-command} in the store); [[--no-open]] skips the step,
+for a lecturer whose browser is already open on the index.  The
+command is split as a shell would split it, so a browser with options
+fits in one setting, and a [[{url}]] in it marks where the URL goes,
+for the browsers that want it inside an option; without one, the URL
+is the last argument.  The process is started and left alone: its
+input and output go to the null device, so it cannot write over the
+display, and it runs in a session of its own, so the terminal's Ctrl-C
+does not reach it and a browser that stays running cannot hold
+[[present]] up.  [[present]] never waits for it.
+
+A command that cannot be started, one that does not exist or does not
+parse, is no reason to stop the lecture.  It is logged as a warning,
+which puts it in the banner's warning line, and [[present]] goes on to
+the watch; the lecturer opens the index by hand.
+
+<<constants>>=
+OPEN_BROWSER_OPTION = typer.Option(
+    True,
+    "--open/--no-open",
+    help="Open the server's admin index in a browser once it listens.",
+)
+OPEN_WITH_OPTION = typer.Option(
+    None,
+    "--open-with",
+    metavar="CMD",
+    help=(
+        "Command that opens the browser; {url} marks the URL, else it"
+        " is appended. Defaults to config setting"
+        f" {OPEN_COMMAND_CONFIG}, else xdg-open, open on macOS or"
+        " explorer on Windows."
+    ),
+    show_default=False,
+)
+<<functions>>=
+def _chosen_open_command(open_with: str | None) -> str:
+    if open_with is not None:
+        return open_with
+    return get_setting(OPEN_COMMAND_CONFIG) or default_open_command()
+
+
+def _admin_index_url(server_url: str, admin_token: str | None) -> str:
+    if admin_token is None:
+        return f"{server_url}/"
+    return f"{server_url}/?admin={admin_token}"
+
+
+def _open_browser(command: str, url: str) -> None:
+    try:
+        subprocess.Popen(
+            _browser_argv(command, url),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except (OSError, ValueError) as error:
+        LOGGER.warning(
+            "could not open the browser with %s: %s",
+            command or "an empty command",
+            error,
+        )
+
+
+def _browser_argv(command: str, url: str) -> list[str]:
+    argv = shlex.split(command)
+    if not argv:
+        raise ValueError("no command to run")
+    if any("{url}" in arg for arg in argv):
+        return [arg.replace("{url}", url) for arg in argv]
+    return [*argv, url]
+<<imports>>=
+import shlex
 @
 
 The watch clears the screen whenever it switches question, and on
@@ -6423,7 +6535,8 @@ def test_serve_warns_about_recompiling_only_for_a_resolved_address(
 \section{Presenting contracts}
 
 [[present]] must offer exactly [[serve]]'s options plus [[watch]]'s
-display options.  Reading them from the Typer command objects, rather
+display options, and the options of its own listed here, which only
+[[present]] has.  Reading them from the Typer command objects, rather
 than listing them here, makes the test catch a flag added to either
 command later: the new flag has to reach [[present]] too, or be
 deliberately excluded here as PREFIX and [[--server]] are.
@@ -6442,16 +6555,21 @@ def _option_declarations(name):
     }
 
 
+PRESENT_ONLY_OPTIONS = {"open_browser", "open_with"}
+
+
 def test_present_takes_the_options_of_serve_and_watch():
     watch_display = {
         option
         for option in _option_declarations("watch")
         if option[0] not in ("prefix", "server")
     }
+    present = _option_declarations("present")
 
-    assert _option_declarations("present") == (
-        _option_declarations("serve") | watch_display
-    )
+    assert {
+        option for option in present if option[0] not in PRESENT_ONLY_OPTIONS
+    } == (_option_declarations("serve") | watch_display)
+    assert {option[0] for option in present} >= PRESENT_ONLY_OPTIONS
 @
 
 The main run starts a real server on a free port through [[present]]
@@ -6971,6 +7089,249 @@ def test_present_serves_pages_in_the_chosen_locale(tmp_path, monkeypatch):
     assert "Pick one" in result.stdout
 @
 
+\subsection{Opening the browser}
+
+The browser command is replaced by a spy, since a test must not open
+windows on the machine that runs it.  The spy records the argument
+list and the keywords of every process [[present]] starts, checks that
+the server already listens when it is called, and fails if anyone
+waits for the process: [[present]] must go on to the watch at once.
+The rest of the run is real, as in the tests above.
+
+<<test functions>>=
+class _BrowserSpy:
+    calls = []
+
+    def __init__(self, argv, **options):
+        url = argv[-1] if "://" in argv[-1] else None
+        parts = urllib.parse.urlsplit(url or "http://127.0.0.1:1")
+        with socket.socket() as probe:
+            listening = probe.connect_ex((parts.hostname, parts.port)) == 0
+        _BrowserSpy.calls.append(
+            {"argv": argv, "options": options, "listening": listening}
+        )
+
+    def wait(self, *_args, **_kwargs):
+        raise AssertionError("present must not wait for the browser")
+
+    communicate = wait
+
+
+@pytest.fixture
+def browser_spy(monkeypatch):
+    _BrowserSpy.calls = []
+    monkeypatch.setattr("mentipy.cli.subprocess.Popen", _BrowserSpy)
+    return _BrowserSpy.calls
+
+
+def _run_present(tmp_path, monkeypatch, *extra, steps=()):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    port = _free_port()
+    set_setting("base_url", f"http://127.0.0.1:{port}")
+    _play_the_lecture(monkeypatch, *steps)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "present",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--store",
+            str(tmp_path / "mentipy.json"),
+            *extra,
+        ],
+    )
+    return result, port
+@
+
+By default [[present]] runs the platform's command, here Linux's
+[[xdg-open]], with the admin index of its own server, without waiting,
+detached from the terminal and its input and output, and only once the
+server listens.  The watch starts as usual.  The platform is set
+explicitly, so the test means the same on every machine.
+
+<<test functions>>=
+def test_present_opens_the_admin_index_with_the_platform_command(
+    tmp_path, monkeypatch, browser_spy
+):
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    result, port = _run_present(tmp_path, monkeypatch)
+
+    assert result.exit_code == 0, result.output
+    assert len(browser_spy) == 1
+    call = browser_spy[0]
+    assert call["argv"] == ["xdg-open", f"http://127.0.0.1:{port}/"]
+    assert call["options"] == {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "start_new_session": True,
+    }
+    assert call["listening"] is True
+    assert "No question is open yet" in result.stdout
+@
+
+The command comes from [[mentipy.open_command]] unless [[--open-with]]
+names another, and is split like a shell would split it.  A [[{url}]]
+in it marks where the URL goes; without one, the URL is the last
+argument.
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    "configured, flag, expected",
+    [
+        ("firefox --new-window", None, ["firefox", "--new-window", "URL"]),
+        ("firefox", "xdg-open", ["xdg-open", "URL"]),
+        (None, "chromium '--app={url}' --x", ["chromium", "--app=URL", "--x"]),
+    ],
+    ids=["config", "flag-wins", "placeholder"],
+)
+def test_present_runs_the_chosen_open_command(
+    tmp_path, monkeypatch, browser_spy, configured, flag, expected
+):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    if configured is not None:
+        set_setting("open_command", configured)
+    extra = ["--open-with", flag] if flag is not None else []
+
+    result, port = _run_present(tmp_path, monkeypatch, *extra)
+
+    assert result.exit_code == 0, result.output
+    url = f"http://127.0.0.1:{port}/"
+    assert browser_spy[0]["argv"] == [
+        url if arg == "URL" else arg.replace("URL", url) for arg in expected
+    ]
+@
+
+With [[--no-open]] nothing is started.
+
+<<test functions>>=
+def test_present_opens_nothing_with_no_open(
+    tmp_path, monkeypatch, browser_spy
+):
+    result, _port = _run_present(tmp_path, monkeypatch, "--no-open")
+
+    assert result.exit_code == 0, result.output
+    assert browser_spy == []
+    assert "No question is open yet" in result.stdout
+@
+
+Under [[--public ssh]] a loopback request is no longer admin, so the
+URL carries the run's token.  The test asks the real server for the
+URL the browser was given: the server must answer as it answers the
+lecturer's admin link, by setting the admin cookie and redirecting to
+the bare index.
+
+<<test functions>>=
+def test_present_opens_the_tokenised_index_under_ssh(
+    tmp_path, monkeypatch, browser_spy
+):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("ssh_tunnel", "alice@example.test:9000")
+
+    @contextmanager
+    def fake_expose(_mode, _local_port, *, ssh_endpoint=None):
+        yield "http://public.example:9000"
+
+    monkeypatch.setattr("mentipy.cli.expose", fake_expose)
+    answers = {}
+
+    def follow_the_link():
+        parts = urllib.parse.urlsplit(browser_spy[0]["argv"][-1])
+        connection = http.client.HTTPConnection(
+            parts.hostname, parts.port, timeout=5
+        )
+        connection.request("GET", f"{parts.path}?{parts.query}")
+        response = connection.getresponse()
+        response.read()
+        answers["status"] = response.status
+        answers["cookie"] = response.getheader("Set-Cookie") or ""
+        connection.close()
+
+    result, port = _run_present(
+        tmp_path, monkeypatch, "--public", "ssh", steps=[follow_the_link]
+    )
+
+    assert result.exit_code == 0, result.output
+    url = browser_spy[0]["argv"][-1]
+    assert re.fullmatch(rf"http://127\.0\.0\.1:{port}/\?admin=\S+", url)
+    token = url.rpartition("=")[2]
+    assert f"/?admin={token}" in result.stdout
+    assert answers["status"] == 303
+    assert f"mentipy_admin={token}" in answers["cookie"]
+@
+
+A command that cannot be started must not stop the lecture.  This one
+does not exist, so the real [[Popen]] fails; the failure becomes a
+warning in the banner and the watch starts as usual.
+
+<<test functions>>=
+def test_present_reports_an_open_command_that_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr("mentipy.cli.CLEAR_SCREEN", "[clear]")
+
+    result, _port = _run_present(
+        tmp_path, monkeypatch, "--open-with", "mentipy-no-such-browser"
+    )
+
+    assert result.exit_code == 0, result.output
+    frame = result.stdout.split("[clear]")[-1]
+    assert re.search(
+        r"^Warnings: 1, the last: could not open the browser with"
+        r" mentipy-no-such-browser: ",
+        frame,
+        re.M,
+    )
+    assert "No question is open yet" in frame
+
+
+@pytest.mark.parametrize("command", ["", "'unbalanced"])
+def test_present_reports_an_open_command_it_cannot_parse(
+    tmp_path, monkeypatch, browser_spy, command
+):
+    monkeypatch.setattr("mentipy.cli.CLEAR_SCREEN", "[clear]")
+
+    result, _port = _run_present(tmp_path, monkeypatch, "--open-with", command)
+
+    assert result.exit_code == 0, result.output
+    assert browser_spy == []
+    frame = result.stdout.split("[clear]")[-1]
+    assert "Warnings: 1, the last: could not open the browser" in frame
+@
+
+A port that is taken ends [[present]] before the browser is opened: a
+browser pointed at a server that is not there would only show an
+error page.
+
+<<test functions>>=
+def test_present_opens_nothing_when_the_bind_fails(
+    tmp_path, monkeypatch, browser_spy
+):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    _stop_at_the_first_sleep(monkeypatch)
+    with socket.socket() as holder:
+        holder.bind(("127.0.0.1", 0))
+        holder.listen()
+        port = holder.getsockname()[1]
+        set_setting("base_url", f"http://127.0.0.1:{port}")
+        result = CliRunner().invoke(
+            cli,
+            [
+                "present",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--store",
+                str(tmp_path / "mentipy.json"),
+            ],
+        )
+
+    assert result.exit_code == 1
+    assert browser_spy == []
+@
+
 \section{Render command contracts}
 
 The render-subcommand tests first pin the basic path: a command should print the
@@ -7471,6 +7832,8 @@ import pytest
 import re
 import socket
 import struct
+import subprocess
+import sys
 import threading
 import time
 from types import SimpleNamespace
