@@ -562,10 +562,11 @@ def _latex_reference() -> str:
             in the deck is open, for questions that share a slide
             with their predecessor.  Presentation-only; does not
             affect the question's canonical hash.
-          context: material shown on the answer page, between the
-            question and the inputs, and on the results page, above
-            the results; never on the slide.  One item or a list: a
-            string is prose, a
+          context: material shown on the answer page, after the
+            question and its inputs, and on the results page, after
+            the aggregate results and before any list of answers;
+            never on the slide.  One item or a list: a string is
+            prose, a
             ContextSnippet(text, language=None, label=None) is shown
             as is, and two helpers read files:
             file_snippet(path, *, name=None, language=None,

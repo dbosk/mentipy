@@ -215,10 +215,10 @@ A slide has little room, but the phone a respondent answers on has a
 lot.  A peer-instruction question about a program built up over several
 slides can only show a fragment of it on the slide, while the whole
 program fits on the answer page.  The [[context]] field carries that
-material: a tuple of items that the web pages show under the prompt,
-on the answer form before the inputs and on the results page before the
-results.  The slide has no room for it, so the LaTeX side ignores the
-context entirely.
+material: a tuple of items that the web pages show after the
+question, on the answer form after the inputs and on the results page
+after the aggregate results.  The slide has no room for it, so the
+LaTeX side ignores the context entirely.
 
 The context's premises are part of the question's identity, as
 [[PinTextQuestion.content]] is.  An answer is an answer about the
