@@ -5142,7 +5142,10 @@ lecturer who resets the poll by deleting [[mentipy.json]] mid-session.
 Respondents will type this URL, so neither case may end in a stdlib
 error page or a dropped connection; both get the self-refreshing waiting
 page, and a latecomer's phone turns into the first question by itself
-once the lecturer opens it.
+once the lecturer opens it.  The page carries an
+[[X-Mentipy-Active: waiting]] header for [[mentipy watch]], which asks
+this URL to follow the lecture: it tells this page from any other 200
+without reading its (translatable) text.
 
 Building the target URL is shared with the two other places that send a
 respondent to the current question: the gate, for a skipped question,
@@ -5179,7 +5182,7 @@ if location is None:
             refresh_seconds=LOCKED_REFRESH_SECONDS,
             catalogue=catalogue,
         ),
-        headers={"Cache-Control": "no-store"},
+        headers={"Cache-Control": "no-store", "X-Mentipy-Active": "waiting"},
     )
     return
 self._redirect(location)

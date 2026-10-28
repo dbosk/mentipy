@@ -128,6 +128,19 @@ mentipy watch f379 --store ./mentipy.json
 mentipy export f379 --format csv --store ./mentipy.json
 ```
 
+During a lecture, a bare `mentipy watch` (no prefix) follows the
+question the lecturer has opened on the running server, and switches
+whenever Next or Skip moves the lecture on. Start it once, beside
+`mentipy serve`, with the same store. It asks the server for `/active`,
+at `http://localhost:<mentipy.port>` (or at the `mentipy.host` address,
+when that names one) unless `--server` names another address. It needs no admin rights, and it keeps retrying while the
+server is not running:
+
+```sh
+mentipy watch --store ./mentipy.json
+mentipy watch --store ./mentipy.json --server http://localhost:9000
+```
+
 ## Respondent URLs and QR Codes
 
 You can pass `base_url` / `--base-url` while rendering, or store a default:
