@@ -29,6 +29,7 @@ MODULE_TEX = \
 	../src/mentipy/store.tex \
 	../src/mentipy/venv.tex \
 	../src/mentipy/network.tex \
+	../src/mentipy/catalogue.tex \
 	../src/mentipy/latex.tex \
 	../src/mentipy/sty.tex \
 	../src/mentipy/server.tex \

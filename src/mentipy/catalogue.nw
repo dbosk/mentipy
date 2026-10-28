@@ -1,0 +1,686 @@
+\chapter{Labels and Translations}
+\label{chap:catalogue}
+
+Mentipy puts words of its own next to the lecturer's: the instructions
+on the slide (\enquote{Choose exactly one:}), the Submit button and the
+headings on the phone, the waiting page, the error pages.  A Swedish
+lecture shows Swedish slides, and the phone in a student's hand should
+match them.  This module holds those words, in every language Mentipy
+ships, and nothing else.
+
+\section{Overview}
+
+One setting, [[mentipy.locale]] (\cref{sec:locale-setting}), chooses the
+language for both surfaces.  The two surfaces read it at different
+times, which is why the words live in a module of their own rather than
+in either of them:
+\begin{description}
+\item[The slide] The LaTeX helpers (\cref{sec:slide-labels}) read the
+  setting when the deck compiles and write each label as a LaTeX macro
+  whose default text comes from this catalogue, so a deck can still
+  override a single label.
+\item[The web pages] The server reads the setting, or the
+  [[--locale]] flag of [[mentipy serve]], when it starts, and renders
+  every page from the same catalogue.
+\end{description}
+Both import this module and nothing in it imports them, so the
+catalogue can be read, and checked, on its own.  The store module keeps
+the setting itself, because every configuration key lives there; this
+module only knows the languages.
+
+The catalogue is deliberately not [[gettext]].  [[gettext]] would need
+compiled [[.mo]] files in the wheel and a build step to make them, for
+two short tables that a translator can read side by side here.  Its
+other strength, plural rules beyond \enquote{one or many}, is not needed
+by English or Swedish (\cref{sec:catalogue-plurals}).  A plain mapping
+also turns the completeness of a translation into a unit test
+(\cref{sec:catalogue-tests}).
+
+What never passes through the catalogue matters as much: the question
+text, the options and the answers are the lecturer's and the
+respondents' words and are shown as they were written.  The catalogue
+is also pure presentation.  No question stores a label, so no label
+enters [[question_hash]], and changing the language changes no prefix
+and no QR code.
+
+<<[[catalogue.py]]>>=
+from __future__ import annotations
+
+<<imports>>
+
+<<constants>>
+<<classes>>
+<<functions>>
+<<built-in catalogues>>
+@
+
+The tests, which follow the code they check, import the module's
+public names and keep a handle on the module itself, so that a test can
+reset the record of warned locales.
+
+<<test [[catalogue.py]]>>=
+import html
+import warnings
+
+import pytest
+
+import mentipy.catalogue as catalogue_module
+from mentipy.catalogue import *
+
+<<test functions>>
+@
+
+<<imports>>=
+from dataclasses import dataclass
+from string import Formatter
+from types import MappingProxyType
+from typing import Any, Callable, Mapping
+import warnings
+@
+
+\section{The messages}
+
+Every message has a key, and the key names the surface and the
+phrase: [[slide.choose_one]], [[form.submit]].  Each entry holds one
+text per locale in the order of [[LOCALES]], so the English text and its
+translation sit on the same line.  Adding a language means adding one
+element to every entry, and the test in \cref{sec:catalogue-tests}
+fails for any entry that was missed.
+
+<<constants>>=
+LOCALES = ("en", "sv")
+FALLBACK_LOCALE = "en"
+
+MESSAGES: dict[str, tuple[str, ...]] = {
+    <<slide messages>>
+    <<form messages>>
+    <<results messages>>
+    <<navigation messages>>
+    <<error messages>>
+}
+@
+
+\subsection{Numbers and plurals}
+\label{sec:catalogue-plurals}
+
+A message that carries a number names it as a [[str.format]] field,
+[[{n}]], rather than leaving the number to be glued on: the number does
+not stand in the same place in every language (\enquote{Rank your top
+3} but \enquote{Rangordna de 3 bästa}), and glued strings break as soon
+as a translator moves a word.  English and Swedish inflect a counted
+noun the same way, singular for one and plural otherwise, so a phrase
+whose singular reads differently gets a key of its own ([[pin_one]] and
+[[pin_many]]) instead of a plural rule.  A language with more forms
+would need a rule here; neither of ours does.  Where the counted noun
+is invariant in Swedish (\enquote{280 tecken}) only the English text
+uses the plural, which it does for every limit an author sets in
+practice.
+
+\subsection{Slide labels}
+
+The slide labels are the respondent instructions the LaTeX helpers
+print next to the QR code.  The Swedish follows the wording the intropy
+decks already projected (\enquote{Välj ett alternativ:},
+[[\item[Svar] Fritext]], [[\item[Högst] N tecken]], [[Skala]],
+[[Lägst]], [[Högst]]), so those decks keep their slides when they drop
+their own replacement wrappers.  \enquote{Högst} serves both as the
+character limit and as the top of a scale, as it did there.
+
+<<slide messages>>=
+"slide.choose_one": ("Choose exactly one:", "Välj ett alternativ:"),
+"slide.choose_many": (
+    "Choose one or more:",
+    "Välj ett eller flera alternativ:",
+),
+"slide.type": ("Type", "Svar"),
+"slide.free_text": ("Free-text answer", "Fritext"),
+"slide.limit": ("Limit", "Högst"),
+"slide.characters": ("{n} characters", "{n} tecken"),
+"slide.range": ("Range", "Skala"),
+"slide.low": ("Low", "Lägst"),
+"slide.high": ("High", "Högst"),
+"slide.word_cloud": ("Word-cloud (free-text)", "Ordmoln (fritext)"),
+"slide.mode": ("Mode", "Läge"),
+"slide.whole_answer": (
+    "Whole answer counts as one entry",
+    "Hela svaret räknas som ett ord",
+),
+"slide.split_on": ("Split on", "Delas vid"),
+"slide.min_word_length": ("Min word length", "Minsta ordlängd"),
+"slide.rank_all": (
+    "Rank every option from most to least preferred:",
+    "Rangordna alla alternativ, bäst först:",
+),
+"slide.rank_top": ("Rank your top {n}:", "Rangordna de {n} bästa:"),
+"slide.pin_one": (
+    "Tap the target to place your pin.",
+    "Tryck för att sätta ut din nål.",
+),
+"slide.pin_many": (
+    "Tap the target to place up to {n} pins.",
+    "Tryck för att sätta ut högst {n} nålar.",
+),
+"slide.pin_comment": (
+    "You can comment on each pin.",
+    "Du kan kommentera varje nål.",
+),
+@
+
+\subsection{The answer form}
+
+The form repeats the slide's rules in the respondent's hand, so its
+Swedish reuses the slide's words: the scale ends are \enquote{Lägst}
+and \enquote{Högst} on both.  Two messages go into the pin form's
+script rather than its HTML, the tooltip of a placed pin and the
+placeholder of its comment field, whose [[{n}]] the script fills in
+with the pin's number as it draws it.
+
+<<form messages>>=
+"form.submit": ("Submit", "Skicka"),
+"form.scale_low": ("Low end: {label}", "Lägst: {label}"),
+"form.scale_high": ("High end: {label}", "Högst: {label}"),
+"form.rank_all": (
+    "Give every option a position.",
+    "Ge varje alternativ en plats.",
+),
+"form.rank_top": ("Rank your top {n}.", "Rangordna de {n} bästa."),
+"form.pin_one": (
+    "Tap the target to place your pin.",
+    "Tryck för att sätta ut din nål.",
+),
+"form.pin_many": (
+    "Tap the target to place up to {n} pins; tap a pin to remove it.",
+    "Tryck för att sätta ut högst {n} nålar; tryck på en nål för att"
+    " ta bort den.",
+),
+"form.pin_noscript": (
+    "This question needs JavaScript to record where you tap.",
+    "Frågan behöver JavaScript för att kunna registrera var du trycker.",
+),
+"form.pin_remove": ("Tap to remove", "Tryck för att ta bort"),
+"form.pin_comment": (
+    "Comment on pin {n} (optional)",
+    "Kommentar till nål {n} (valfri)",
+),
+"form.download": (
+    "Download {filename} ({size})",
+    "Ladda ner {filename} ({size})",
+),
+"form.bytes": ("{n} bytes", "{n} byte"),
+"thanks.title": ("Thanks", "Tack"),
+"thanks.body": (
+    "Thanks, your answer was recorded.",
+    "Tack, ditt svar är registrerat.",
+),
+@
+
+\subsection{The results page}
+
+The results page is read by the lecturer and, with [[--results]], by
+the room, so it follows the same setting.  The statistical mode is
+\enquote{Typvärde} in Swedish, a different word from the word-cloud
+\enquote{Läge} on the slide, which is why the two are separate keys
+although both are \enquote{Mode} in English.  Numbers keep the decimal
+point in both languages; a Swedish decimal comma would need the number
+formatting to follow the locale too, which is a separate change.
+
+<<results messages>>=
+"results.title": ("Results for {title}", "Resultat för {title}"),
+"results.total": ("Total responses: {n}", "Antal svar: {n}"),
+"results.no_answers": ("No answers yet.", "Inga svar än."),
+"results.no_open_answers": (
+    "No free-text answers yet.",
+    "Inga fritextsvar än.",
+),
+"window.label": ("Show:", "Visa:"),
+"window.apply": ("Apply", "Uppdatera"),
+"window.session": ("Since server start", "Sedan servern startade"),
+"window.hour": ("Last hour", "Senaste timmen"),
+"window.day": ("Last day", "Senaste dygnet"),
+"window.all": ("All time", "Alla svar"),
+"stats.mode": (
+    "Mode: {label} ({percentage:.0f}%)",
+    "Typvärde: {label} ({percentage:.0f}%)",
+),
+"stats.mean": ("Mean", "Medelvärde"),
+"stats.median": ("Median", "Median"),
+"stats.std": ("Std", "Std.avv."),
+"stats.min": ("Min", "Min"),
+"stats.max": ("Max", "Max"),
+"stats.avg_length": ("Avg length", "Medellängd"),
+"stats.chars": ("{n} chars", "{n} tecken"),
+"stats.words": ("Words", "Ord"),
+"stats.distinct": ("Distinct", "Unika"),
+"wordcloud.label": ("Word cloud", "Ordmoln"),
+"wordcloud.word": ("Word", "Ord"),
+"wordcloud.count": ("Count ({n})", "Antal ({n})"),
+"wordcloud.share": ("Percentage", "Andel"),
+"ranking.not_ranked": ("not ranked", "ej rangordnad"),
+"ranking.detail": (
+    "avg {mean:.1f}, {n} ranked",
+    "snitt {mean:.1f}, rangordnad av {n}",
+),
+"pins.total": ("Total pins: {n}", "Antal nålar: {n}"),
+"pins.comments": ("Comments", "Kommentarer"),
+@
+
+\subsection{Navigation, pacing and the index}
+
+The navigation row, the lecturer's Skip and Reopen controls, the
+waiting pages of the paced lecture and the lecturer's index belong
+together: they are the words of moving through a deck.  The index
+labels each question with its pacing state; the state names stay
+English in the HTML's class attribute, where the style sheet reads
+them, and only the visible word is translated.
+
+<<navigation messages>>=
+"nav.previous": ("← Previous", "← Föregående"),
+"nav.next": ("Next →", "Nästa →"),
+"nav.skip": ("Skip", "Hoppa över"),
+"nav.reopen": ("Reopen", "Öppna igen"),
+"nav.skipped": (
+    "Skipped: this question is locked for the room.",
+    "Överhoppad: frågan är stängd för deltagarna.",
+),
+"nav.retry": ("Try again", "Försök igen"),
+"waiting.title": ("Locked", "Låst"),
+"waiting.heading": ("Not yet", "Inte än"),
+"waiting.question": (
+    "The lecturer has not opened this question yet.",
+    "Läraren har inte öppnat frågan än.",
+),
+"waiting.lecture": (
+    "The lecture has not started yet.",
+    "Föreläsningen har inte börjat än.",
+),
+"index.title": ("Questions", "Frågor"),
+"index.empty": (
+    "No questions have been registered yet.",
+    "Inga frågor har registrerats än.",
+),
+"index.results": ("results", "resultat"),
+"status.active": ("active", "aktiv"),
+"status.open": ("open", "öppen"),
+"status.locked": ("locked", "låst"),
+"status.skipped": ("skipped", "överhoppad"),
+@
+
+\subsection{Error pages and rejected answers}
+
+The lecturer-only routes used to build their refusal from a subject and
+a shared tail (\enquote{Results pages are} \ldots{} \enquote{only
+available on localhost}).  A translation cannot be glued together that
+way, since the verb and its agreement move, so each route has a whole
+sentence.  \enquote{Localhost} becomes \enquote{lokalt på servern}, the
+place a respondent can understand.
+
+The few plain HTTP errors the server sends itself, a path that leads
+nowhere and an upload too large to accept, get a page of their own too
+rather than the standard library's English one, titled with the status
+code, which reads the same in every language.  So do the errors the
+standard library sends itself, an unsupported method or a request it
+cannot parse, with a general reason.
+
+A ranking's detail line says how many respondents ranked an option.
+The Swedish puts the count after the participle, \enquote{rangordnad
+av 3}, which agrees with the option rather than the respondents and so
+reads correctly for one respondent and for many alike.
+
+A rejected answer names what was wrong with it, so the parser's
+reasons are messages too.  Only a request no form would send (a crafted
+body, a number that is not one) gets the generic
+[[answer.unreadable]].
+
+<<error messages>>=
+"error.forbidden": ("Forbidden", "Åtkomst nekad"),
+"error.forbidden_index": (
+    "The question index is only available on localhost or via the"
+    " admin link.",
+    "Frågelistan finns bara lokalt på servern eller via"
+    " administratörslänken.",
+),
+"error.forbidden_results": (
+    "Results pages are only available on localhost or via the admin"
+    " link.",
+    "Resultaten finns bara lokalt på servern eller via"
+    " administratörslänken.",
+),
+"error.forbidden_export": (
+    "Result exports are only available on localhost or via the admin"
+    " link.",
+    "Resultatexporten finns bara lokalt på servern eller via"
+    " administratörslänken.",
+),
+"error.forbidden_skip": (
+    "Skipping questions is only available on localhost or via the"
+    " admin link.",
+    "Att hoppa över frågor går bara lokalt på servern eller via"
+    " administratörslänken.",
+),
+"error.forbidden_reopen": (
+    "Reopening questions is only available on localhost or via the"
+    " admin link.",
+    "Att öppna frågor igen går bara lokalt på servern eller via"
+    " administratörslänken.",
+),
+"error.ambiguous": ("Ambiguous prefix", "Tvetydigt prefix"),
+"error.ambiguous_body": (
+    "{prefix} matches multiple questions.",
+    "{prefix} matchar flera frågor.",
+),
+"error.unknown": ("Unknown question", "Okänd fråga"),
+"error.unknown_body": (
+    "No question matches {prefix}.",
+    "Ingen fråga matchar {prefix}.",
+),
+"error.invalid": ("Invalid answer", "Ogiltigt svar"),
+"error.status": ("Error {code}", "Fel {code}"),
+"error.not_found": (
+    "There is nothing at this address.",
+    "Det finns inget på den här adressen.",
+),
+"error.request": (
+    "The server could not handle this request.",
+    "Servern kunde inte hantera begäran.",
+),
+"error.too_large": (
+    "The answer is too large to send.",
+    "Svaret är för stort för att skickas.",
+),
+"answer.unreadable": (
+    "the answer could not be read",
+    "svaret kunde inte läsas",
+),
+"answer.malformed": (
+    "malformed multipart form data",
+    "formulärdatan är felaktig",
+),
+"answer.not_text": (
+    "uploaded file is not valid text; save it as UTF-8",
+    "den uppladdade filen är inte giltig text; spara den som UTF-8",
+),
+"answer.choose_one": (
+    "choose exactly one option",
+    "välj exakt ett alternativ",
+),
+"answer.choose_some": (
+    "choose at least one option",
+    "välj minst ett alternativ",
+),
+"answer.option_range": (
+    "multiple-choice answer outside the allowed range",
+    "svaret ligger utanför alternativen",
+),
+"answer.option_repeat": (
+    "multiple-choice answer repeats the same option",
+    "svaret upprepar samma alternativ",
+),
+"answer.too_long": ("text answer too long", "svaret är för långt"),
+"answer.rank_numbers": (
+    "ranking positions must be whole numbers",
+    "platserna måste vara heltal",
+),
+"answer.rank_some": (
+    "rank at least one option",
+    "rangordna minst ett alternativ",
+),
+"answer.rank_too_many": (
+    "you ranked more options than allowed",
+    "du rangordnade fler alternativ än tillåtet",
+),
+"answer.rank_gaps": (
+    "use each position once, starting at 1 with no gaps",
+    "använd varje plats en gång, från 1 och utan luckor",
+),
+"answer.rank_all": ("rank every option", "rangordna alla alternativ"),
+"answer.pin_numbers": (
+    "pin coordinates must be numbers",
+    "nålens koordinater måste vara tal",
+),
+"answer.pin_range": (
+    "pin coordinates must lie in [0, 1]",
+    "nålens koordinater måste ligga i [0, 1]",
+),
+"answer.pin_no_comments": (
+    "this question does not accept pin comments",
+    "frågan tar inte emot kommentarer",
+),
+"answer.pin_comment_long": (
+    "pin comment too long",
+    "kommentaren är för lång",
+),
+"answer.pin_some": ("place at least one pin", "sätt ut minst en nål"),
+"answer.scale_one": (
+    "choose exactly one scale value",
+    "välj exakt ett värde",
+),
+"answer.scale_range": (
+    "scale answer outside the allowed range",
+    "värdet ligger utanför skalan",
+),
+@
+
+\subsection{A complete translation}
+\label{sec:catalogue-tests}
+
+A translation is complete when every entry has a text for every
+locale, and usable when every text takes the same fields as the
+English one: a Swedish message missing [[{n}]] would silently drop the
+number, and one with a field English lacks would raise a [[KeyError]]
+in the middle of a lecture.
+
+<<test functions>>=
+def test_every_message_has_one_text_per_locale():
+    incomplete = [
+        key for key, texts in MESSAGES.items() if len(texts) != len(LOCALES)
+    ]
+    assert incomplete == []
+
+
+def test_translations_take_the_same_fields_as_english():
+    english = CATALOGUES["en"]
+    for locale, catalogue in CATALOGUES.items():
+        for key in MESSAGES:
+            assert catalogue.fields(key) == english.fields(key), (locale, key)
+@
+
+
+\section{One locale's catalogue}
+
+A [[Catalogue]] is the messages of one locale.  It is called with a key
+and the message's fields to get plain text, which suits a page title,
+an attribute or a script string, all of which their callers escape as
+they would any other text.
+
+Markup is the harder case, because a message often wraps a fragment
+the caller has already rendered: the count in \enquote{Total responses:
+\textbf{12}}, the prefix in \enquote{No question matches
+\texttt{ab12}.}  Escaping the formatted string would escape the
+fragment's own tags; not escaping it would let a message's [[<]] or
+[[&]] through.  [[markup]] therefore takes the target language's
+escape function and walks the message with [[string.Formatter]]: the
+message's own text is escaped, and each field is replaced by its
+fragment, which is markup already.  A number needs no escaping, and its
+format specification ([[{percentage:.0f}]]) still applies.  The same
+walk serves the slide, with LaTeX's escape function and
+[[\mentipynumber{}]] as the fragment (\cref{sec:slide-labels}).
+
+<<classes>>=
+@dataclass(frozen=True)
+class Catalogue:
+    """The messages of one locale."""
+
+    locale: str
+    messages: Mapping[str, str]
+
+    def __call__(self, key: str, **fields: Any) -> str:
+        """Return message `key` as plain text with `fields` filled in."""
+
+        return self.messages[key].format(**fields)
+
+    def markup(
+        self,
+        key: str,
+        escape: Callable[[str], str],
+        **fragments: Any,
+    ) -> str:
+        """Return message `key` as markup.
+
+        The message's own text goes through `escape`; each field is
+        replaced by its fragment, which must already be markup (or a
+        number, which needs no escaping).
+        """
+
+        pieces = []
+        for literal, field, spec, _conversion in _FORMATTER.parse(
+            self.messages[key]
+        ):
+            pieces.append(escape(literal))
+            if field is not None:
+                pieces.append(format(fragments[field], spec))
+        return "".join(pieces)
+
+    def fields(self, key: str) -> set[str]:
+        """Return the names of the fields message `key` takes."""
+
+        return {
+            field
+            for _literal, field, _spec, _conversion in _FORMATTER.parse(
+                self.messages[key]
+            )
+            if field is not None
+        }
+<<constants>>=
+_FORMATTER = Formatter()
+@
+
+The two ways out of a catalogue: plain text with the fields filled in,
+and markup where the message's text is escaped but the fragments are
+not.  The format specification of a numeric field survives the markup
+walk.
+
+<<test functions>>=
+def test_a_catalogue_formats_plain_text_and_escapes_only_its_own_markup():
+    catalogue = Catalogue("xx", {"k": "a < b: {n} & {pct:.0f}%"})
+
+    assert catalogue("k", n="<x>", pct=12.6) == "a < b: <x> & 13%"
+    assert (
+        catalogue.markup("k", html.escape, n="<strong>3</strong>", pct=12.6)
+        == "a &lt; b: <strong>3</strong> &amp; 13%"
+    )
+    assert catalogue.fields("k") == {"n", "pct"}
+@
+
+
+\section{Choosing a locale}
+
+A locale arrives from the configuration or the command line, where
+people write it the way their system does: [[sv]], [[sv-SE]],
+[[sv_SE.UTF-8]], [[sv_SE.UTF-8@euro]].  Only the language matters for
+these catalogues, so the name is reduced to its language code before
+the lookup, dropping the modifier, the encoding and the region.  An
+unset locale is English without comment, and so is the C locale
+([[C]], [[POSIX]], [[C.UTF-8]]): it is what a minimal system or a
+container runs in, the absence of a choice rather than a language
+Mentipy lacks.  A locale Mentipy has no catalogue
+for is a typo or a language not shipped yet; neither should stop a
+lecture, so it falls back to English with a warning.  The warning comes
+once per locale and process: the LaTeX helpers look the setting up for
+every question of a deck, and one warning per question would bury the
+build log.
+
+<<functions>>=
+def normalize_locale(locale: str | None) -> str:
+    """Return the language code of `locale`, e.g. `sv` for `sv_SE.UTF-8`."""
+
+    name = (locale or "").strip().lower().split("@")[0]
+    return name.split(".")[0].replace("-", "_").split("_")[0]
+
+
+def load_catalogue(locale: str | None = None) -> Catalogue:
+    """Return the built-in catalogue for `locale`.
+
+    Unset means English.  An unknown locale falls back to English and
+    warns, once per locale.
+    """
+
+    name = normalize_locale(locale)
+    if not name or name in C_LOCALES:
+        return CATALOGUES[FALLBACK_LOCALE]
+    if name not in CATALOGUES:
+        if name not in _WARNED_LOCALES:
+            _WARNED_LOCALES.add(name)
+            warnings.warn(
+                f"Mentipy has no catalogue for locale {locale!r}; "
+                f"using English. Known locales: {', '.join(LOCALES)}.",
+                stacklevel=2,
+            )
+        return CATALOGUES[FALLBACK_LOCALE]
+    return CATALOGUES[name]
+<<constants>>=
+_WARNED_LOCALES: set[str] = set()
+C_LOCALES = frozenset({"c", "posix"})
+@
+
+The built-in catalogues are built once, at import, from the table:
+column $i$ of every entry becomes the catalogue of [[LOCALES[i]]].  The
+mappings are read-only, because every caller shares them.
+
+<<built-in catalogues>>=
+CATALOGUES = {
+    locale: Catalogue(
+        locale,
+        MappingProxyType(
+            {key: texts[column] for key, texts in MESSAGES.items()}
+        ),
+    )
+    for column, locale in enumerate(LOCALES)
+}
+ENGLISH = CATALOGUES[FALLBACK_LOCALE]
+@
+
+The built-in catalogues answer in their own language, and a locale is
+found however the system spells it.
+
+<<test functions>>=
+def test_load_catalogue_finds_a_locale_however_it_is_spelled():
+    assert load_catalogue("sv")("form.submit") == "Skicka"
+    assert load_catalogue("sv_SE.UTF-8").locale == "sv"
+    assert load_catalogue(" SV-se ").locale == "sv"
+    assert load_catalogue("sv_SE.UTF-8@euro").locale == "sv"
+    assert load_catalogue("sv@euro").locale == "sv"
+    assert load_catalogue("en_GB")("form.submit") == "Submit"
+    assert load_catalogue(None) is ENGLISH
+    assert load_catalogue("") is ENGLISH
+@
+
+The C locale, the one a minimal system or a container runs in, is the
+absence of a language choice rather than an unknown language, so it
+means English without a warning.
+
+<<test functions>>=
+def test_the_c_locale_means_english_without_a_warning(monkeypatch):
+    monkeypatch.setattr(catalogue_module, "_WARNED_LOCALES", set())
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        for locale in ["C", "POSIX", "C.UTF-8", "c.utf8"]:
+            assert load_catalogue(locale) is ENGLISH, locale
+@
+
+An unknown locale must not stop a lecture: it gives the English
+catalogue, and a warning that names the locale, once.
+
+<<test functions>>=
+def test_an_unknown_locale_falls_back_to_english_and_warns_once(
+    monkeypatch,
+):
+    monkeypatch.setattr(catalogue_module, "_WARNED_LOCALES", set())
+
+    with pytest.warns(UserWarning, match="'klingon'"):
+        assert load_catalogue("klingon") is ENGLISH
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert load_catalogue("klingon") is ENGLISH
+        assert load_catalogue("sv").locale == "sv"
+@

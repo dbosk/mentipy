@@ -118,6 +118,35 @@ REGISTRATION_SERIAL_KEY = "registration_serial"
 SERVER_STARTED_KEY = "server_started"
 @
 
+\subsection{The locale}
+\label{sec:locale-setting}
+
+One setting chooses the language of Mentipy's own words on both
+surfaces: the slide labels, read when the deck compiles, and the web
+pages, read when [[mentipy serve]] starts, whose [[--locale]] flag
+overrides it for one lecture.  The words themselves are in the
+catalogue (\cref{chap:catalogue}); the store only holds the choice,
+with every other key.  The default is English, so a deck that never
+sets it renders as before.
+
+The key is [[mentipy.locale]] rather than the more obvious
+[[mentipy.language]], because \enquote{language} already means
+something else in Mentipy: a pin-text question's or a context
+snippet's [[language=]] is a Pygments lexer or [[latex]], the language
+of the \emph{content}.  A setting called [[language]] next to those
+keywords would invite [[language="python"]] in the configuration and
+[[language="sv"]] in a helper call.  [[locale]] is the conventional
+name for the language of an interface, and it accepts what a system
+locale looks like, [[sv_SE.UTF-8]] included.  The default joins the
+built-in table here, so [[mentipy config]] and [[mentipy latex]] list
+it with the others.
+
+<<constants>>=
+LOCALE_CONFIG = "mentipy.locale"
+DEFAULT_LOCALE = "en"
+DEFAULT_SETTINGS[LOCALE_CONFIG] = DEFAULT_LOCALE
+@
+
 The environment override makes tests cheap and also gives power users a simple
 escape hatch when they want a project-local config file.
 

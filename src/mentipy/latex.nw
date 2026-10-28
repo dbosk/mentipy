@@ -31,6 +31,7 @@ import warnings
 from pygments.lexers import get_lexer_for_filename
 from pygments.util import ClassNotFound
 
+from mentipy.catalogue import Catalogue, load_catalogue
 from mentipy.network import resolve_base_url
 from mentipy.qr import make_qr, sidecar_include_path
 from mentipy.questions import (
@@ -50,10 +51,12 @@ from mentipy.questions import (
 from mentipy.store import (
     BASE_URL_CONFIG,
     DEFAULT_PORT,
+    DEFAULT_LOCALE,
     DEFAULT_QUESTION_ENVIRONMENT,
     DEFAULT_QR_DIR,
     DEFAULT_QR_FORMAT,
     DEFAULT_SHOW_URL,
+    LOCALE_CONFIG,
     PORT_CONFIG,
     QUESTION_ENVIRONMENT_CONFIG,
     QR_DIR_CONFIG,
@@ -139,6 +142,356 @@ def _resolve_show_url(explicit: bool | None) -> bool:
     return bool(get_setting(SHOW_URL_CONFIG, DEFAULT_SHOW_URL))
 @
 
+\section{Translatable labels}
+\label{sec:slide-labels}
+
+The body renderers in the next section print respondent instructions
+next to the QR code: \enquote{Choose exactly one:}, a character limit,
+a scale's range.  Those words are Mentipy's, not the lecturer's, so
+they come from the catalogue (\cref{chap:catalogue}) in the language
+of the [[mentipy.locale]] setting (\cref{sec:locale-setting}).  A
+built-in translation is not always the wording a deck wants, though.
+Decks in Swedish used to rewrite the returned LaTeX with string
+replacements, which broke silently whenever a release reworded a
+label and needed a regular expression wherever a label carried a
+number.
+
+Each label is therefore a LaTeX macro: the slide says
+[[\emph{\mentipychooseone{}}]], and the snippet defines
+[[\mentipychooseone]] with [[\providecommand]], its text taken from the
+catalogue.  [[\providecommand]] defines a macro only if it is not
+defined yet, so a deck that defines a label before its first question
+wins, and every snippet's default after that is a no-op.  The form
+that works everywhere provides the label and then redefines it:
+\begin{minted}{latex}
+\providecommand{\mentipychooseone}{}
+\renewcommand{\mentipychooseone}{Välj ett svar:}
+\providecommand{\mentipycharacters}{}
+\renewcommand{\mentipycharacters}{högst \mentipynumber{} tecken}
+\end{minted}
+Either half alone fails somewhere.  A plain [[\renewcommand]] fails
+before the first snippet, because nothing has defined the label yet.  A
+plain [[\newcommand]] works in the preamble, before any question, but
+fails after the first question of an article document, where the
+snippet's definition is global rather than local to a frame.  The pair
+works in the preamble and between questions alike.
+
+The defaults live in each snippet, as [[\mentipyqrcaption]]'s does in
+each QR sidecar, rather than in the companion package
+(\cref{chap:sty}).  Most decks never load that package, since
+PythonTeX alone is enough to run the helpers, and a default written
+into the package could not know the locale: the setting belongs to
+Python, which the package reaches only once PythonTeX runs.  Inside a
+Beamer frame a snippet's definition is local to the frame, so the next
+frame's snippet provides it again; that costs a line and changes
+nothing, because a deck's own definition is global and comes first.
+
+A label with a number must let a translation put the number where its
+language wants it: \enquote{Rank your top 3:} but \enquote{Rangordna
+de 3 bästa:}.  The natural LaTeX for that, a macro with an argument
+defined as [[[1]{#1 characters}]], cannot be used, because the
+definition sits inside the slide's frame.  Beamer reads the body of an
+ordinary frame as a macro argument before it typesets it, and a [[#]]
+in that body is an illegal parameter there; a deck that pasted the
+output of [[mentipy render]] into a frame would no longer compile.  The
+labels therefore take no arguments at all.  The snippet sets the
+number in [[\mentipynumber]], locally, just before it calls the label,
+[[{\def\mentipynumber{280}\mentipycharacters{}}]], and the label's text
+uses [[\mentipynumber{}]] where the catalogue has its [[{n}]] field.
+The catalogue's markup walk does that substitution and escapes the
+rest of the message for LaTeX.
+
+The table names the macro of every slide message; a TeX control word
+is letters only, so the names drop the underscores of the keys.
+
+<<constants>>=
+SLIDE_LABEL_MACROS = {
+    "slide.choose_one": "mentipychooseone",
+    "slide.choose_many": "mentipychoosemany",
+    "slide.type": "mentipytypelabel",
+    "slide.free_text": "mentipyfreetext",
+    "slide.limit": "mentipylimitlabel",
+    "slide.characters": "mentipycharacters",
+    "slide.range": "mentipyrangelabel",
+    "slide.low": "mentipylowlabel",
+    "slide.high": "mentipyhighlabel",
+    "slide.word_cloud": "mentipywordcloud",
+    "slide.mode": "mentipymodelabel",
+    "slide.whole_answer": "mentipywholeanswer",
+    "slide.split_on": "mentipysplitlabel",
+    "slide.min_word_length": "mentipyminwordlabel",
+    "slide.rank_all": "mentipyrankall",
+    "slide.rank_top": "mentipyranktop",
+    "slide.pin_one": "mentipypinone",
+    "slide.pin_many": "mentipypinmany",
+    "slide.pin_comment": "mentipypincomment",
+}
+@
+
+A snippet defines only the labels its body uses, so a multiple-choice
+slide does not carry the word cloud's vocabulary.  The renderers
+therefore ask a small collector for each label.  It returns the macro
+call and remembers the key, and afterwards it writes the definitions
+of the keys it was asked for, in the order they were first used.  A
+label is called with an empty group, [[\mentipyfreetext{}]], which
+keeps the space after it: TeX would otherwise swallow the space as the
+end of the control word.  A label with a number is called in a group
+that sets the number, so the number cannot leak into the next label.
+Each definition line ends with [[%]], so that a snippet printed into
+running text gains no stray space.
+
+<<functions>>=
+class _SlideLabels:
+    def __init__(self, catalogue: Catalogue):
+        self._catalogue = catalogue
+        self._used: dict[str, None] = {}
+
+    def __call__(self, key: str, number: int | None = None) -> str:
+        self._used[key] = None
+        call = "\\" + SLIDE_LABEL_MACROS[key] + "{}"
+        if number is None:
+            return call
+        return f"{{\\def\\{SLIDE_NUMBER_MACRO}{{{number}}}{call}}}"
+
+    def definitions(self) -> str:
+        return "".join(
+            self._definition(key) + "%\n" for key in self._used
+        )
+
+    def _definition(self, key: str) -> str:
+        text = self._catalogue.markup(
+            key, _escape_latex, n=f"\\{SLIDE_NUMBER_MACRO}{{}}"
+        )
+        return (
+            f"\\providecommand{{\\{SLIDE_LABEL_MACROS[key]}}}{{{text}}}"
+        )
+<<constants>>=
+SLIDE_NUMBER_MACRO = "mentipynumber"
+@
+
+The catalogue is looked up when a question is rendered, that is, when
+PythonTeX runs the helper.  PythonTeX reruns a block only when its code
+has changed, and changing the setting changes no code, so after a
+change of locale a deck must clear PythonTeX's output or build with
+[[--rerun=always]], as the decks' Makefiles do; otherwise the slides
+keep the labels of the earlier language.
+
+<<functions>>=
+def _slide_catalogue() -> Catalogue:
+    return load_catalogue(get_setting(LOCALE_CONFIG, DEFAULT_LOCALE))
+@
+
+Every slide message needs a macro, or the collector would fail with a
+[[KeyError]] the first time a renderer asks for it, and the names must
+be distinct control words.
+
+<<test functions>>=
+def test_every_slide_message_has_its_own_macro():
+    slide_keys = {key for key in MESSAGES if key.startswith("slide.")}
+    names = list(SLIDE_LABEL_MACROS.values())
+
+    assert set(SLIDE_LABEL_MACROS) == slide_keys
+    assert len(set(names)) == len(names)
+    assert all(name.isalpha() for name in names)
+@
+
+A label's text is written into LaTeX, so it is escaped like any other
+text, while the number stays a macro call.  No built-in label has a
+special character today, so the test brings its own catalogue.
+
+<<test functions>>=
+def test_slide_label_definitions_escape_the_label_text():
+    labels = latex_module._SlideLabels(
+        Catalogue("xx", {"slide.limit": "50% & {n} $"})
+    )
+
+    call = labels("slide.limit", 3)
+
+    assert call == "{\\def\\mentipynumber{3}\\mentipylimitlabel{}}"
+    assert labels.definitions() == (
+        "\\providecommand{\\mentipylimitlabel}"
+        "{50\\% \\& \\mentipynumber{} \\$}%\n"
+    )
+@
+
+The tests below render through the public helpers, each with a
+configuration file of its own, because the locale comes from the
+configuration and a test must not read the developer's.  By default
+the labels are the English words the slides always showed, defined
+where they are used: a multiple-choice snippet calls its instruction
+and defines it, and does not define an open question's labels.  A
+label with a number reads it from [[\mentipynumber]], which the snippet
+sets in a group around the call.  With a question environment the
+definitions still come first, outside it.
+
+<<test functions>>=
+def _label_test_setup(tmp_path, monkeypatch, locale=None):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    if locale is not None:
+        set_setting("locale", locale)
+    return dict(
+        store=Store(tmp_path / "mentipy.json", min_prefix=4),
+        base_url="http://example.test:8080",
+        qr_dir=DEFAULT_QR_DIR,
+    )
+
+
+def test_slide_labels_are_macros_with_the_english_words_by_default(
+    tmp_path, monkeypatch
+):
+    common = _label_test_setup(tmp_path, monkeypatch)
+
+    single = mc("Which?", ["A", "B"], **common)
+    multi = mc("Which ones?", ["A", "B"], multi=True, **common)
+    free = open_text("Why?", max_chars=140, **common)
+
+    assert (
+        "\\providecommand{\\mentipychooseone}{Choose exactly one:}%\n"
+        in single
+    )
+    assert "\\emph{\\mentipychooseone{}}" in single
+    assert "mentipytypelabel" not in single
+    assert "{Choose one or more:}" in multi
+    assert "\\emph{\\mentipychoosemany{}}" in multi
+    assert (
+        "\\providecommand{\\mentipycharacters}"
+        "{\\mentipynumber{} characters}%\n" in free
+    )
+    assert (
+        "\\item[\\mentipylimitlabel{}] "
+        "{\\def\\mentipynumber{140}\\mentipycharacters{}}" in free
+    )
+    assert "#" not in single + multi + free
+
+    framed = open_text("Why?", environment="exercise", **common)
+    assert framed.index("\\providecommand{\\mentipytypelabel}") < (
+        framed.index("\\begin{exercise}")
+    )
+@
+
+With [[mentipy.locale]] set to Swedish the same helpers define the
+Swedish words, and no English one is left.  The question is the same
+question in either language: the second rendering registers nothing
+new, so its prefix and QR code stay.
+
+<<test functions>>=
+def test_slide_labels_follow_the_locale_setting(tmp_path, monkeypatch):
+    common = _label_test_setup(tmp_path, monkeypatch, locale="sv_SE")
+
+    swedish = ranking("Order?", ["A", "B", "C"], top_n=2, **common)
+    set_setting("locale", "en")
+    english = ranking("Order?", ["A", "B", "C"], top_n=2, **common)
+
+    assert (
+        "\\providecommand{\\mentipyranktop}"
+        "{Rangordna de \\mentipynumber{} bästa:}%" in swedish
+    )
+    assert "\\emph{{\\def\\mentipynumber{2}\\mentipyranktop{}}}" in swedish
+    assert "Rank" not in swedish
+    assert "{Rank your top \\mentipynumber{}:}" in english
+    assert len(common["store"].all_questions()) == 1
+@
+
+The macros only matter if a real document typesets them, so the last
+test compiles two small Beamer decks with [[pdflatex]] and reads the
+PDF's text back.  The first, in English with no definitions of its
+own, must read exactly as the slides did before the labels became
+macros, for every question kind.  The snippets go straight into
+ordinary frames, as pasted [[mentipy render]] output would, the case
+that rules out macro arguments.  The second is a Swedish deck that
+overrides two labels in its preamble, one with a number: the overrides
+must win on every frame, including the later ones, where a frame-local
+default could otherwise have crept back in.  The PDF's text is
+normalised to composed characters, since the default font encoding
+builds [[ä]] from an [[a]] and an accent.  The test is skipped where [[pdflatex]] or [[pdftotext]]
+is missing.
+
+<<test functions>>=
+needs_pdflatex = pytest.mark.skipif(
+    not (shutil.which("pdflatex") and shutil.which("pdftotext")),
+    reason="needs pdflatex and pdftotext",
+)
+
+
+def _compiled_text(directory, preamble, snippets):
+    frames = "".join(
+        f"\\begin{{frame}}\n{snippet}\n\\end{{frame}}\n"
+        for snippet in snippets
+    )
+    (directory / "deck.tex").write_text(
+        "\\documentclass{beamer}\n"
+        f"{preamble}\n"
+        "\\begin{document}\n"
+        f"{frames}"
+        "\\end{document}\n",
+        encoding="utf-8",
+    )
+    latex = subprocess.run(
+        ["pdflatex", "-interaction=nonstopmode", "-halt-on-error",
+         "deck.tex"],
+        cwd=directory, capture_output=True, text=True, timeout=120,
+    )
+    assert latex.returncode == 0, latex.stdout[-2000:]
+    text = subprocess.run(
+        ["pdftotext", "deck.pdf", "-"],
+        cwd=directory, capture_output=True, text=True, check=True,
+    ).stdout
+    return " ".join(unicodedata.normalize("NFC", text).split())
+
+
+@needs_pdflatex
+def test_compiled_slides_keep_the_english_and_take_a_deck_override(
+    tmp_path, monkeypatch
+):
+    common = _label_test_setup(tmp_path, monkeypatch)
+    english = _compiled_text(tmp_path, "", [
+        mc("Q1", ["A", "B"], **common),
+        mc("Q2", ["A", "B"], multi=True, **common),
+        open_text("Q3", **common),
+        scale("Q4", low_label="never", high_label="always", **common),
+        word_cloud("Q5", **common),
+        ranking("Q6", ["A", "B"], **common),
+        ranking("Q7", ["A", "B", "C"], top_n=2, **common),
+        pin_text("Q8", "x = 1", **common),
+        pin_text("Q9", "y = 2", max_pins=3, allow_comment=True, **common),
+        word_cloud("Q10", split_words=False, **common),
+        word_cloud("Q11", separators=",;", **common),
+    ])
+    for phrase in [
+        "Choose exactly one:",
+        "Choose one or more:",
+        "Type Free-text answer Limit 280 characters",
+        "Range 1–5 Low never High always",
+        "Type Word-cloud (free-text) Limit 280 characters"
+        " Min word length 3",
+        "Mode Whole answer counts as one entry",
+        "Limit 280 characters Split on",
+        "Rank every option from most to least preferred:",
+        "Rank your top 2:",
+        "Tap the target to place your pin.",
+        "Tap the target to place up to 3 pins. You can comment on each pin.",
+    ]:
+        assert phrase in english
+
+    set_setting("locale", "sv")
+    swedish = _compiled_text(
+        tmp_path,
+        "\\newcommand{\\mentipylimitlabel}{Max}\n"
+        "\\providecommand{\\mentipyfreetext}{}"
+        "\\renewcommand{\\mentipyfreetext}{Eget svar}\n"
+        "\\newcommand{\\mentipyranktop}{Ordna dina \\mentipynumber{}:}",
+        [mc("Q1", ["A", "B"], **common), open_text("Q3", **common),
+         word_cloud("Q5", **common),
+         ranking("Q7", ["A", "B", "C"], top_n=2, **common)],
+    )
+    assert "Välj ett alternativ:" in swedish
+    assert "Svar Eget svar Max 280 tecken" in swedish
+    assert "Svar Ordmoln (fritext) Max 280 tecken" in swedish
+    assert "Ordna dina 2:" in swedish
+    assert "Högst" not in swedish and "bästa" not in swedish
+@
+
 \section{Question body rendering}
 
 Each question kind needs slightly different explanatory text on the left-hand
@@ -147,9 +500,11 @@ single choice and multi-select use the same stored model, but the prompt text
 must tell respondents whether one or several options are acceptable.
 
 <<functions>>=
-def _render_multiple_choice(question: MCQuestion) -> str:
-    prompt = (
-        "Choose one or more:" if question.multi else "Choose exactly one:"
+def _render_multiple_choice(
+    question: MCQuestion, labels: _SlideLabels
+) -> str:
+    prompt = labels(
+        "slide.choose_many" if question.multi else "slide.choose_one"
     )
     lines = ["\\emph{" + prompt + "}", "\\begin{itemize}"]
     lines.extend(
@@ -200,27 +555,34 @@ metadata, so semantic LaTeX keeps the generated handout readable when the same
 content is emitted outside a slide.
 
 <<functions>>=
-def _render_open(question: OpenQuestion) -> str:
+def _render_open(question: OpenQuestion, labels: _SlideLabels) -> str:
+    limit = labels("slide.characters", question.max_chars)
     return "\n".join(
         [
             "\\begin{description}",
-            "\\item[Type] Free-text answer",
-            f"\\item[Limit] {question.max_chars} characters",
+            f"\\item[{labels('slide.type')}] {labels('slide.free_text')}",
+            f"\\item[{labels('slide.limit')}] {limit}",
             "\\end{description}",
         ]
     )
 
 
-def _render_scale(question: ScaleQuestion) -> str:
+def _render_scale(question: ScaleQuestion, labels: _SlideLabels) -> str:
     lines = [
         "\\begin{description}",
-        f"\\item[Range] {question.low}--{question.high}",
+        f"\\item[{labels('slide.range')}] {question.low}--{question.high}",
     ]
 
     if question.low_label:
-        lines.append(f"\\item[Low] {_escape_latex(question.low_label)}")
+        lines.append(
+            f"\\item[{labels('slide.low')}] "
+            f"{_escape_latex(question.low_label)}"
+        )
     if question.high_label:
-        lines.append(f"\\item[High] {_escape_latex(question.high_label)}")
+        lines.append(
+            f"\\item[{labels('slide.high')}] "
+            f"{_escape_latex(question.high_label)}"
+        )
 
     lines.append("\\end{description}")
     return "\n".join(lines)
@@ -239,22 +601,30 @@ set is shown verbatim (its [[repr]], so a newline is visible as
 that applies to every splitting mode.
 
 <<functions>>=
-def _render_word_cloud(question: WordCloudQuestion) -> str:
+def _render_word_cloud(
+    question: WordCloudQuestion, labels: _SlideLabels
+) -> str:
     lines = [
         "\\begin{description}",
-        "\\item[Type] Word-cloud (free-text)",
-        f"\\item[Limit] {question.max_chars} characters",
+        f"\\item[{labels('slide.type')}] {labels('slide.word_cloud')}",
+        f"\\item[{labels('slide.limit')}] "
+        f"{labels('slide.characters', question.max_chars)}",
     ]
     separators = question.effective_separators()
     if separators == "":
-        lines.append("\\item[Mode] Whole answer counts as one entry")
+        lines.append(
+            f"\\item[{labels('slide.mode')}] "
+            f"{labels('slide.whole_answer')}"
+        )
     else:
         if separators is not None:
             lines.append(
-                f"\\item[Split on] {_escape_latex(repr(separators))}"
+                f"\\item[{labels('slide.split_on')}] "
+                f"{_escape_latex(repr(separators))}"
             )
         lines.append(
-            f"\\item[Min word length] {question.min_word_length}"
+            f"\\item[{labels('slide.min_word_length')}] "
+            f"{question.min_word_length}"
         )
     lines.append("\\end{description}")
     return "\n".join(lines)
@@ -269,11 +639,13 @@ list only to give each item a stable visual handle; it does not imply a
 preset order.
 
 <<functions>>=
-def _render_ranking(question: RankingQuestion) -> str:
+def _render_ranking(
+    question: RankingQuestion, labels: _SlideLabels
+) -> str:
     if question.top_n is None:
-        prompt = "Rank every option from most to least preferred:"
+        prompt = labels("slide.rank_all")
     else:
-        prompt = f"Rank your top {question.top_n}:"
+        prompt = labels("slide.rank_top", question.top_n)
     lines = ["\\emph{" + prompt + "}", "\\begin{enumerate}"]
     lines.extend(
         f"\\item {_render_inline(option)}" for option in question.options
@@ -378,15 +750,14 @@ announced.
 <<functions>>=
 def _pin_instruction(
     question: PinImageQuestion | PinTextQuestion,
+    labels: _SlideLabels,
 ) -> str:
     if question.max_pins == 1:
-        instruction = "Tap the target to place your pin."
+        instruction = labels("slide.pin_one")
     else:
-        instruction = (
-            f"Tap the target to place up to {question.max_pins} pins."
-        )
+        instruction = labels("slide.pin_many", question.max_pins)
     if question.allow_comment:
-        instruction += " You can comment on each pin."
+        instruction += " " + labels("slide.pin_comment")
     return "\\emph{" + instruction + "}"
 @
 
@@ -399,14 +770,16 @@ imposes.  A question rebuilt from a store without a recorded path (only
 possible for hand-edited entries) degrades to the instruction line.
 
 <<functions>>=
-def _render_pin_image(question: PinImageQuestion) -> str:
+def _render_pin_image(
+    question: PinImageQuestion, labels: _SlideLabels
+) -> str:
     lines = []
     if question.image_path:
         lines.append(
             "\\includegraphics[width=\\linewidth]{"
             f"{question.image_path}}}"
         )
-    lines.append(_pin_instruction(question))
+    lines.append(_pin_instruction(question, labels))
     return "\n".join(lines)
 @
 
@@ -426,7 +799,9 @@ contract for code targets.  Prose content ([[language]] unset) is
 simply escaped body text.
 
 <<functions>>=
-def _render_pin_text(question: PinTextQuestion) -> str:
+def _render_pin_text(
+    question: PinTextQuestion, labels: _SlideLabels
+) -> str:
     if question.language == "latex":
         target = question.content
     elif question.language:
@@ -437,7 +812,7 @@ def _render_pin_text(question: PinTextQuestion) -> str:
         )
     else:
         target = _escape_latex(question.content)
-    return f"{target}\n\n{_pin_instruction(question)}"
+    return f"{target}\n\n{_pin_instruction(question, labels)}"
 @
 
 \subsection{Question content wrapper}
@@ -461,20 +836,20 @@ defines [[\mentipyqrcaption]] before the first sidecar is read, as
 described in the QR module.
 
 <<functions>>=
-def _render_body(question: Question) -> str:
+def _render_body(question: Question, labels: _SlideLabels) -> str:
     if isinstance(question, MCQuestion):
-        return _render_multiple_choice(question)
+        return _render_multiple_choice(question, labels)
     if isinstance(question, OpenQuestion):
-        return _render_open(question)
+        return _render_open(question, labels)
     if isinstance(question, WordCloudQuestion):
-        return _render_word_cloud(question)
+        return _render_word_cloud(question, labels)
     if isinstance(question, RankingQuestion):
-        return _render_ranking(question)
+        return _render_ranking(question, labels)
     if isinstance(question, PinImageQuestion):
-        return _render_pin_image(question)
+        return _render_pin_image(question, labels)
     if isinstance(question, PinTextQuestion):
-        return _render_pin_text(question)
-    return _render_scale(question)
+        return _render_pin_text(question, labels)
+    return _render_scale(question, labels)
 @
 
 The flat article layout is \emph{transparent}: a reader of the handout or
@@ -494,7 +869,10 @@ the caller's environment, or it falls back to a bold prompt followed by the
 question-specific instructions.  With [[transparent]] there is no body and no
 bold: the prompt alone, wrapped in the environment when one is configured.
 The prompt keeps its inline code (\cref{sec:inline-code}) in either
-case, as the options do.
+case, as the options do.  The definitions of the body's labels
+(\cref{sec:slide-labels}) come first, before the environment opens, so
+that they are in force wherever the body uses them; the transparent
+rendering has no labels and so no definitions.
 
 <<functions>>=
 def _render_question_content(
@@ -514,16 +892,19 @@ def _render_question_content(
             )
         return prompt
 
-    body = _render_body(question)
+    labels = _SlideLabels(_slide_catalogue())
+    body = _render_body(question, labels)
+    definitions = labels.definitions()
     if environment:
         return (
-            f"\\begin{{{environment}}}\n"
+            definitions
+            + f"\\begin{{{environment}}}\n"
             f"{prompt}\n\n"
             f"{body}\n"
             f"\\end{{{environment}}}"
         )
 
-    return f"\\textbf{{{prompt}}}\n\n{body}"
+    return definitions + f"\\textbf{{{prompt}}}\n\n{body}"
 @
 
 \section{Layout renderers}
@@ -1885,8 +2266,8 @@ def test_word_cloud_passes_separators_into_the_question_and_sidecar(
     question = store.question(entry["hash"])
 
     assert question.separators == ",;\n"
-    assert "\\item[Split on] ',;\\textbackslash{}n'" in rendered
-    assert "\\item[Min word length] 3" in rendered
+    assert "\\item[\\mentipysplitlabel{}] ',;\\textbackslash{}n'" in rendered
+    assert "\\item[\\mentipyminwordlabel{}] 3" in rendered
 @
 
 The ranking wrapper meets the same registration contract, and the slide
@@ -2465,7 +2846,7 @@ def test_article_layout_is_transparent(tmp_path, monkeypatch):
     assert bare == "How was the lecture?"
 
     slide = mc("How was the lecture?", ["Great", "OK"], **{**common, "layout": "slide"})
-    assert "Choose exactly one" in slide and "\\item Great" in slide
+    assert "\\mentipychooseone{}" in slide and "\\item Great" in slide
 @
 
 \subsection{Environment and URL visibility policy}
@@ -3016,8 +3397,14 @@ def test_write_snippet_writes_under_the_base_dir(book, tmp_path):
 
 <<test [[latex.py]]>>=
 import hashlib
+import shutil
+import subprocess
+import unicodedata
 
 import pytest
+
+from mentipy.catalogue import MESSAGES, Catalogue
+import mentipy.latex as latex_module
 
 from mentipy.latex import *
 from mentipy.store import *
