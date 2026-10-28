@@ -49,6 +49,7 @@ import typer
 import typerconf
 
 from mentipy.latex import (
+    SLIDE_LABEL_MACROS,
     file_download,
     file_snippet,
     mc as render_mc_question,
@@ -68,10 +69,12 @@ from mentipy.store import (
     BASE_URL_CONFIG,
     config_path,
     DEFAULT_HOST,
+    DEFAULT_LOCALE,
     DEFAULT_PORT,
     DEFAULT_STORE_PATH,
     DEFAULT_VENV_PATH,
     HOST_CONFIG,
+    LOCALE_CONFIG,
     MIN_PREFIX_CONFIG,
     PUBLIC_BASE_URL_CONFIG,
     PORT_CONFIG,
@@ -117,6 +120,11 @@ CONFIG_KEY_HELP = (
         "Base respondent URL. Use auto or null to resolve the LAN address later.",
     ),
     (HOST_CONFIG, "Bind address for mentipy serve."),
+    (
+        LOCALE_CONFIG,
+        "Language of the slide labels and the web pages: en (default) or"
+        " sv. mentipy serve --locale overrides it for one run.",
+    ),
     (MIN_PREFIX_CONFIG, "Minimum issued hash-prefix length in the store."),
     (PORT_CONFIG, "Bind port and fallback port for auto-resolved URLs."),
     (
@@ -158,6 +166,10 @@ PUBLIC_HELP = (
     "Expose the server publicly. Bare --public defaults to upnp. SSH mode "
     f"reads {SSH_TUNNEL_CONFIG}, and QR regeneration prefers "
     f"{PUBLIC_BASE_URL_CONFIG}."
+)
+LOCALE_HELP = (
+    "Language of the web pages: en or sv. Defaults to config setting "
+    f"{LOCALE_CONFIG}."
 )
 RESULTS_HELP = (
     "Redirect respondents to the live results page. Questions "
@@ -232,6 +244,7 @@ VENV_OPTION = typer.Option(None, help=VENV_HELP)
 PUBLIC_OPTION = typer.Option(False, "--public", help=PUBLIC_HELP)
 RESULTS_OPTION = typer.Option(False, "--results", help=RESULTS_HELP)
 LOCK_OPTION = typer.Option(True, "--lock/--no-lock", help=LOCK_HELP)
+LOCALE_OPTION = typer.Option(None, "--locale", help=LOCALE_HELP)
 ENVIRONMENT_OPTION = typer.Option(None, "--env", help=ENVIRONMENT_HELP)
 LAYOUT_OPTION = typer.Option("slide", "--layout", help=LAYOUT_HELP)
 URL_VISIBILITY_OPTION = typer.Option(
@@ -478,10 +491,20 @@ def _add_config_command(app: typer.Typer, *, conf_path: str | None = None):
 
 The LaTeX reference command is plain text on purpose.  It should be easy to
 page through in a terminal while still naming the helper signatures and the
-config keys that influence authoring.
+config keys that influence authoring.  The reference itself stays in
+English whatever the locale; it lists the slide-label macros a deck may
+define (\cref{sec:slide-labels}) from the same table the helpers use,
+spliced in after the dedent because the wrapped list carries its own
+indentation.
 
 <<functions>>=
 def _latex_reference() -> str:
+    label_lines = textwrap.fill(
+        ", ".join(f"\\{name}" for name in SLIDE_LABEL_MACROS.values()),
+        width=76,
+        initial_indent="      ",
+        subsequent_indent="      ",
+    )
     config_lines = "\n".join(
         textwrap.fill(
             f"{key}: {description}",
@@ -600,6 +623,18 @@ def _latex_reference() -> str:
             macro \\mentipyqrcaption, which the document may redefine
           layout: slide, article, article+qr, or auto
 
+        Slide labels
+          The respondent instructions on the slide are in the language
+            of config key {LOCALE_CONFIG} (en or sv), as are the web
+            pages, where `mentipy serve --locale` overrides it.  Each
+            label is a macro that the snippet defines with
+            \\providecommand, so a deck's own definition in its
+            preamble wins: \\newcommand{{\\mentipychooseone}}{{Pick one:}}.
+            A label with a number reads it from \\mentipynumber:
+            \\newcommand{{\\mentipycharacters}}{{\\mentipynumber{{}} chars}}.
+            The labels:
+        @LABEL_MACROS@
+
         Workflow
           1. Call a helper while compiling the document.
           2. The helper registers the question and writes QR assets.
@@ -620,7 +655,7 @@ def _latex_reference() -> str:
 
         Config keys
         """
-    ).rstrip() + "\n" + config_lines
+    ).rstrip().replace("@LABEL_MACROS@", label_lines) + "\n" + config_lines
 @
 
 The render subcommands all expose the same layout, URL, QR, and store options.
@@ -2059,6 +2094,7 @@ def _serve_publicly(
     public: PublicMode,
     results: bool,
     lock: bool,
+    locale: str = DEFAULT_LOCALE,
 ):
     admin_token, require_token = _admin_token_policy(public)
     allow_images = get_setting(ALLOW_IMAGES_CONFIG)
@@ -2093,6 +2129,7 @@ def _serve_publicly(
             require_token=require_token,
             heatmap_bins=get_setting(HEATMAP_BINS_CONFIG),
             lock=lock,
+            locale=locale,
         )
 @
 
@@ -2191,7 +2228,12 @@ local results hub directly.  With the lecturer-paced gate on --- the default
 lecturer who has not read the manual will otherwise hear \enquote{it says
 locked} from the room without knowing that opening the results page is the
 fix.  The gate is a flag rather than a config key because pacing is a
-per-lecture decision, like [[--results]], not a per-machine one.
+per-lecture decision, like [[--results]], not a per-machine one.  The
+language of the pages is both: a lecturer's decks are usually in one
+language, which [[mentipy.locale]] records once, but a guest lecture
+in English on a Swedish lecturer's machine needs [[--locale en]] for
+one run.  The flag wins over the setting, and the CLI resolves the two
+so the server only ever sees the locale it should speak.
 
 <<cli setup>>=
 @cli.command(context_settings={"allow_extra_args": True})
@@ -2203,6 +2245,7 @@ def serve(
     public: bool = PUBLIC_OPTION,
     results: bool = RESULTS_OPTION,
     lock: bool = LOCK_OPTION,
+    locale: Optional[str] = LOCALE_OPTION,
 ):
     """Run the local polling server.
 
@@ -2211,6 +2254,7 @@ def serve(
     """
 
     chosen_host = host or get_setting(HOST_CONFIG, DEFAULT_HOST)
+    chosen_locale = locale or get_setting(LOCALE_CONFIG, DEFAULT_LOCALE)
     chosen_port = _configured_port(port)
     active_store = _configured_store(store)
     public_mode = _parse_public_mode(ctx, public, command="serve")
@@ -2257,6 +2301,7 @@ def serve(
             allow_images=get_setting(ALLOW_IMAGES_CONFIG),
             heatmap_bins=get_setting(HEATMAP_BINS_CONFIG),
             lock=lock,
+            locale=chosen_locale,
         )
         return
 
@@ -2267,6 +2312,7 @@ def serve(
         public=public_mode,
         results=results,
         lock=lock,
+        locale=chosen_locale,
     )
 @
 
@@ -4234,6 +4280,13 @@ def test_latex_command_prints_the_reference_and_all_config_keys():
     )
     assert "file_snippet(path, *, name=None, language=None," in result.output
     assert "file_download(path, *, label=None)" in result.output
+    assert "Slide labels" in result.output
+    assert "@LABEL_MACROS@" not in result.output
+    assert "\\newcommand{\\mentipychooseone}{Pick one:}" in result.output
+    assert "\\mentipynumber" in result.output
+    assert "`mentipy serve --locale`" in result.output
+    for name in SLIDE_LABEL_MACROS.values():
+        assert f"\\{name}" in result.output
     for key, _description in CONFIG_KEY_HELP:
         assert key in result.output
 @
@@ -4283,6 +4336,7 @@ def test_serve_help_mentions_the_relevant_config_keys():
         STORE_CONFIG,
         SSH_TUNNEL_CONFIG,
         PUBLIC_BASE_URL_CONFIG,
+        LOCALE_CONFIG,
     ):
         assert key in result.output
 @
@@ -4347,6 +4401,54 @@ def test_serve_command_passes_the_lock_flag(tmp_path, monkeypatch):
     assert unlocked.exit_code == 0
     assert captured["lock"] is False
     assert "/active" not in unlocked.stdout
+@
+
+The locale reaches the server the same way, from the configuration
+unless [[--locale]] names another, and English when neither does.
+Both serving branches must pass it, the public one as well.
+
+<<test functions>>=
+def test_serve_command_passes_the_locale_with_the_flag_first(
+    tmp_path, monkeypatch
+):
+    runner = CliRunner()
+    config_path = tmp_path / "config.json"
+    monkeypatch.setenv("MENTIPY_CONFIG", str(config_path))
+    set_setting("base_url", "http://example.test:8080")
+    set_setting("ssh_tunnel", "alice@example.test:9000")
+    captured = {}
+
+    @contextmanager
+    def fake_expose(mode, local_port, *, ssh_endpoint=None):
+        yield "http://example.test:9000"
+
+    def fake_serve(store, host, port, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("mentipy.cli.serve_http", fake_serve)
+    monkeypatch.setattr("mentipy.cli.expose", fake_expose)
+    monkeypatch.setattr(
+        "mentipy.cli.regenerate_qrs", lambda _store, _base_url: 0
+    )
+    store_args = ["--store", str(tmp_path / "answers.json")]
+
+    assert runner.invoke(cli, ["serve", *store_args]).exit_code == 0
+    assert captured["locale"] == "en"
+
+    set_setting("locale", "sv")
+    assert runner.invoke(cli, ["serve", *store_args]).exit_code == 0
+    assert captured["locale"] == "sv"
+
+    flagged = ["serve", *store_args, "--locale", "en_GB"]
+    assert runner.invoke(cli, flagged).exit_code == 0
+    assert captured["locale"] == "en_GB"
+
+    public = ["serve", *store_args, "--public", "ssh", "--locale", "xx"]
+    assert runner.invoke(cli, public).exit_code == 0
+    assert captured["locale"] == "xx"
+    configured = ["serve", *store_args, "--public", "ssh"]
+    assert runner.invoke(cli, configured).exit_code == 0
+    assert captured["locale"] == "sv"
 @
 
 When the base URL is automatic or unset, starting the local server must refresh

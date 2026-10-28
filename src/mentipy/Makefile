@@ -3,6 +3,8 @@ NOTANGLE.md=notangle -R"[[$(notdir $@)]]" $(filter %.nw,$^) | ${CPIF} $@ && noro
 
 MODULES+= \
 	__init__.py \
+	catalogue.py \
+	catalogue.tex \
 	cli.py \
 	cli.tex \
 	latex.py \

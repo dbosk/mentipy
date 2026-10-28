@@ -1638,6 +1638,99 @@ replaced by new compile-time placeholders.
   in the document.
 }
 
+\section{Lecturing in Another Language}
+\label{sec:locale}
+
+Mentipy's own words, the instructions on the slide and the buttons,
+headings and waiting pages on the phone, come in English and in
+Swedish.  One setting chooses the language for both surfaces:
+
+\begin{minted}{text}
+mentipy config mentipy.locale --set sv
+\end{minted}
+
+The slides take the setting when the deck compiles, and the web pages
+when the server starts.  A guest lecture in English on the same machine
+overrides it for one run, without touching the configuration:
+
+\begin{minted}{text}
+mentipy serve --locale en
+\end{minted}
+
+The question text, the options and the answers are never translated:
+they are the lecturer's words and the room's.  Nor does the language
+enter a question's identity, so a deck recompiled in Swedish keeps its
+prefixes, its QR codes and the answers already given.  An unknown
+locale falls back to English with a warning.
+
+On the slide every label is a LaTeX macro, which the snippet defines
+with [[\providecommand]] in the configured language.
+\Cref{tab:slide-labels} lists the macros with their built-in texts.
+[[\providecommand]] defines a macro only if it is not defined yet, so a
+deck that wants other wording defines the label in its preamble, before
+its first question, and its definition wins.  A label with a number
+reads it from [[\mentipynumber]], since a macro argument would not
+survive inside an ordinary Beamer frame:
+
+\begin{minted}{latex}
+\newcommand{\mentipychooseone}{Välj ett svar:}
+\newcommand{\mentipycharacters}{högst \mentipynumber{} tecken}
+\end{minted}
+
+\setpythontexautoprint{false}
+\begin{pycode}
+from mentipy.catalogue import CATALOGUES
+from mentipy.latex import SLIDE_LABEL_MACROS, _escape_latex
+
+
+def label_text(locale, key):
+    return CATALOGUES[locale].markup(
+        key, _escape_latex, n=r"\textit{N}"
+    )
+
+
+print(r"\begin{tabular}{@{}l>{\raggedright}p{0.3\linewidth}"
+      r">{\raggedright\arraybackslash}p{0.3\linewidth}@{}}")
+print(r"\toprule")
+print(r"\textbf{Macro} & \textbf{English} & \textbf{Swedish} \\")
+print(r"\midrule")
+for key, macro in SLIDE_LABEL_MACROS.items():
+    print(
+        rf"\texttt{{\textbackslash {macro}}} & {label_text('en', key)}"
+        rf" & {label_text('sv', key)} \\"
+    )
+print(r"\bottomrule")
+print(r"\end{tabular}")
+\end{pycode}
+\saveprintpythontex{slide-labels}
+\setpythontexautoprint{true}
+
+\begin{table}
+  \begin{sidecaption}{%
+    The slide-label macros and their built-in texts.  A deck that
+    defines one of them before its first question replaces the text on
+    every slide; \textit{N} stands for the number the snippet passes
+    in [[\mentipynumber]].
+  }[tab:slide-labels]
+    \footnotesize
+    \useprintpythontex{slide-labels}
+  \end{sidecaption}
+\end{table}
+
+\ltnote{%
+  \textbf{Variation pattern}: Separation
+
+  \textbf{What varies}: The language of Mentipy's own words, set once,
+  overridden for one run, or replaced label by label in the deck.
+
+  \textbf{What stays invariant}: The lecturer's question text and
+  options, the question's identity, its QR code and its answers.
+
+  \textbf{What this reveals}: The interface language is presentation.
+  Separating it from the question is what lets a lecturer switch it
+  without losing a single answer.
+}
+
 \section{Binding Decks into a Book}
 \label{sec:binding-decks}
 
@@ -1740,6 +1833,7 @@ QR sidecars, so both the book and the standalone deck still compile.
 \input{../src/mentipy/store.tex}
 \input{../src/mentipy/venv.tex}
 \input{../src/mentipy/network.tex}
+\input{../src/mentipy/catalogue.tex}
 \input{../src/mentipy/latex.tex}
 \input{../src/mentipy/sty.tex}
 \input{../src/mentipy/server.tex}
