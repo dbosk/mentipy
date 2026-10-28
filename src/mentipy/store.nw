@@ -1237,7 +1237,8 @@ The HTTP server needs cheap read helpers for rendering pages and the CLI needs a
 stable listing for index-like views.
 
 Those read helpers should expose the question contract, not the store's local
-housekeeping.  In particular, remembered QR artifact paths are operational
+housekeeping.  In particular, remembered QR artifact paths and the
+recorded slide locale are operational
 metadata for later regeneration and would leak document-local filesystem layout
 if they escaped through [[metadata()]] or [[all_questions()]].  The same goes
 for the internal registration serial that the navigation helpers use to recover
@@ -1247,6 +1248,7 @@ the newest live suffix.
 def _public_question_metadata(meta: dict[str, Any]) -> dict[str, Any]:
     visible = dict(meta)
     visible.pop(QR_TARGETS_KEY, None)
+    visible.pop(LOCALE_KEY, None)
     visible.pop(REGISTRATION_SERIAL_KEY, None)
     return visible
 @
@@ -1506,6 +1508,80 @@ def test_remember_qr_target_deduplicates_repeated_paths(tmp_path):
     assert store.qr_targets(full_hash) == [target.resolve()]
     assert QR_TARGETS_KEY not in store.metadata(full_hash)
     assert QR_TARGETS_KEY not in store.all_questions()[0]
+@
+
+\subsection{The locale the slides used}
+\label{sec:recorded-locale}
+
+A question's pages should be in the language of the slide that asked
+it, and the slide's language is settled when the deck compiles: by the
+helper's [[locale=]] keyword, or by [[mentipy.locale]] on the machine
+that compiled it (\cref{sec:slide-labels}).  The server runs later,
+perhaps on another machine whose configuration says something else, so
+the LaTeX helpers record the locale each slide \emph{actually used}
+next to the question, and the server reads it back
+(\cref{sec:question-locale}).  Recording the effective locale rather
+than the keyword is what makes a deck compiled on a Swedish-configured
+laptop serve Swedish from an English-configured server.
+
+The locale is presentation, like the QR targets: two decks in two
+languages that ask the same question share its prefix, its QR code and
+its answers, so the locale must never enter the hash.  It is therefore
+an auxiliary key beside the question payload, which [[register]]'s
+refresh carries over like any other key the question does not own.  A
+question asked in two languages records the last one compiled.
+
+<<constants>>=
+LOCALE_KEY = "locale"
+<<store methods>>=
+def remember_locale(self, full_hash: str, locale: str):
+    """Record that the slide of ``full_hash`` was in ``locale``."""
+
+    with self._lock:
+        data = self._data()
+
+        if full_hash not in data["questions"]:
+            raise KeyError(full_hash)
+
+        meta = data["questions"][full_hash]
+        if meta.get(LOCALE_KEY) == locale:
+            return
+        meta[LOCALE_KEY] = locale
+        self._write(data)
+
+
+def question_locale(self, full_hash: str) -> str | None:
+    """Return the recorded slide locale of ``full_hash``, if any."""
+
+    return self._data()["questions"][full_hash].get(LOCALE_KEY)
+@
+
+Recording the locale is idempotent for the store, which is never
+rewritten for an unchanged value, and the recorded value must outlive
+the next registration of the same question, which rebuilds the
+question's payload from scratch.  A recompile in another language
+replaces it, and like the QR targets it stays out of the public view
+of the question.
+
+<<test functions>>=
+def test_the_recorded_locale_survives_reregistration_and_follows_a_recompile(
+    tmp_path,
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    question = OpenQuestion("Comment?")
+    prefix = store.register(question)
+    full_hash = store.resolve(prefix)
+    assert store.question_locale(full_hash) is None
+
+    store.remember_locale(full_hash, "sv")
+    assert store.register(question) == prefix
+    assert store.question_locale(full_hash) == "sv"
+
+    store.remember_locale(full_hash, "en")
+    assert store.question_locale(full_hash) == "en"
+    assert "locale" not in store.metadata(full_hash)
+    assert "locale" not in store.all_questions()[0]
+    assert store.resolve(prefix) == question_hash(question)
 @
 
 \section{Registered images}

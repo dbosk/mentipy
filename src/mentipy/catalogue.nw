@@ -15,13 +15,15 @@ language for both surfaces.  The two surfaces read it at different
 times, which is why the words live in a module of their own rather than
 in either of them:
 \begin{description}
-\item[The slide] The LaTeX helpers (\cref{sec:slide-labels}) read the
-  setting when the deck compiles and write each label as a LaTeX macro
-  whose default text comes from this catalogue, so a deck can still
-  override a single label.
-\item[The web pages] The server reads the setting, or the
-  [[--locale]] flag of [[mentipy serve]], when it starts, and renders
-  every page from the same catalogue.
+\item[The slide] The LaTeX helpers (\cref{sec:slide-labels}) take a
+  [[locale=]] keyword, which falls back on the setting, when the deck
+  compiles, and write each label as a LaTeX macro whose default text
+  comes from this catalogue, so a deck can still override a single
+  label.  They record the locale the slide used with the question.
+\item[The web pages] The server renders a question's pages in the
+  language its slide recorded, and every other page in the setting's,
+  unless the [[--locale]] flag of [[mentipy serve]] names one for
+  all (\cref{sec:question-locale}).
 \end{description}
 Both import this module and nothing in it imports them, so the
 catalogue can be read, and checked, on its own.  The store module keeps

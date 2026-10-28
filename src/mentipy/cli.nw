@@ -168,8 +168,9 @@ PUBLIC_HELP = (
     f"{PUBLIC_BASE_URL_CONFIG}."
 )
 LOCALE_HELP = (
-    "Language of the web pages: en or sv. Defaults to config setting "
-    f"{LOCALE_CONFIG}."
+    "Language of all web pages: en or sv, beating the language each "
+    "question's slides recorded. Without it, a question's pages follow "
+    f"its slides, and other pages config setting {LOCALE_CONFIG}."
 )
 RESULTS_HELP = (
     "Redirect respondents to the live results page. Questions "
@@ -245,6 +246,13 @@ PUBLIC_OPTION = typer.Option(False, "--public", help=PUBLIC_HELP)
 RESULTS_OPTION = typer.Option(False, "--results", help=RESULTS_HELP)
 LOCK_OPTION = typer.Option(True, "--lock/--no-lock", help=LOCK_HELP)
 LOCALE_OPTION = typer.Option(None, "--locale", help=LOCALE_HELP)
+RENDER_LOCALE_HELP = (
+    "Language of the slide labels, recorded so that the server answers "
+    f"in it. Defaults to config setting {LOCALE_CONFIG}."
+)
+RENDER_LOCALE_OPTION = typer.Option(
+    None, "--locale", help=RENDER_LOCALE_HELP
+)
 ENVIRONMENT_OPTION = typer.Option(None, "--env", help=ENVIRONMENT_HELP)
 LAYOUT_OPTION = typer.Option("slide", "--layout", help=LAYOUT_HELP)
 URL_VISIBILITY_OPTION = typer.Option(
@@ -530,35 +538,35 @@ def _latex_reference() -> str:
           mc(text, options, *, multi=False, next=True, results=None,
              lock=True, context=(), store=None, base_url=None,
              qr_dir=None, qr_format=None, environment=None,
-             show_url=None, layout="slide")
+             show_url=None, layout="slide", locale=None)
           open_text(text, *, max_chars=280, fence=None, next=True,
              results=None, lock=True, context=(), store=None,
              base_url=None, qr_dir=None, qr_format=None,
-             environment=None, show_url=None, layout="slide")
+             environment=None, show_url=None, layout="slide", locale=None)
           pin_image(text, image_path, *, max_pins=1,
              allow_comment=False, next=True, results=None, lock=True,
              context=(), store=None, base_url=None, qr_dir=None,
              qr_format=None, environment=None, show_url=None,
-             layout="slide")
+             layout="slide", locale=None)
           pin_text(text, content, *, language=None, max_pins=1,
              allow_comment=False, next=True, results=None, lock=True,
              context=(), store=None, base_url=None, qr_dir=None,
              qr_format=None, environment=None, show_url=None,
-             layout="slide")
+             layout="slide", locale=None)
           ranking(text, options, *, top_n=None, next=True,
              results=None, lock=True, context=(), store=None,
              base_url=None, qr_dir=None, qr_format=None,
-             environment=None, show_url=None, layout="slide")
+             environment=None, show_url=None, layout="slide", locale=None)
           scale(text, *, low=1, high=5, low_label="", high_label="",
              next=True, results=None, lock=True, context=(),
              store=None, base_url=None, qr_dir=None, qr_format=None,
-             environment=None, show_url=None, layout="slide")
+             environment=None, show_url=None, layout="slide", locale=None)
           word_cloud(text, *, max_chars=280, split_words=True,
              separators=None, min_word_length=3, extra_stop_words=(),
              use_default_stopwords=True, render="svg", next=True,
              results=None, lock=True, context=(), store=None,
              base_url=None, qr_dir=None, qr_format=None,
-             environment=None, show_url=None, layout="slide")
+             environment=None, show_url=None, layout="slide", locale=None)
           question(question_obj, *, ...) renders a prebuilt Question
              object and is the lower-level helper behind them.
           write_snippet(name, latex, *, directory=None) writes a
@@ -625,8 +633,11 @@ def _latex_reference() -> str:
 
         Slide labels
           The respondent instructions on the slide are in the language
-            of config key {LOCALE_CONFIG} (en or sv), as are the web
-            pages, where `mentipy serve --locale` overrides it.  Each
+            of the helpers' locale= keyword (en or sv), which a deck
+            sets once in its shared block, else of config key
+            {LOCALE_CONFIG}.  The helper records that language with the
+            question, and the question's web pages follow it unless
+            `mentipy serve --locale` overrides it.  Each
             label is a macro that the snippet defines with
             \\providecommand, so a deck's own definition in its
             preamble wins: \\newcommand{{\\mentipychooseone}}{{Pick one:}}.
@@ -660,7 +671,9 @@ def _latex_reference() -> str:
     ).rstrip().replace("@LABEL_MACROS@", label_lines) + "\n" + config_lines
 @
 
-The render subcommands all expose the same layout, URL, QR, and store options.
+The render subcommands all expose the same layout, URL, QR, store and
+locale options; [[--locale]] is the helpers' [[locale=]], so a question
+rendered here records its language as one rendered by PythonTeX does.
 Collecting those keyword arguments in one helper keeps the individual command
 bodies focused on constructing the right question kind rather than duplicating
 the shared registration/rendering policy.  The web-only context files are
@@ -680,6 +693,7 @@ def _render_common_kwargs(
     qr_dir: str | None,
     qr_format: str | None,
     layout: str,
+    locale: str | None = None,
 ) -> dict:
     return {
         "store": _configured_store(store),
@@ -691,6 +705,7 @@ def _render_common_kwargs(
         "qr_dir": qr_dir,
         "qr_format": qr_format,
         "layout": layout,
+        "locale": locale,
     }
 @
 
@@ -2212,8 +2227,10 @@ per-lecture decision, like [[--results]], not a per-machine one.  The
 language of the pages is both: a lecturer's decks are usually in one
 language, which [[mentipy.locale]] records once, but a guest lecture
 in English on a Swedish lecturer's machine needs [[--locale en]] for
-one run.  The flag wins over the setting, and the CLI resolves the two
-so the server only ever sees the locale it should speak.
+one run.  The flag and the setting are passed on separately, because
+between them the server places the locale each question's slides
+recorded (\cref{sec:question-locale}): the flag beats the record, the
+setting does not.
 
 <<cli setup>>=
 @cli.command(context_settings={"allow_extra_args": True})
@@ -2234,7 +2251,6 @@ def serve(
     """
 
     chosen_host = host or get_setting(HOST_CONFIG, DEFAULT_HOST)
-    chosen_locale = locale or get_setting(LOCALE_CONFIG, DEFAULT_LOCALE)
     chosen_port = _configured_port(port)
     active_store = _configured_store(store)
     public_mode = _parse_public_mode(ctx, public, command="serve")
@@ -2245,7 +2261,7 @@ def serve(
         public=public_mode,
         results=results,
         lock=lock,
-        locale=chosen_locale,
+        locale=locale,
         runner=_serve_runner,
     )
 @
@@ -2280,7 +2296,7 @@ def _run_server(
     public: PublicMode | None,
     results: bool,
     lock: bool,
-    locale: str,
+    locale: str | None,
     runner,
 ):
     options = {
@@ -2289,6 +2305,7 @@ def _run_server(
         "heatmap_bins": get_setting(HEATMAP_BINS_CONFIG),
         "lock": lock,
         "locale": locale,
+        "default_locale": get_setting(LOCALE_CONFIG, DEFAULT_LOCALE),
     }
     if public is None:
         lines = _local_start_lines(
@@ -2446,7 +2463,6 @@ def present(
     heat_mode = _pin_heat_mode(pin_heat)
     window = _results_window(window)
     chosen_host = host or get_setting(HOST_CONFIG, DEFAULT_HOST)
-    chosen_locale = locale or get_setting(LOCALE_CONFIG, DEFAULT_LOCALE)
     chosen_port = _configured_port(port)
     active_store = _configured_store(store)
     public_mode = _parse_public_mode(ctx, public, command="present")
@@ -2471,7 +2487,7 @@ def present(
             public=public_mode,
             results=results,
             lock=lock,
-            locale=chosen_locale,
+            locale=locale,
             runner=runner,
         )
     except KeyboardInterrupt:
@@ -2639,6 +2655,7 @@ def render_mc(
     qr_dir: Optional[str] = QR_DIR_OPTION,
     qr_format: Optional[str] = QR_FORMAT_OPTION,
     store: Optional[str] = STORE_OPTION,
+    locale: Optional[str] = RENDER_LOCALE_OPTION,
 ):
     """Render a multiple-choice question as LaTeX."""
 
@@ -2660,6 +2677,7 @@ def render_mc(
                 qr_dir=qr_dir,
                 qr_format=qr_format,
                 layout=layout,
+                locale=locale,
             ),
         )
     )
@@ -2693,6 +2711,7 @@ def render_open(
     qr_dir: Optional[str] = QR_DIR_OPTION,
     qr_format: Optional[str] = QR_FORMAT_OPTION,
     store: Optional[str] = STORE_OPTION,
+    locale: Optional[str] = RENDER_LOCALE_OPTION,
 ):
     """Render an open-text question as LaTeX."""
 
@@ -2714,6 +2733,7 @@ def render_open(
                 qr_dir=qr_dir,
                 qr_format=qr_format,
                 layout=layout,
+                locale=locale,
             ),
         )
     )
@@ -2882,6 +2902,7 @@ def render_scale(
     qr_dir: Optional[str] = QR_DIR_OPTION,
     qr_format: Optional[str] = QR_FORMAT_OPTION,
     store: Optional[str] = STORE_OPTION,
+    locale: Optional[str] = RENDER_LOCALE_OPTION,
 ):
     """Render a scale question as LaTeX."""
 
@@ -2905,6 +2926,7 @@ def render_scale(
                 qr_dir=qr_dir,
                 qr_format=qr_format,
                 layout=layout,
+                locale=locale,
             ),
         )
     )
@@ -2982,6 +3004,7 @@ def render_word_cloud(
     qr_dir: Optional[str] = QR_DIR_OPTION,
     qr_format: Optional[str] = QR_FORMAT_OPTION,
     store: Optional[str] = STORE_OPTION,
+    locale: Optional[str] = RENDER_LOCALE_OPTION,
 ):
     """Render a word-cloud question as LaTeX."""
 
@@ -3008,6 +3031,7 @@ def render_word_cloud(
                 qr_dir=qr_dir,
                 qr_format=qr_format,
                 layout=layout,
+                locale=locale,
             ),
         )
     )
@@ -3145,6 +3169,7 @@ def render_ranking(
     qr_dir: Optional[str] = QR_DIR_OPTION,
     qr_format: Optional[str] = QR_FORMAT_OPTION,
     store: Optional[str] = STORE_OPTION,
+    locale: Optional[str] = RENDER_LOCALE_OPTION,
 ):
     """Render a ranking question as LaTeX."""
 
@@ -3166,6 +3191,7 @@ def render_ranking(
                 qr_dir=qr_dir,
                 qr_format=qr_format,
                 layout=layout,
+                locale=locale,
             ),
         )
     )
@@ -3244,6 +3270,7 @@ def render_pin_image(
     qr_dir: Optional[str] = QR_DIR_OPTION,
     qr_format: Optional[str] = QR_FORMAT_OPTION,
     store: Optional[str] = STORE_OPTION,
+    locale: Optional[str] = RENDER_LOCALE_OPTION,
 ):
     """Render a pin-on-image question as LaTeX."""
 
@@ -3266,6 +3293,7 @@ def render_pin_image(
                 qr_dir=qr_dir,
                 qr_format=qr_format,
                 layout=layout,
+                locale=locale,
             ),
         )
     )
@@ -3306,6 +3334,7 @@ def render_pin_text(
     qr_dir: Optional[str] = QR_DIR_OPTION,
     qr_format: Optional[str] = QR_FORMAT_OPTION,
     store: Optional[str] = STORE_OPTION,
+    locale: Optional[str] = RENDER_LOCALE_OPTION,
 ):
     """Render a pin-on-text question as LaTeX."""
 
@@ -3329,6 +3358,7 @@ def render_pin_text(
                 qr_dir=qr_dir,
                 qr_format=qr_format,
                 layout=layout,
+                locale=locale,
             ),
         )
     )
@@ -5661,6 +5691,8 @@ def test_latex_command_prints_the_reference_and_all_config_keys():
     assert "then \\renewcommand works anywhere" in result.output
     assert "\\mentipynumber" in result.output
     assert "`mentipy serve --locale`" in result.output
+    assert 'layout="slide", locale=None)' in result.output
+    assert "records that language with the" in result.output
     for name in SLIDE_LABEL_MACROS.values():
         assert f"\\{name}" in result.output
     for key, _description in CONFIG_KEY_HELP:
@@ -5779,9 +5811,10 @@ def test_serve_command_passes_the_lock_flag(tmp_path, monkeypatch):
     assert "/active" not in unlocked.stdout
 @
 
-The locale reaches the server the same way, from the configuration
-unless [[--locale]] names another, and English when neither does.
-Both serving branches must pass it, the public one as well.
+The locale reaches the server in two parts, because they rank
+differently there: [[--locale]] as given, which beats the locale a
+question's slides recorded, and the configured default, which does not.
+Both serving branches must pass both, the public one as well.
 
 <<test functions>>=
 def test_serve_command_passes_the_locale_with_the_flag_first(
@@ -5809,22 +5842,26 @@ def test_serve_command_passes_the_locale_with_the_flag_first(
     store_args = ["--store", str(tmp_path / "answers.json")]
 
     assert runner.invoke(cli, ["serve", *store_args]).exit_code == 0
-    assert captured["locale"] == "en"
+    assert captured["locale"] is None
+    assert captured["default_locale"] == "en"
 
     set_setting("locale", "sv")
     assert runner.invoke(cli, ["serve", *store_args]).exit_code == 0
-    assert captured["locale"] == "sv"
+    assert captured["locale"] is None
+    assert captured["default_locale"] == "sv"
 
     flagged = ["serve", *store_args, "--locale", "en_GB"]
     assert runner.invoke(cli, flagged).exit_code == 0
     assert captured["locale"] == "en_GB"
+    assert captured["default_locale"] == "sv"
 
     public = ["serve", *store_args, "--public", "ssh", "--locale", "xx"]
     assert runner.invoke(cli, public).exit_code == 0
     assert captured["locale"] == "xx"
     configured = ["serve", *store_args, "--public", "ssh"]
     assert runner.invoke(cli, configured).exit_code == 0
-    assert captured["locale"] == "sv"
+    assert captured["locale"] is None
+    assert captured["default_locale"] == "sv"
 @
 
 When the base URL is automatic or unset, starting the local server must refresh
@@ -6916,7 +6953,9 @@ def test_present_runs_inside_the_public_exposure(
 @
 
 [[--locale]] reaches the server that [[present]] starts: the waiting
-page and the form a phone gets are Swedish.  The terminal stays
+page and the form a phone gets are Swedish, even for a question whose
+slides recorded English, since an explicit flag beats the record.
+The terminal stays
 English, and the watch still recognises the Swedish waiting page,
 since it reads the marker header and never the page's words.
 
@@ -6939,6 +6978,7 @@ def test_present_serves_pages_in_the_chosen_locale(tmp_path, monkeypatch):
     set_setting("base_url", server)
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+    store.remember_locale(store.resolve(prefix), "en")
     pages = {}
 
     def open_and_read():
@@ -6975,6 +7015,31 @@ def test_present_serves_pages_in_the_chosen_locale(tmp_path, monkeypatch):
 
 The render-subcommand tests first pin the basic path: a command should print the
 generated fragment and leave behind a registered question for later serving.
+
+A question rendered on the command line records its locale like one
+rendered by PythonTeX: [[--locale]] reaches the helper, which writes
+the Swedish labels and records Swedish for the server.
+
+<<test functions>>=
+def test_render_locale_reaches_the_slide_and_the_record(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    monkeypatch.chdir(tmp_path)
+    store_path = tmp_path / "mentipy.json"
+
+    result = CliRunner().invoke(
+        cli,
+        ["render", "open", "Why?", "--locale", "sv", "--store",
+         str(store_path), "--base-url", "http://example.test:8080"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "{Fritext}" in result.output
+    store = Store(store_path)
+    [entry] = store.all_questions()
+    assert store.question_locale(entry["hash"]) == "sv"
+@
 
 <<test functions>>=
 def test_render_mc_prints_slide_latex_and_writes_the_question(tmp_path):
