@@ -6540,6 +6540,66 @@ def test_present_keeps_server_warnings_in_the_banner(
     assert mentipy_logger.propagate is True
 @
 
+A bug in the server's request handling is reported the same way.
+The index renderer is made to fail, as no real request can be made to
+on demand; the lecturer's request for the index then ends in an
+error, which must land in the banner's warning line, with no
+traceback printed over the display.
+
+<<test functions>>=
+def test_present_keeps_unexpected_server_errors_in_the_banner(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    port = _free_port()
+    server = f"http://127.0.0.1:{port}"
+    set_setting("base_url", server)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+    monkeypatch.setattr("mentipy.cli.CLEAR_SCREEN", "[clear]")
+
+    def broken_index(*_args, **_kwargs):
+        raise RuntimeError("the index broke")
+
+    monkeypatch.setattr(mentipy.server, "_render_index", broken_index)
+
+    def ask_for_the_index():
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        connection.request("GET", "/")
+        with pytest.raises(http.client.HTTPException):
+            connection.getresponse()
+        connection.close()
+
+    _play_the_lecture(
+        monkeypatch,
+        ask_for_the_index,
+        lambda: _open_for_the_room(server, prefix),
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "present",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--store",
+            str(store.path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    last_frame = result.output.split("[clear]")[-1]
+    assert re.search(
+        r"^Warnings: 1, the last: unexpected error while handling request"
+        r" from .*: the index broke$",
+        last_frame,
+        re.M,
+    )
+    assert "Traceback" not in result.output
+@
+
 A failure inside the watch must not take the server down with it: the
 room depends on the server, the lecturer only on the display.  The
 test makes one refresh of an open question fail.  The loop reports the
