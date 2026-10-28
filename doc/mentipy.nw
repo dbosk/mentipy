@@ -1560,6 +1560,33 @@ while they were still answering.  A respondent level with the lecture
 steps to the next question and waits there.  Sending that respondent to
 [[/active]] would put them back on the question they just answered.
 
+The lecturer can follow the same cursor in a terminal.  A browser that
+blocks the results page from refreshing itself leaves the lecturer to
+refresh by hand, and refreshing before most of the room has answered
+shows a tally that sways the rest.  [[mentipy watch]] with a prefix
+counts the answers to one question; without a prefix it follows the
+lecture.  It is started once, beside [[mentipy serve]], and shows
+whichever question the lecturer has opened, switching when Next or Skip
+moves the lecture on:
+
+\begin{minted}{text}
+mentipy watch --store ./mentipy.json
+mentipy watch --store ./mentipy.json --server http://localhost:9000
+\end{minted}
+
+The watcher asks the server for [[/active]], just as a latecomer's
+phone does, and reads the answers from the store, so it must be given
+the same store as the server.  The server is [[localhost]] at
+[[mentipy.port]] unless [[--server]] names another address, for a
+server started with [[--port]] or one on another machine.  Asking needs
+no admin rights, so this works under [[--public ssh]] as well, and the
+watcher can never open a question for the room.  Before the first
+question is opened it shows a waiting line, and while the server is not
+running it says so and keeps asking, so the order in which the two are
+started does not matter.  The terminal is the lecturer's own screen,
+so the tally stays off the projector until the lecturer refreshes the
+results page.
+
 Some slides carry several questions and one QR code.  Respondents reach
 the second and third question through the navigation row, so those must
 open together with the first rather than wait for their own results
