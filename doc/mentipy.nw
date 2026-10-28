@@ -1576,9 +1576,11 @@ mentipy watch --store ./mentipy.json --server http://localhost:9000
 
 The watcher asks the server for [[/active]], just as a latecomer's
 phone does, and reads the answers from the store, so it must be given
-the same store as the server.  The server is [[localhost]] at
-[[mentipy.port]] unless [[--server]] names another address, for a
-server started with [[--port]] or one on another machine.  Asking needs
+the same store as the server.  The server is the one
+[[mentipy serve]] would start, [[mentipy.host]] at [[mentipy.port]]
+(the loopback address when it binds every interface), unless
+[[--server]] names another address, for a server started with
+[[--port]] or one on another machine.  Asking needs
 no admin rights, so this works under [[--public ssh]] as well, and the
 watcher can never open a question for the room.  Before the first
 question is opened it shows a waiting line, and while the server is not
@@ -1586,6 +1588,25 @@ running it says so and keeps asking, so the order in which the two are
 started does not matter.  The terminal is the lecturer's own screen,
 so the tally stays off the projector until the lecturer refreshes the
 results page.
+
+One command does both jobs.  [[mentipy present]] starts the server
+exactly as [[mentipy serve]] does, with all of its options, and then
+follows the lecture in the same terminal, with [[watch]]'s
+[[--interval]], [[--window]] and [[--pin-heat]]:
+
+\begin{minted}{text}
+mentipy present --store ./mentipy.json
+mentipy present --store ./mentipy.json --public ssh
+\end{minted}
+
+The start-up lines --- the address, the warning to recompile after
+rewritten QR codes, the [[/active]] URL and, under [[--public ssh]],
+the admin link --- stay at the top of the screen for the whole lecture,
+since the display is redrawn as answers arrive.  The admin link is
+private, so this terminal must not be the projected screen.  If the
+port is taken, [[present]] stops with the same error as [[serve]]
+before it starts watching, and Ctrl-C stops both the watch and the
+server, closing a tunnel or port mapping on the way out.
 
 Some slides carry several questions and one QR code.  Respondents reach
 the second and third question through the navigation row, so those must

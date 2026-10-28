@@ -112,6 +112,18 @@ server:
 mentipy serve --store ./mentipy.json
 ```
 
+For a lecture, `mentipy present` starts the same server and, in the same
+terminal, follows the question the lecturer opens (as a bare
+`mentipy watch` does, see below). It takes all of `serve`'s options and
+`watch`'s `--interval`, `--window` and `--pin-heat`, and it keeps the
+start-up lines (address, QR warning, admin link) on screen above the
+answers. Keep that terminal off the projector:
+
+```sh
+mentipy present --store ./mentipy.json
+mentipy present --store ./mentipy.json --public ssh
+```
+
 Use `--results` when respondents should land on the live results page after
 submitting an answer:
 
@@ -132,9 +144,10 @@ During a lecture, a bare `mentipy watch` (no prefix) follows the
 question the lecturer has opened on the running server, and switches
 whenever Next or Skip moves the lecture on. Start it once, beside
 `mentipy serve`, with the same store. It asks the server for `/active`,
-at `http://localhost:<mentipy.port>` (or at the `mentipy.host` address,
-when that names one) unless `--server` names another address. It needs no admin rights, and it keeps retrying while the
-server is not running:
+on `mentipy.host` (its loopback address when the server binds every
+interface) at `mentipy.port`, unless `--server` names another address.
+It needs no admin rights, and it keeps retrying while the server is not
+running:
 
 ```sh
 mentipy watch --store ./mentipy.json
