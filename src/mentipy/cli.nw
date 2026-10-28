@@ -168,9 +168,10 @@ PUBLIC_HELP = (
     f"{PUBLIC_BASE_URL_CONFIG}."
 )
 LOCALE_HELP = (
-    "Language of all web pages: en or sv, beating the language each "
-    "question's slides recorded. Without it, a question's pages follow "
-    f"its slides, and other pages config setting {LOCALE_CONFIG}."
+    "Language of all web pages: en or sv. Without it, a question's "
+    "pages follow the locale its slides recorded, while a question "
+    "without one, and the pages not about one question, follow config "
+    f"setting {LOCALE_CONFIG}."
 )
 RESULTS_HELP = (
     "Redirect respondents to the live results page. Questions "

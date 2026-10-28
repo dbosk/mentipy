@@ -49,7 +49,13 @@ from pygments.formatters import HtmlFormatter as _HtmlFormatter
 from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
 
-from mentipy.catalogue import ENGLISH, Catalogue, load_catalogue
+from mentipy.catalogue import (
+    CATALOGUES,
+    ENGLISH,
+    Catalogue,
+    load_catalogue,
+    normalize_locale,
+)
 from mentipy.questions import (
     ContextDownload,
     ContextSnippet,
@@ -4628,7 +4634,10 @@ else the recorded one, else the configured default, else English.  The
 pages not tied to one question, the index, [[/active]], an unknown
 prefix, take the flag or the default.  The default catalogue is loaded
 here, once per server, so an unknown locale warns once at start rather
-than on every request.
+than on every request.  A recorded locale the server has no catalogue
+for, from a hand-edited store or a newer Mentipy, counts as no record:
+the question gets the server's default, silently, rather than English
+with a warning on every request.
 
 <<question catalogue>>=
 default_catalogue = load_catalogue(locale or default_locale)
@@ -4637,18 +4646,21 @@ default_catalogue = load_catalogue(locale or default_locale)
 def catalogue_for(full_hash: str) -> Catalogue:
     if locale:
         return default_catalogue
-    recorded = store.question_locale(full_hash)
-    return load_catalogue(recorded) if recorded else default_catalogue
+    recorded = normalize_locale(store.question_locale(full_hash))
+    return CATALOGUES.get(recorded, default_catalogue)
 @
 
 The handler then holds the catalogue of the request it is serving as
-[[self.catalogue]]: the default one, as a class attribute, until
-[[_resolve]] has found the question the request is about.  Every page
-the handler renders takes [[self.catalogue]], so a page is always in
-one language and its [[<html lang>]] says which.  An attribute of the
-handler instance is safe across the server's threads, since every
-connection gets its own instance, and every request its own
-connection.
+[[self.catalogue]]: the default one until [[_resolve]] has found the
+question the request is about.  Every page the handler renders takes
+[[self.catalogue]], so a page is always in one language and its
+[[<html lang>]] says which.  An attribute of the handler instance is
+safe across the server's threads, since every connection gets its own
+instance.  A connection may carry several requests, though, once the
+server speaks HTTP/1.1 with keep-alive, so the attribute is reset to
+the default in [[parse_request]], which the standard library calls at
+the start of every request, before any route or error page; the class
+attribute covers a request that fails even earlier.
 
 <<functions>>=
 def _build_handler(
@@ -4701,6 +4713,10 @@ strips the token from the URL can carry the [[Set-Cookie]] that replaces it.
 <<mentipy handler helpers>>=
 def log_message(self, *_args):
     return
+
+def parse_request(self):
+    self.catalogue = default_catalogue
+    return super().parse_request()
 
 def _is_local(self) -> bool:
     return is_local_address(self.client_address[0])
@@ -5979,6 +5995,61 @@ def test_each_question_speaks_the_language_its_slide_used(tmp_path):
         _response, active = _request(port, "GET", "/active")
     assert "Läraren har inte öppnat frågan än." in waiting
     assert lang(active) == "en"
+@
+
+A recorded locale the server has no catalogue for, from a hand-edited
+store or a newer Mentipy, is treated as no record: the question gets
+the server's default, not English, and no warning per request.
+
+The catalogue must also be chosen afresh for every request, not once
+per handler instance.  The server speaks HTTP/1.0 today, one request
+per connection and so per instance, but a keep-alive connection would
+reuse the instance, and the second request on it must not inherit the
+first one's question language.  The test switches the handler to
+HTTP/1.1 and sends a Swedish question's form and then an unknown
+prefix over one connection.
+
+<<test functions>>=
+def test_an_unknown_recorded_locale_gets_the_server_default(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Q?"))
+    store.remember_locale(store.resolve(prefix), "tlh")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with _running_server(store, lock=False, default_locale="sv") as port:
+            _response, page = _request(port, "GET", f"/{prefix}")
+
+    assert '<html lang="sv">' in page
+
+
+def test_each_request_on_a_kept_alive_connection_chooses_its_language(
+    tmp_path,
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Sv?"))
+    store.remember_locale(store.resolve(prefix), "sv")
+    server = create_server(store, host="127.0.0.1", port=0, lock=False)
+    server.RequestHandlerClass.protocol_version = "HTTP/1.1"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", server.server_address[1], timeout=5
+        )
+        pages = []
+        for path in [f"/{prefix}", "/ffffffffff", "/nope/a/b"]:
+            connection.request("GET", path)
+            pages.append(connection.getresponse().read().decode("utf-8"))
+        connection.close()
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+    langs = [re.search(r'<html lang="(\w+)">', page).group(1)
+             for page in pages]
+    assert langs == ["sv", "en", "en"]
 @
 
 The pin form's two script strings are the one place a catalogue
@@ -8236,6 +8307,7 @@ import logging
 import re
 import socket
 import threading
+import warnings
 
 import mentipy.server as server_module
 import pytest
