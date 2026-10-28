@@ -161,14 +161,20 @@ Each label is therefore a LaTeX macro: the slide says
 [[\mentipychooseone]] with [[\providecommand]], its text taken from the
 catalogue.  [[\providecommand]] defines a macro only if it is not
 defined yet, so a deck that defines a label before its first question
-wins, and every snippet's default after that is a no-op.  A deck does
-it once, in its preamble:
+wins, and every snippet's default after that is a no-op.  The form
+that works everywhere provides the label and then redefines it:
 \begin{minted}{latex}
-\newcommand{\mentipychooseone}{Välj ett svar:}
-\newcommand{\mentipycharacters}{högst \mentipynumber{} tecken}
+\providecommand{\mentipychooseone}{}
+\renewcommand{\mentipychooseone}{Välj ett svar:}
+\providecommand{\mentipycharacters}{}
+\renewcommand{\mentipycharacters}{högst \mentipynumber{} tecken}
 \end{minted}
-[[\newcommand]] rather than [[\renewcommand]], because nothing defines
-the labels before the first snippet does.
+Either half alone fails somewhere.  A plain [[\renewcommand]] fails
+before the first snippet, because nothing has defined the label yet.  A
+plain [[\newcommand]] works in the preamble, before any question, but
+fails after the first question of an article document, where the
+snippet's definition is global rather than local to a frame.  The pair
+works in the preamble and between questions alike.
 
 The defaults live in each snippet, as [[\mentipyqrcaption]]'s does in
 each QR sidecar, rather than in the companion package
@@ -264,8 +270,11 @@ SLIDE_NUMBER_MACRO = "mentipynumber"
 @
 
 The catalogue is looked up when a question is rendered, that is, when
-the deck compiles, so a changed setting takes effect at the next
-build.
+PythonTeX runs the helper.  PythonTeX reruns a block only when its code
+has changed, and changing the setting changes no code, so after a
+change of locale a deck must clear PythonTeX's output or build with
+[[--rerun=always]], as the decks' Makefiles do; otherwise the slides
+keep the labels of the earlier language.
 
 <<functions>>=
 def _slide_catalogue() -> Catalogue:
@@ -469,13 +478,15 @@ def test_compiled_slides_keep_the_english_and_take_a_deck_override(
     swedish = _compiled_text(
         tmp_path,
         "\\newcommand{\\mentipylimitlabel}{Max}\n"
+        "\\providecommand{\\mentipyfreetext}{}"
+        "\\renewcommand{\\mentipyfreetext}{Eget svar}\n"
         "\\newcommand{\\mentipyranktop}{Ordna dina \\mentipynumber{}:}",
         [mc("Q1", ["A", "B"], **common), open_text("Q3", **common),
          word_cloud("Q5", **common),
          ranking("Q7", ["A", "B", "C"], top_n=2, **common)],
     )
     assert "Välj ett alternativ:" in swedish
-    assert "Svar Fritext Max 280 tecken" in swedish
+    assert "Svar Eget svar Max 280 tecken" in swedish
     assert "Svar Ordmoln (fritext) Max 280 tecken" in swedish
     assert "Ordna dina 2:" in swedish
     assert "Högst" not in swedish and "bästa" not in swedish

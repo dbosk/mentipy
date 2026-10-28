@@ -630,6 +630,8 @@ def _latex_reference() -> str:
             label is a macro that the snippet defines with
             \\providecommand, so a deck's own definition in its
             preamble wins: \\newcommand{{\\mentipychooseone}}{{Pick one:}}.
+            Between questions, \\providecommand{{\\mentipychooseone}}{{}}
+            then \\renewcommand works anywhere.
             A label with a number reads it from \\mentipynumber:
             \\newcommand{{\\mentipycharacters}}{{\\mentipynumber{{}} chars}}.
             The labels:
@@ -5278,6 +5280,7 @@ def test_latex_command_prints_the_reference_and_all_config_keys():
     assert "Slide labels" in result.output
     assert "@LABEL_MACROS@" not in result.output
     assert "\\newcommand{\\mentipychooseone}{Pick one:}" in result.output
+    assert "then \\renewcommand works anywhere" in result.output
     assert "\\mentipynumber" in result.output
     assert "`mentipy serve --locale`" in result.output
     for name in SLIDE_LABEL_MACROS.values():

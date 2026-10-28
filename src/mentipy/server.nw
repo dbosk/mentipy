@@ -4703,9 +4703,17 @@ The routes' own HTTP errors, a 404 for a path that leads nowhere and a
 than the standard library's [[send_error]], whose page is English and
 would break the server's language on exactly the page a lost
 respondent sees.  The page is titled with the status code and says what
-happened in the server's language.  The standard library's own errors,
-for requests too malformed to be routed at all, keep its page: no
-browser sends them.
+happened in the server's language.
+
+The standard library also answers some requests itself, before any
+route runs: a 501 for a method the handler has no [[do_]] method for,
+a 400 or 414 for a request line it cannot parse.  It does so through
+[[send_error]], so the handler overrides that too.  The override keeps
+the standard library's protocol handling (the [[Connection: close]],
+no body for [[HEAD]]) and only replaces the page it sends, through the
+[[error_message_format]] template it fills in; the page's own percent
+signs are doubled for that template.  A status without a reason of its
+own gets the general one.
 
 <<constants>>=
 ERROR_PAGE_REASONS = {
@@ -4713,13 +4721,20 @@ ERROR_PAGE_REASONS = {
     HTTPStatus.REQUEST_ENTITY_TOO_LARGE: "error.too_large",
 }
 <<mentipy handler helpers>>=
-def _send_error_page(self, status: HTTPStatus):
+def _error_page(self, status: HTTPStatus) -> str:
     title = catalogue("error.status", code=status.value)
-    reason = escape(catalogue(ERROR_PAGE_REASONS[status]))
-    self._send(
-        status,
-        _page(title, title, f"<p>{reason}</p>", catalogue=catalogue),
-    )
+    key = ERROR_PAGE_REASONS.get(status, "error.request")
+    reason = escape(catalogue(key))
+    return _page(title, title, f"<p>{reason}</p>", catalogue=catalogue)
+
+def _send_error_page(self, status: HTTPStatus):
+    self._send(status, self._error_page(status))
+
+def send_error(self, code, message=None, explain=None):
+    page = self._error_page(HTTPStatus(code))
+    self.error_message_format = page.replace("%", "%%")
+    self.error_content_type = "text/html; charset=utf-8"
+    super().send_error(code, message, explain)
 @
 
 A presenter authenticates by presenting [[admin_token]] either as an
@@ -5762,7 +5777,7 @@ def test_a_swedish_server_speaks_swedish_on_every_page(tmp_path):
         "Medellängd",
         "<th>Andel</th>",
         'aria-label="Ordmoln"',
-        "snitt 1.0, 1 rangordnade",
+        "snitt 1.0, rangordnad av 1",
         "Antal nålar: <strong>1</strong>",
         "<h2>Kommentarer</h2>",
         "Hoppa över",
@@ -5805,6 +5820,59 @@ def test_a_swedish_server_lists_an_ambiguous_prefix_in_swedish(
     assert "<h1>Tvetydigt prefix</h1>" in page
     assert "<p>abc matchar flera frågor.</p>" in page
     assert _english_leaks(page) == []
+@
+
+The standard library answers some requests itself, before any route
+sees them: an unsupported method gets a 501, and a request line that is
+not HTTP gets a 400.  Those pages must speak the server's language too.
+The 400 is sent over a raw socket, since no HTTP client sends such a
+request; the standard library then answers without a status line, as
+it does for any request it could not parse, so the test reads the body
+alone.
+
+<<test functions>>=
+def test_standard_library_errors_use_the_server_language(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Vilken?", ("A", "B")))
+
+    with _running_server(store, locale="sv") as port:
+        response, page = _request(port, "PUT", f"/{prefix}")
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as raw:
+            raw.sendall(b"GARBAGE\r\n\r\n")
+            garbage = b"".join(iter(lambda: raw.recv(4096), b"")).decode()
+
+    assert response.status == 501
+    for body, code in [(page, 501), (garbage, 400)]:
+        assert '<html lang="sv">' in body
+        assert f"<h1>Fel {code}</h1>" in body
+        assert "<p>Servern kunde inte hantera begäran.</p>" in body
+        assert _english_leaks(body) == []
+@
+
+An error page's reason is escaped like any other catalogue text, on
+the routes' own error pages and on the standard library's alike.  The
+built-in reasons hold no markup, so the test gives the server a
+catalogue whose reasons do.
+
+<<test functions>>=
+def test_error_pages_escape_their_reason(tmp_path, monkeypatch):
+    hostile = Catalogue(
+        "xx",
+        {**ENGLISH.messages,
+         "error.not_found": "<b>&",
+         "error.request": "<i>&"},
+    )
+    monkeypatch.setattr(server_module, "load_catalogue", lambda _: hostile)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+
+    with _running_server(store) as port:
+        _response, missing = _request(port, "GET", f"/{prefix}/a/b")
+        _response, unsupported = _request(port, "PUT", f"/{prefix}")
+
+    assert "<p>&lt;b&gt;&amp;</p>" in missing
+    assert "<p>&lt;i&gt;&amp;</p>" in unsupported
+    assert "<b>&" not in missing and "<i>&" not in unsupported
 @
 
 The pin form's two script strings are the one place a catalogue

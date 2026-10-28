@@ -258,7 +258,7 @@ formatting to follow the locale too, which is a separate change.
 "ranking.not_ranked": ("not ranked", "ej rangordnad"),
 "ranking.detail": (
     "avg {mean:.1f}, {n} ranked",
-    "snitt {mean:.1f}, {n} rangordnade",
+    "snitt {mean:.1f}, rangordnad av {n}",
 ),
 "pins.total": ("Total pins: {n}", "Antal nålar: {n}"),
 "pins.comments": ("Comments", "Kommentarer"),
@@ -317,7 +317,14 @@ place a respondent can understand.
 The few plain HTTP errors the server sends itself, a path that leads
 nowhere and an upload too large to accept, get a page of their own too
 rather than the standard library's English one, titled with the status
-code, which reads the same in every language.
+code, which reads the same in every language.  So do the errors the
+standard library sends itself, an unsupported method or a request it
+cannot parse, with a general reason.
+
+A ranking's detail line says how many respondents ranked an option.
+The Swedish puts the count after the participle, \enquote{rangordnad
+av 3}, which agrees with the option rather than the respondents and so
+reads correctly for one respondent and for many alike.
 
 A rejected answer names what was wrong with it, so the parser's
 reasons are messages too.  Only a request no form would send (a crafted
@@ -372,6 +379,10 @@ body, a number that is not one) gets the generic
     "There is nothing at this address.",
     "Det finns inget på den här adressen.",
 ),
+"error.request": (
+    "The server could not handle this request.",
+    "Servern kunde inte hantera begäran.",
+),
 "error.too_large": (
     "The answer is too large to send.",
     "Svaret är för stort för att skickas.",
@@ -382,7 +393,7 @@ body, a number that is not one) gets the generic
 ),
 "answer.malformed": (
     "malformed multipart form data",
-    "formulärdata är felaktigt",
+    "formulärdatan är felaktig",
 ),
 "answer.not_text": (
     "uploaded file is not valid text; save it as UTF-8",
@@ -565,9 +576,13 @@ def test_a_catalogue_formats_plain_text_and_escapes_only_its_own_markup():
 
 A locale arrives from the configuration or the command line, where
 people write it the way their system does: [[sv]], [[sv-SE]],
-[[sv_SE.UTF-8]].  Only the language matters for these catalogues, so
-the name is reduced to its language code before the lookup.  An unset
-locale is English without comment.  A locale Mentipy has no catalogue
+[[sv_SE.UTF-8]], [[sv_SE.UTF-8@euro]].  Only the language matters for
+these catalogues, so the name is reduced to its language code before
+the lookup, dropping the modifier, the encoding and the region.  An
+unset locale is English without comment, and so is the C locale
+([[C]], [[POSIX]], [[C.UTF-8]]): it is what a minimal system or a
+container runs in, the absence of a choice rather than a language
+Mentipy lacks.  A locale Mentipy has no catalogue
 for is a typo or a language not shipped yet; neither should stop a
 lecture, so it falls back to English with a warning.  The warning comes
 once per locale and process: the LaTeX helpers look the setting up for
@@ -578,7 +593,7 @@ build log.
 def normalize_locale(locale: str | None) -> str:
     """Return the language code of `locale`, e.g. `sv` for `sv_SE.UTF-8`."""
 
-    name = (locale or "").strip().lower()
+    name = (locale or "").strip().lower().split("@")[0]
     return name.split(".")[0].replace("-", "_").split("_")[0]
 
 
@@ -590,7 +605,7 @@ def load_catalogue(locale: str | None = None) -> Catalogue:
     """
 
     name = normalize_locale(locale)
-    if not name:
+    if not name or name in C_LOCALES:
         return CATALOGUES[FALLBACK_LOCALE]
     if name not in CATALOGUES:
         if name not in _WARNED_LOCALES:
@@ -604,6 +619,7 @@ def load_catalogue(locale: str | None = None) -> Catalogue:
     return CATALOGUES[name]
 <<constants>>=
 _WARNED_LOCALES: set[str] = set()
+C_LOCALES = frozenset({"c", "posix"})
 @
 
 The built-in catalogues are built once, at import, from the table:
@@ -631,9 +647,25 @@ def test_load_catalogue_finds_a_locale_however_it_is_spelled():
     assert load_catalogue("sv")("form.submit") == "Skicka"
     assert load_catalogue("sv_SE.UTF-8").locale == "sv"
     assert load_catalogue(" SV-se ").locale == "sv"
+    assert load_catalogue("sv_SE.UTF-8@euro").locale == "sv"
+    assert load_catalogue("sv@euro").locale == "sv"
     assert load_catalogue("en_GB")("form.submit") == "Submit"
     assert load_catalogue(None) is ENGLISH
     assert load_catalogue("") is ENGLISH
+@
+
+The C locale, the one a minimal system or a container runs in, is the
+absence of a language choice rather than an unknown language, so it
+means English without a warning.
+
+<<test functions>>=
+def test_the_c_locale_means_english_without_a_warning(monkeypatch):
+    monkeypatch.setattr(catalogue_module, "_WARNED_LOCALES", set())
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        for locale in ["C", "POSIX", "C.UTF-8", "c.utf8"]:
+            assert load_catalogue(locale) is ENGLISH, locale
 @
 
 An unknown locale must not stop a lecture: it gives the English
