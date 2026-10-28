@@ -1601,12 +1601,17 @@ mentipy present --store ./mentipy.json --public ssh
 
 The start-up lines --- the address, the warning to recompile after
 rewritten QR codes, the [[/active]] URL and, under [[--public ssh]],
-the admin link --- stay at the top of the screen for the whole lecture,
-since the display is redrawn as answers arrive.  The admin link is
-private, so this terminal must not be the projected screen.  If the
-port is taken, [[present]] stops with the same error as [[serve]]
-before it starts watching, and Ctrl-C stops both the watch and the
-server, closing a tunnel or port mapping on the way out.
+the admin link --- are reprinted at the top whenever the display is
+redrawn: on every new question and every refresh of a tally.  An open
+question's answers are appended below instead, so on a long transcript
+the lines scroll away until the next question.  Warnings from the
+server, such as a phone that dropped its connection, are counted in a
+status line under them instead of being printed over the display.  The
+admin link is private, so this terminal must not be the projected
+screen.  If the port is taken, [[present]] stops with one line naming
+the address, as [[serve]] does, before it starts watching.  Ctrl-C
+stops both the watch and the server, closing a tunnel or port mapping
+on the way out.
 
 Some slides carry several questions and one QR code.  Respondents reach
 the second and third question through the navigation row, so those must

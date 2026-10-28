@@ -2276,7 +2276,47 @@ def _serve_runner(
 ):
     for line in lines:
         typer.echo(line)
-    serve_http(store, host, port, **options)
+    with _reporting_bind_errors(host, port):
+        serve_http(store, host, port, **options)
+@
+
+A port that is taken, or an address the machine does not have, is the
+most common way for a start to fail, and the lecturer needs the
+address and the reason, not a traceback.  Both runners therefore turn
+a bind error into one line and exit status 1.  Only errors that come
+from the socket are turned: the bind errnos without a file name, and
+the resolver's [[gaierror]] for a host name that does not resolve.  A
+store that cannot be written also fails with an [[OSError]], possibly
+with [[EACCES]], but it names its file, and its traceback stays, since
+\enquote{cannot listen} would point the lecturer at the wrong cause.
+For [[serve]] the guard also covers [[serve_forever]], which raises
+none of these errors, since the server is already bound by then.
+
+<<imports>>=
+import errno
+import socket
+<<constants>>=
+BIND_ERRNOS = frozenset({errno.EADDRINUSE, errno.EADDRNOTAVAIL, errno.EACCES})
+<<functions>>=
+@contextmanager
+def _reporting_bind_errors(host: str, port: int):
+    try:
+        yield
+    except OSError as error:
+        if not _is_bind_error(error):
+            raise
+        typer.echo(
+            f"Error: cannot listen on {host}:{port}:"
+            f" {error.strerror or error}",
+            err=True,
+        )
+        raise typer.Exit(code=1) from error
+
+
+def _is_bind_error(error: OSError) -> bool:
+    if isinstance(error, socket.gaierror):
+        return True
+    return error.filename is None and error.errno in BIND_ERRNOS
 @
 
 The local start-up lines keep two behaviours of the old inline code.
@@ -2404,6 +2444,7 @@ wildcard bind, or the bound address itself, in the shared form of
 no admin token, so loopback works there too.
 
 <<imports>>=
+import logging
 import threading
 
 from mentipy.server import create_server
@@ -2419,31 +2460,34 @@ def _present_runner(
     pin_heat: str,
     **options,
 ):
-    server = create_server(store, host, port, **options)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        banner = "\n".join(lines)
-        typer.echo(banner)
-        console = _result_console()
-        _follow_active_question(
-            store,
-            _server_url_for(host, server.server_address[1]),
-            _watcher_factory(
+    with _reporting_bind_errors(host, port):
+        server = create_server(store, host, port, **options)
+    banner = _PresentBanner(lines)
+    with _logging_into(banner):
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            typer.echo(str(banner))
+            console = _result_console()
+            _follow_active_question(
                 store,
-                window=window,
-                pin_heat=pin_heat,
+                _server_url_for(host, server.server_address[1]),
+                _watcher_factory(
+                    store,
+                    window=window,
+                    pin_heat=pin_heat,
+                    console=console,
+                    banner=banner,
+                ),
+                interval=interval,
                 console=console,
                 banner=banner,
-            ),
-            interval=interval,
-            console=console,
-            banner=banner,
-        )
-    finally:
-        server.shutdown()
-        thread.join()
-        server.server_close()
+                keep_going=True,
+            )
+        finally:
+            server.shutdown()
+            thread.join()
+            server.server_close()
 @
 
 The watch clears the screen whenever it switches question, and on
@@ -2453,13 +2497,67 @@ the [[/active]] URL and, under [[--public ssh]], the admin link the
 lecturer needs all lecture.  They are therefore kept as a banner that
 is reprinted after every clear.  All clearing goes through one helper,
 so no clear can forget the banner; [[watch]] passes an empty banner,
-and its output stays exactly what it was.
+and its output stays exactly what it was.  An open question is the
+exception: its answers are appended without a clear, so on a long
+transcript the banner scrolls away until the next question.
+
+The server writes to the terminal too.  When a phone drops its
+connection mid-response, [[handle_error]] in the server logs a
+warning, and an SSH tunnel logs what its process says; nothing
+configures logging in the command line, so Python's last-resort
+handler would print these lines straight over the display.  Silencing
+them would hide real trouble, such as a failing tunnel.  Instead the
+banner is also a logging handler: while [[present]] runs it takes the
+records of every [[mentipy]] logger, counts them and keeps the last
+one, and its text gains a status line, reprinted with the banner.  The
+logger stops propagating meanwhile, so a handler the user configured
+on the root logger cannot print them over the display either; both
+changes are undone when [[present]] ends.
+
+<<constants>>=
+LOGGER = logging.getLogger(__name__)
+MENTIPY_LOGGER = "mentipy"
+<<functions>>=
+class _PresentBanner(logging.Handler):
+    """The start-up lines, and a status line for warnings logged since."""
+
+    def __init__(self, lines: list[str]):
+        super().__init__(logging.WARNING)
+        self.text = "\n".join(lines)
+        self.warnings = 0
+        self.last = ""
+
+    def emit(self, record: logging.LogRecord):
+        self.warnings += 1
+        self.last = " ".join(record.getMessage().split())
+
+    def __str__(self) -> str:
+        if not self.warnings:
+            return self.text
+        return (
+            f"{self.text}\n"
+            f"Warnings: {self.warnings}, the last: {self.last}"
+        )
+
+
+@contextmanager
+def _logging_into(handler: logging.Handler):
+    logger = logging.getLogger(MENTIPY_LOGGER)
+    propagate = logger.propagate
+    logger.addHandler(handler)
+    logger.propagate = False
+    try:
+        yield
+    finally:
+        logger.removeHandler(handler)
+        logger.propagate = propagate
+@
 
 <<functions>>=
-def _clear(banner: str = ""):
+def _clear(banner: str | _PresentBanner = ""):
     typer.echo(CLEAR_SCREEN, nl=False)
     if banner:
-        typer.echo(banner + "\n")
+        typer.echo(f"{banner}\n")
 @
 
 \section{Render commands}
@@ -4358,17 +4456,19 @@ def _active_state(server: str) -> _LectureState:
 \paragraph{Which server.}
 The default is the server [[mentipy serve]] would start with the same
 configuration, since the watcher normally runs on the lecture machine
-beside it: [[mentipy.host]] at [[mentipy.port]].  A wildcard bind
-([[0.0.0.0]], [[::]], or empty) listens on every interface, the
-loopback included, and the watcher asks the loopback address of the
-same family, which reaches it without a name lookup; [[localhost]]
-might resolve to the other family first.  A specific address is the
-only one the server listens on, so the watcher asks it as it is.  An
-IPv6 address goes in brackets, as a URL requires.  [[present]] uses the
-same rule for its own server (\cref{sec:present}).  [[--server]]
-reaches any other: a server
-started with [[--port]], one on another machine, or the public URL of a
-tunnel.
+beside it: [[mentipy.host]] at [[mentipy.port]].  The server is IPv4
+only: its [[ThreadingHTTPServer]] keeps the socket server's default
+address family, so there is no IPv6 wildcard to consider.  A wildcard
+bind ([[0.0.0.0]] or empty) listens on every IPv4 interface, the
+loopback included, and the watcher asks [[127.0.0.1]], which reaches it
+without a name lookup; [[localhost]] might resolve to [[::1]] first.  A
+specific address is the only one the server listens on, so the watcher
+asks it as it is.  An IPv6 address there cannot be bound by this
+server, but it is still put in brackets, so that the watcher reports
+the refused connection instead of a malformed URL.  [[present]] uses
+the same rule for its own server (\cref{sec:present}).  [[--server]]
+reaches any other: a server started with [[--port]], one on another
+machine, or the public URL of a tunnel.
 
 <<constants>>=
 WATCH_SERVER_OPTION = typer.Option(
@@ -4377,12 +4477,12 @@ WATCH_SERVER_OPTION = typer.Option(
     metavar="URL",
     help=(
         "Server whose active question a watch without PREFIX follows."
-        f" Defaults to {HOST_CONFIG} (its loopback address when it"
-        f" binds every interface) at {PORT_CONFIG}."
+        f" Defaults to {HOST_CONFIG} (127.0.0.1 when it binds every"
+        f" interface) at {PORT_CONFIG}."
     ),
     show_default=False,
 )
-LOOPBACK_FOR_WILDCARD = {"": "127.0.0.1", "0.0.0.0": "127.0.0.1", "::": "::1"}
+LOOPBACK_FOR_WILDCARD = {"": "127.0.0.1", "0.0.0.0": "127.0.0.1"}
 <<functions>>=
 def _default_watch_server() -> str:
     return _server_url_for(
@@ -4482,6 +4582,16 @@ open answers appended, exactly as with a prefix.  Comparing the answers
 rather than reacting to each one is what keeps the waiting line and the
 error message from repeating every [[--interval]] seconds.
 
+Under [[present]] the loop shares its process with the server, and an
+exception escaping it would end both: one broken frame would take the
+poll away from the whole room.  With [[keep_going]] a failure in a
+tick is logged instead, which puts it in [[present]]'s banner, and the
+loop forgets what it showed, so the next tick starts the display
+afresh rather than refreshing a watcher in an unknown state.  A bare
+[[watch]] runs alone and keeps failing loudly, since nothing else
+depends on it.  [[KeyboardInterrupt]] is no [[Exception]], so Ctrl-C
+still ends both.
+
 An unreachable server is a normal state, not an error.  Starting the
 watcher before the server is the natural order on the lecture morning,
 and a server restarted mid-lecture comes back a moment later with every
@@ -4505,24 +4615,33 @@ def _follow_active_question(
     *,
     interval: float,
     console: Console,
-    banner: str = "",
+    banner: str | _PresentBanner = "",
+    keep_going: bool = False,
 ):
     shown = None
     watcher = None
     while True:
-        state = _active_state(server)
-        if state != shown or (state.kind == "question" and watcher is None):
-            shown = state
-            watcher = _switch_to(
-                state,
-                store,
-                server,
-                watcher_for,
-                console=console,
-                banner=banner,
-            )
-        elif watcher is not None:
-            watcher.refresh()
+        try:
+            state = _active_state(server)
+            if state != shown or (
+                state.kind == "question" and watcher is None
+            ):
+                shown = state
+                watcher = _switch_to(
+                    state,
+                    store,
+                    server,
+                    watcher_for,
+                    console=console,
+                    banner=banner,
+                )
+            elif watcher is not None:
+                watcher.refresh()
+        except Exception as error:
+            if not keep_going:
+                raise
+            LOGGER.error("watch failed: %s", error)
+            shown = watcher = None
         time.sleep(interval)
 
 
@@ -4533,7 +4652,7 @@ def _switch_to(
     watcher_for,
     *,
     console: Console,
-    banner: str = "",
+    banner: str | _PresentBanner = "",
 ) -> _QuestionWatcher | None:
     if state.kind == "unreachable":
         _print_plain(
@@ -4950,7 +5069,6 @@ def test_watch_asks_the_loopback_address_at_the_configured_port(
         ("127.0.0.1", "127.0.0.1"),
         ("::1", "[::1]"),
         ("0.0.0.0", "127.0.0.1"),
-        ("::", "[::1]"),
         ("", "127.0.0.1"),
     ],
 )
@@ -6250,6 +6368,16 @@ def test_present_serves_and_follows_the_lecture(tmp_path, monkeypatch):
     prefix = store.register(MCQuestion("Pick one", ("A", "B")))
     store.record(store.resolve(prefix), 0)
     monkeypatch.setattr("mentipy.cli.CLEAR_SCREEN", "[clear]")
+    closed = []
+    close = mentipy.server.ThreadingHTTPServer.server_close
+
+    def spy_close(self):
+        closed.append(self.server_address[1])
+        close(self)
+
+    monkeypatch.setattr(
+        mentipy.server.ThreadingHTTPServer, "server_close", spy_close
+    )
     _play_the_lecture(
         monkeypatch,
         lambda: None,
@@ -6278,16 +6406,206 @@ def test_present_serves_and_follows_the_lecture(tmp_path, monkeypatch):
     frames = out.split("[clear]")[1:]
     assert len(frames) >= 2
     assert all(frame.startswith(f"Serving at {server}\n") for frame in frames)
+    assert closed == [port]
     with pytest.raises(ConnectionRefusedError):
         socket.create_connection(("127.0.0.1", port), timeout=1)
 @
 
-A port that is taken ends [[present]] with the bind error before the
-watch starts, as it ends [[serve]].
+The display options reach the watcher.  The window is checked above
+through the counts; the heat channel shows only in colours, which a
+test console does not print, so a spy on the renderer reads the
+channel it is handed.
 
 <<test functions>>=
-def test_present_stops_with_the_bind_error_before_watching(
+def test_present_hands_the_pin_heat_channel_to_the_watch(
     tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    port = _free_port()
+    server = f"http://127.0.0.1:{port}"
+    set_setting("base_url", server)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+    channels = []
+    render = mentipy.cli._render_results
+
+    def spy_render(results, *, console, pin_heat):
+        channels.append(pin_heat)
+        render(results, console=console, pin_heat=pin_heat)
+
+    monkeypatch.setattr("mentipy.cli._render_results", spy_render)
+    _play_the_lecture(monkeypatch, lambda: _open_for_the_room(server, prefix))
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "present",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--store",
+            str(store.path),
+            "--pin-heat",
+            "foreground",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert channels and set(channels) == {"foreground"}
+@
+
+A phone that drops its connection makes the server log a warning.
+Nothing configures logging in the command line, so Python's last-resort
+handler would print it straight over the display.  The test drops real
+connections: it asks for a long results page and resets the socket at
+once, so the server's write fails.  The page's answers are written
+into the store in one go, since recording them one by one rewrites the
+file each time.  The lecture then moves to a second
+question, whose frame must report the warnings in the banner's status
+line, and no warning may appear anywhere else in the output.  Nor
+may it reach a handler on the root logger, here pytest's capture,
+which a user's logging configuration could have put there.  Afterwards
+the [[mentipy]] logger is as it was.
+
+<<test functions>>=
+def _drop_connections(server, path, *, attempts=40):
+    parts = urllib.parse.urlsplit(server)
+    for _ in range(attempts):
+        connection = socket.create_connection(
+            (parts.hostname, parts.port), timeout=5
+        )
+        connection.sendall(
+            f"GET {path} HTTP/1.1\r\nHost: x\r\n\r\n".encode()
+        )
+        connection.setsockopt(
+            socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+        )
+        connection.close()
+
+
+def test_present_keeps_server_warnings_in_the_banner(
+    tmp_path, monkeypatch, caplog
+):
+    caplog.set_level(logging.WARNING)
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    port = _free_port()
+    server = f"http://127.0.0.1:{port}"
+    set_setting("base_url", server)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    long = store.register(OpenQuestion("Comment?"))
+    store.record(store.resolve(long), "an answer " * 10)
+    data = store._data()
+    answers = data["answers"][store.resolve(long)]
+    answers.extend(dict(answers[0]) for _ in range(1500))
+    store._write(data)
+    short = store.register(MCQuestion("Pick one", ("A", "B")))
+    monkeypatch.setattr("mentipy.cli.CLEAR_SCREEN", "[clear]")
+    real_sleep = time.sleep
+
+    def drop_then_wait():
+        _drop_connections(server, f"/{long}/results?window=all")
+        real_sleep(0.5)
+
+    _play_the_lecture(
+        monkeypatch,
+        drop_then_wait,
+        lambda: _open_for_the_room(server, short),
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "present",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--store",
+            str(store.path),
+            "--no-lock",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    last_frame = result.output.split("[clear]")[-1]
+    assert re.search(r"^Warnings: \d+, the last: ignored network error",
+                     last_frame, re.M)
+    for line in result.output.splitlines():
+        if "ignored network error" in line:
+            assert line.startswith("Warnings: ")
+    assert not caplog.records
+    mentipy_logger = logging.getLogger("mentipy")
+    assert mentipy_logger.handlers == []
+    assert mentipy_logger.propagate is True
+@
+
+A failure inside the watch must not take the server down with it: the
+room depends on the server, the lecturer only on the display.  The
+test makes one refresh of an open question fail.  The loop reports the
+error in the banner's status line and starts the display afresh: an
+open question's refresh never clears the screen, so only a restart
+puts the heading and the status line in a new frame.  The server still
+answers afterwards.
+
+<<test functions>>=
+def test_present_survives_a_failing_refresh(tmp_path, monkeypatch):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    port = _free_port()
+    server = f"http://127.0.0.1:{port}"
+    set_setting("base_url", server)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    monkeypatch.setattr("mentipy.cli.CLEAR_SCREEN", "[clear]")
+    refresh = mentipy.cli._QuestionWatcher.refresh
+    failures = []
+
+    def fail_once(self):
+        if not failures:
+            failures.append(True)
+            raise RuntimeError("the display broke")
+        refresh(self)
+
+    monkeypatch.setattr(mentipy.cli._QuestionWatcher, "refresh", fail_once)
+    _play_the_lecture(
+        monkeypatch,
+        lambda: _open_for_the_room(server, prefix),
+        lambda: None,
+        lambda: None,
+        lambda: _open_for_the_room(server, prefix),
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "present",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--store",
+            str(store.path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert failures == [True]
+    last_frame = result.output.split("[clear]")[-1]
+    assert "Warnings: 1, the last: watch failed: the display broke" in (
+        last_frame
+    )
+    assert "Comment?" in last_frame
+@
+
+A port that is taken ends both [[serve]] and [[present]] with one line
+naming the address, not a traceback, and [[present]] never starts the
+watch.  The holder is a plain listening socket, so the real server's
+bind is what fails.
+
+<<test functions>>=
+@pytest.mark.parametrize("command", ["serve", "present"])
+def test_a_taken_port_ends_the_command_with_one_line(
+    tmp_path, monkeypatch, command
 ):
     monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
     _stop_at_the_first_sleep(monkeypatch)
@@ -6299,7 +6617,7 @@ def test_present_stops_with_the_bind_error_before_watching(
         result = CliRunner().invoke(
             cli,
             [
-                "present",
+                command,
                 "--host",
                 "127.0.0.1",
                 "--port",
@@ -6309,9 +6627,54 @@ def test_present_stops_with_the_bind_error_before_watching(
             ],
         )
 
-    assert result.exit_code != 0
-    assert isinstance(result.exception, OSError)
+    assert result.exit_code == 1
+    assert (
+        f"cannot listen on 127.0.0.1:{port}: Address already in use"
+        in result.output
+    )
+    assert "Traceback" not in result.output
     assert "No question is open yet" not in result.output
+@
+
+Only errors from the socket become the one line.  The classification
+is pure, so it is tested on constructed errors: a store that cannot be
+written fails with [[EACCES]] too, but names its file.  Through the
+command, an error that is not about binding still ends [[serve]] with
+its traceback; the server call is stubbed to raise it, since no real
+server fails that way on demand.
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    "error, about_binding",
+    [
+        (OSError(errno.EADDRINUSE, "Address already in use"), True),
+        (OSError(errno.EADDRNOTAVAIL, "Cannot assign"), True),
+        (socket.gaierror(-2, "Name or service not known"), True),
+        (PermissionError(errno.EACCES, "Denied", "m.json"), False),
+        (OSError(errno.EIO, "Input/output error"), False),
+    ],
+    ids=["in-use", "not-available", "unresolved", "store", "io"],
+)
+def test_is_bind_error_tells_the_socket_from_the_store(error, about_binding):
+    assert mentipy.cli._is_bind_error(error) is about_binding
+
+
+def test_serve_keeps_the_traceback_of_other_errors(tmp_path, monkeypatch):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("base_url", "http://127.0.0.1:8080")
+
+    def failing_serve(*_args, **_kwargs):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr("mentipy.cli.serve_http", failing_serve)
+
+    result = CliRunner().invoke(
+        cli, ["serve", "--store", str(tmp_path / "mentipy.json")]
+    )
+
+    assert isinstance(result.exception, OSError)
+    assert result.exception.errno == errno.EIO
+    assert "cannot listen" not in result.output
 @
 
 Under [[--public]] the exposure is stubbed, as in the serve tests,
@@ -6870,15 +7233,19 @@ def test_url_help_mentions_the_relevant_config_keys():
 
 <<test [[cli.py]]>>=
 from contextlib import ExitStack, contextmanager
+import errno
 import http.client
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import io
 import json
+import logging
 import mentipy.cli
 import pytest
 import re
 import socket
+import struct
 import threading
+import time
 from types import SimpleNamespace
 import typer
 import urllib.parse
@@ -6887,6 +7254,7 @@ from typer.testing import CliRunner
 
 from mentipy.cli import *
 from mentipy.questions import *
+import mentipy.server
 from mentipy.server import create_server
 from mentipy.store import *
 

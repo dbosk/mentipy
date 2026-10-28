@@ -115,9 +115,12 @@ mentipy serve --store ./mentipy.json
 For a lecture, `mentipy present` starts the same server and, in the same
 terminal, follows the question the lecturer opens (as a bare
 `mentipy watch` does, see below). It takes all of `serve`'s options and
-`watch`'s `--interval`, `--window` and `--pin-heat`, and it keeps the
-start-up lines (address, QR warning, admin link) on screen above the
-answers. Keep that terminal off the projector:
+`watch`'s `--interval`, `--window` and `--pin-heat`. It reprints the
+start-up lines (address, QR warning, admin link) and a count of server
+warnings at the top whenever it redraws, that is on every new question
+and every refresh of a tally; an open question's answers are appended
+below instead, so there they can scroll away. Keep that terminal off
+the projector:
 
 ```sh
 mentipy present --store ./mentipy.json
