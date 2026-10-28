@@ -446,6 +446,8 @@ def test_compiled_slides_keep_the_english_and_take_a_deck_override(
         ranking("Q7", ["A", "B", "C"], top_n=2, **common),
         pin_text("Q8", "x = 1", **common),
         pin_text("Q9", "y = 2", max_pins=3, allow_comment=True, **common),
+        word_cloud("Q10", split_words=False, **common),
+        word_cloud("Q11", separators=",;", **common),
     ])
     for phrase in [
         "Choose exactly one:",
@@ -454,6 +456,8 @@ def test_compiled_slides_keep_the_english_and_take_a_deck_override(
         "Range 1–5 Low never High always",
         "Type Word-cloud (free-text) Limit 280 characters"
         " Min word length 3",
+        "Mode Whole answer counts as one entry",
+        "Limit 280 characters Split on",
         "Rank every option from most to least preferred:",
         "Rank your top 2:",
         "Tap the target to place your pin.",

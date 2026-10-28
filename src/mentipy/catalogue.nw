@@ -314,6 +314,11 @@ way, since the verb and its agreement move, so each route has a whole
 sentence.  \enquote{Localhost} becomes \enquote{lokalt på servern}, the
 place a respondent can understand.
 
+The few plain HTTP errors the server sends itself, a path that leads
+nowhere and an upload too large to accept, get a page of their own too
+rather than the standard library's English one, titled with the status
+code, which reads the same in every language.
+
 A rejected answer names what was wrong with it, so the parser's
 reasons are messages too.  Only a request no form would send (a crafted
 body, a number that is not one) gets the generic
@@ -362,6 +367,15 @@ body, a number that is not one) gets the generic
     "Ingen fråga matchar {prefix}.",
 ),
 "error.invalid": ("Invalid answer", "Ogiltigt svar"),
+"error.status": ("Error {code}", "Fel {code}"),
+"error.not_found": (
+    "There is nothing at this address.",
+    "Det finns inget på den här adressen.",
+),
+"error.too_large": (
+    "The answer is too large to send.",
+    "Svaret är för stort för att skickas.",
+),
 "answer.unreadable": (
     "the answer could not be read",
     "svaret kunde inte läsas",
@@ -477,8 +491,8 @@ escape function and walks the message with [[string.Formatter]]: the
 message's own text is escaped, and each field is replaced by its
 fragment, which is markup already.  A number needs no escaping, and its
 format specification ([[{percentage:.0f}]]) still applies.  The same
-walk serves the slide, with LaTeX's escape function and [[#1]] as the
-fragment (\cref{sec:slide-labels}).
+walk serves the slide, with LaTeX's escape function and
+[[\mentipynumber{}]] as the fragment (\cref{sec:slide-labels}).
 
 <<classes>>=
 @dataclass(frozen=True)

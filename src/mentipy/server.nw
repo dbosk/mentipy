@@ -4698,6 +4698,30 @@ def _redirect(self, location: str, *, headers: dict[str, str] | None = None):
     self.end_headers()
 @
 
+The routes' own HTTP errors, a 404 for a path that leads nowhere and a
+413 for an oversized answer, go through [[_send_error_page]] rather
+than the standard library's [[send_error]], whose page is English and
+would break the server's language on exactly the page a lost
+respondent sees.  The page is titled with the status code and says what
+happened in the server's language.  The standard library's own errors,
+for requests too malformed to be routed at all, keep its page: no
+browser sends them.
+
+<<constants>>=
+ERROR_PAGE_REASONS = {
+    HTTPStatus.NOT_FOUND: "error.not_found",
+    HTTPStatus.REQUEST_ENTITY_TOO_LARGE: "error.too_large",
+}
+<<mentipy handler helpers>>=
+def _send_error_page(self, status: HTTPStatus):
+    title = catalogue("error.status", code=status.value)
+    reason = escape(catalogue(ERROR_PAGE_REASONS[status]))
+    self._send(
+        status,
+        _page(title, title, f"<p>{reason}</p>", catalogue=catalogue),
+    )
+@
+
 A presenter authenticates by presenting [[admin_token]] either as an
 [[?admin=...]] query parameter on the link the CLI prints, or as a cookie the
 server set on a previous authenticated request.  The query form is what the
@@ -4992,7 +5016,7 @@ def do_GET(self):
 
     segments = [segment for segment in path.split("/") if segment]
     if not segments:
-        self.send_error(HTTPStatus.NOT_FOUND)
+        self._send_error_page(HTTPStatus.NOT_FOUND)
         return
 
     if segments[0] == "active":
@@ -5085,7 +5109,7 @@ def _handle_question_get(self, segments: list[str], query: str):
         return
 
     if len(segments) != 1:
-        self.send_error(HTTPStatus.NOT_FOUND)
+        self._send_error_page(HTTPStatus.NOT_FOUND)
         return
 
     full_hash = self._resolve_for_respondent(segments[0])
@@ -5188,7 +5212,7 @@ if full_hash is None:
     return
 next_hash = store.next_question(full_hash)
 if next_hash is None or not store.question(full_hash).next:
-    self.send_error(HTTPStatus.NOT_FOUND)
+    self._send_error_page(HTTPStatus.NOT_FOUND)
     return
 location = None
 if (
@@ -5221,12 +5245,12 @@ if full_hash is None:
     return
 question = store.question(full_hash)
 if not isinstance(question, PinImageQuestion):
-    self.send_error(HTTPStatus.NOT_FOUND)
+    self._send_error_page(HTTPStatus.NOT_FOUND)
     return
 data = store.load_image(question.image_sha256)
 mime = sniff_image_mime(data) if data is not None else None
 if data is None or mime is None:
-    self.send_error(HTTPStatus.NOT_FOUND)
+    self._send_error_page(HTTPStatus.NOT_FOUND)
     return
 self._send_bytes(
     HTTPStatus.OK,
@@ -5262,7 +5286,7 @@ if full_hash is None:
 item = _context_download(store.question(full_hash), segments[2])
 data = store.load_image(item.sha256) if item is not None else None
 if data is None:
-    self.send_error(HTTPStatus.NOT_FOUND)
+    self._send_error_page(HTTPStatus.NOT_FOUND)
     return
 content_type, _encoding = mimetypes.guess_type(item.filename)
 self._send_bytes(
@@ -5359,7 +5383,7 @@ def do_POST(self):
     if len(segments) == 2 and segments[1] == "reopen":
         <<reopen the question>>
     if len(segments) != 1:
-        self.send_error(HTTPStatus.NOT_FOUND)
+        self._send_error_page(HTTPStatus.NOT_FOUND)
         return
 
     full_hash = self._resolve(segments[0])
@@ -5369,7 +5393,7 @@ def do_POST(self):
     question = store.question(full_hash)
     length = int(self.headers.get("Content-Length", "0"))
     if length > _max_request_body(question):
-        self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+        self._send_error_page(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
         return
 
     raw_body = self.rfile.read(length)
@@ -5594,8 +5618,17 @@ left in the page's visible text.  Visible text means the markup without
 its tags and script, since class names such as [[status-open]] and
 URLs such as [[/results]] are English by design.  The lecturer's own
 words are not translated: one option is literally \enquote{Submit},
-and it must survive, which is why the leak check removes it first.
-Every page also declares its language.
+and it must survive, which is why the leak check first removes that
+option from the three places it appears: the form's label, the bar
+chart and the mode callout.  Removing the bare word instead would hide
+an English Submit button, so every form page is also checked for the
+Swedish button.  Every page also declares its language.
+
+The walk covers the empty results pages, fetched before the answers,
+and every refusal, requested as a respondent after the lecturer has
+opened the questions, since a closed question shows the waiting page
+before its results route could refuse.  The ambiguous-prefix page needs
+two hashes with a common prefix and has a test of its own below.
 
 <<test functions>>=
 SWEDISH = load_catalogue("sv")
@@ -5607,9 +5640,9 @@ def _visible_text(page):
 
 
 def _english_leaks(page, *, keep=()):
+    for markup in keep:
+        page = page.replace(markup, "")
     text = _visible_text(page)
-    for word in keep:
-        text = text.replace(word, "")
     leaks = []
     for key in MESSAGES:
         if ENGLISH.messages[key] == SWEDISH.messages[key]:
@@ -5642,6 +5675,7 @@ def test_a_swedish_server_speaks_swedish_on_every_page(tmp_path):
                [{"x": 0.5, "y": 0.5, "comment": "här"}]]
     switch = {"remote": True}
     pages = {}
+    option = ["> Submit</label>", "<strong>Submit</strong>", ">Submit</span>"]
 
     with _running_server(store, locale="sv", remote=switch) as port:
         pages["not started"] = _request(port, "GET", "/active")[1]
@@ -5649,8 +5683,17 @@ def test_a_swedish_server_speaks_swedish_on_every_page(tmp_path):
         pages["forbidden"] = _request(port, "GET", "/")[1]
         pages["unknown"] = _request(port, "GET", "/ffffffffff")[1]
         switch["remote"] = False
+        pages["not found"] = _request(port, "GET", f"/{prefixes[0]}/a/b")[1]
+        pages["too large"] = _request(
+            port, "POST", f"/{prefixes[0]}",
+            body="x" * (MIN_FORM_BODY_BYTES + 1),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )[1]
         for prefix, full_hash, answer in zip(prefixes, hashes, answers):
             pages[f"form {prefix}"] = _request(port, "GET", f"/{prefix}")[1]
+            pages[f"empty {prefix}"] = _request(
+                port, "GET", f"/{prefix}/results"
+            )[1]
             store.record(full_hash, answer)
             pages[f"results {prefix}"] = _request(
                 port, "GET", f"/{prefix}/results"
@@ -5665,16 +5708,43 @@ def test_a_swedish_server_speaks_swedish_on_every_page(tmp_path):
         _request(port, "POST", f"/{prefixes[1]}/skip")
         pages["skipped"] = _request(port, "GET", f"/{prefixes[1]}/results")[1]
         pages["index"] = _request(port, "GET", "/")[1]
+        switch["remote"] = True
+        target = f"/{prefixes[2]}"
+        for name, method, path in [
+            ("results", "GET", f"{target}/results"),
+            ("export", "GET", f"{target}/results.json"),
+            ("skip", "POST", f"{target}/skip"),
+            ("reopen", "POST", f"{target}/reopen"),
+        ]:
+            pages[f"refused {name}"] = _request(port, method, path)[1]
 
     for name, page in pages.items():
         assert '<html lang="sv">' in page, name
-        assert _english_leaks(page, keep=["Submit"]) == [], name
+        assert _english_leaks(page, keep=option) == [], name
+    for prefix in prefixes:
+        assert '<button type="submit">Skicka</button>' in (
+            pages[f"form {prefix}"]
+        ), prefix
+    pin_form = pages[f"form {prefixes[5]}"]
+    for key in ["form.pin_remove", "form.pin_comment"]:
+        text = SWEDISH(key, n="{n}")
+        assert server_module._script_string(text) in pin_form, key
     joined = "".join(pages.values())
     for swedish in [
         "Föreläsningen har inte börjat än.",
         "Läraren har inte öppnat frågan än.",
         "Försök igen",
         "Frågelistan finns bara lokalt på servern",
+        "Resultaten finns bara lokalt på servern",
+        "Resultatexporten finns bara lokalt på servern",
+        "Att hoppa över frågor går bara lokalt på servern",
+        "Att öppna frågor igen går bara lokalt på servern",
+        "Fel 404",
+        "Det finns inget på den här adressen.",
+        "Fel 413",
+        "Svaret är för stort för att skickas.",
+        "Inga fritextsvar än.",
+        "Inga svar än.",
         "Okänd fråga",
         "Skicka",
         "Lägst: aldrig",
@@ -5705,6 +5775,33 @@ def test_a_swedish_server_speaks_swedish_on_every_page(tmp_path):
     ]:
         assert swedish in joined, swedish
     assert "Submit</label>" in pages[f"form {prefixes[0]}"]
+@
+
+The ambiguous-prefix page lists the candidates, so it needs two
+questions whose hashes share a prefix; as in the English test of that
+page further down, the hash is replaced to make one.
+
+<<test functions>>=
+def test_a_swedish_server_lists_an_ambiguous_prefix_in_swedish(
+    tmp_path, monkeypatch
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    hashes = {"första": "abcd" + "1" * 60, "andra": "abce" + "2" * 60}
+    monkeypatch.setattr(
+        "mentipy.store.question_hash",
+        lambda question: hashes[question.text],
+    )
+    store.register(OpenQuestion("första"))
+    store.register(OpenQuestion("andra"))
+
+    with _running_server(store, locale="sv") as port:
+        response, page = _request(port, "GET", "/abc")
+
+    assert response.status == 300
+    assert '<html lang="sv">' in page
+    assert "<h1>Tvetydigt prefix</h1>" in page
+    assert "<p>abc matchar flera frågor.</p>" in page
+    assert _english_leaks(page) == []
 @
 
 The pin form's two script strings are the one place a catalogue
