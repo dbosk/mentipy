@@ -1726,18 +1726,33 @@ replaced by new compile-time placeholders.
 
 Mentipy's own words, the instructions on the slide and the buttons,
 headings and waiting pages on the phone, come in English and in
-Swedish.  One setting chooses the language for both surfaces:
+Swedish.  A deck in Swedish says so once, in the shared block that
+every question of the deck uses:
+
+\begin{minted}{python}
+common = {"store": Store("mentipy.json"), "locale": "sv"}
+mc("Vad skriver programmet ut?", ["1", "2"], **common)
+\end{minted}
+
+Every helper, and every [[mentipy render]] subcommand as
+[[--locale]], takes the locale.  It sets the slide's labels, and the
+helper records it with the question, so the question's web pages are
+in Swedish too, wherever the deck is served from: a deck compiled on a
+laptop configured for Swedish and served from a machine configured for
+English still answers in Swedish.  A deck that says nothing uses the
+configured default, then English:
 
 \begin{minted}{text}
 mentipy config mentipy.locale --set sv
 \end{minted}
 
-The slides take the setting when PythonTeX runs the helpers, and the
-web pages when the server starts.  PythonTeX reruns a block only when
-its code has changed, so after changing the locale, remove PythonTeX's
-output or build with [[pythontex --rerun=always]]; otherwise the slides
-keep their earlier labels.  A guest lecture in English on the same machine
-overrides it for one run, without touching the configuration:
+The default also chooses the language of the pages not tied to one
+question, the lecturer's index and the waiting page at
+[[/active]].  PythonTeX reruns a block only when its code has changed,
+so after changing the configured default, remove PythonTeX's output or
+build with [[pythontex --rerun=always]]; otherwise the slides keep their
+earlier labels.  A guest lecture in English overrides every page's
+language for one run, recorded or not:
 
 \begin{minted}{text}
 mentipy serve --locale en
