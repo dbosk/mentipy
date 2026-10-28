@@ -157,7 +157,8 @@ Unix systems, the freedesktop.org launcher that desktops provide;
 [[open]] on macOS, which has no [[xdg-open]]; and [[explorer]] on
 Windows, which opens a URL in the default browser.  The setting
 [[mentipy.open_command]] replaces the default, for a particular browser
-or a window of its own; [[present --open-with]] replaces both for one
+or a window of its own, and an empty value or [[none]] turns the step
+off on the machine; [[present --open-with]] replaces both for one
 run.
 
 The default is resolved when it is used, by one small function, rather

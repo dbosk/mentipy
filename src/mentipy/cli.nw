@@ -2463,6 +2463,11 @@ def present(
     open_command = (
         _chosen_open_command(open_with) if open_browser else None
     )
+    startup_warnings = (
+        ["--open-with is ignored with --no-open"]
+        if open_with is not None and not open_browser
+        else []
+    )
 
     def runner(lines, store, host, port, **options):
         _present_runner(
@@ -2474,6 +2479,7 @@ def present(
             window=window,
             pin_heat=heat_mode,
             open_command=open_command,
+            startup_warnings=startup_warnings,
             **options,
         )
 
@@ -2527,6 +2533,7 @@ def _present_runner(
     window: str,
     pin_heat: str,
     open_command: str | None,
+    startup_warnings: list[str],
     **options,
 ):
     with _reporting_bind_errors(host, port):
@@ -2537,10 +2544,14 @@ def _present_runner(
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
+            for warning in startup_warnings:
+                LOGGER.warning("%s", warning)
             if open_command is not None:
-                _open_browser(
+                _open_admin_index(
                     open_command,
-                    _admin_index_url(server_url, options.get("admin_token")),
+                    host,
+                    server_url,
+                    options.get("admin_token"),
                 )
             typer.echo(str(banner))
             console = _result_console()
@@ -2571,26 +2582,51 @@ lecturer's browser, so the lecture starts with one command and the
 results pages are a click away.  The order is the point: after the
 bind, so a port in use never sends the browser to a server that is not
 there, and before the watch, which then runs until Ctrl-C.  The URL is
-the loopback address of the server's own index, the address the watch
-asks, not the public URL: it needs no round trip through a tunnel, and
-it works before anyone outside can reach the server.  Under
-[[--public ssh]] a loopback request is no longer admin, so the URL
-carries the run's token; the server answers it as it answers the admin
-link in the banner, by setting the admin cookie and redirecting to the
-bare index, so the token leaves the address bar at once.
+the server's own index at the address the watch asks
+(\cref{sec:watch-active}), not the public URL: it needs no round trip
+through a tunnel, and it works before anyone outside can reach the
+server.  For a wildcard or loopback bind that address is a loopback
+one, and the index treats a request from loopback as the lecturer's.
+A server bound to one other address is reached through that address,
+and its index refuses a request from there with 403, so [[present]]
+does not open it; a banner warning names the URL and says why.  Under
+[[--public ssh]] a loopback request is no longer admin either, so the
+URL carries the run's token, which makes any address admin; the server
+answers it as it answers the admin link in the banner, by setting the
+admin cookie and redirecting to the bare index, so the token leaves
+the address bar at once.  The token does pass through the opener's
+command line, where other users of the machine can read it, so on a
+shared machine a lecture under [[--public ssh]] should use
+[[--no-open]].
 
 The command comes from [[--open-with]], else from
 [[mentipy.open_command]], else from the platform's default
 (\cref{sec:open-command} in the store); [[--no-open]] skips the step,
-for a lecturer whose browser is already open on the index.  The
-command is split as a shell would split it, so a browser with options
-fits in one setting, and a [[{url}]] in it marks where the URL goes,
-for the browsers that want it inside an option; without one, the URL
-is the last argument.  The process is started and left alone: its
-input and output go to the null device, so it cannot write over the
-display, and it runs in a session of its own, so the terminal's Ctrl-C
-does not reach it and a browser that stays running cannot hold
-[[present]] up.  [[present]] never waits for it.
+for a lecturer whose browser is already open on the index.  An empty
+[[mentipy.open_command]], or [[none]], makes [[--no-open]] permanent on
+a machine.  [[--open-with]] together with [[--no-open]] contradicts
+itself; [[--no-open]] wins, and a banner warning says the command was
+ignored.
+
+The command is split as a shell would split it, so a browser with
+options fits in one setting, and a [[{url}]] in it marks where the URL
+goes, for the browsers that want it inside an option; without one, the
+URL is the last argument.  On Windows the POSIX rules would read the
+backslashes of a path as escapes and turn [[C:\Users\me]] into
+[[C:Usersme]], so there the split keeps backslashes and quotes, and
+one pair of quotes around a token is then removed: a path with spaces
+is written in quotes, one without may stand bare.
+
+The process is started and left alone: its input and output go to the
+null device, so it cannot write over the display, and it is detached
+from the terminal, so the terminal's Ctrl-C does not reach it.  On
+POSIX systems it runs in a session of its own; on Windows, where there
+are no sessions, it gets a process group of its own, which Ctrl-C
+does not reach, and no console.  [[present]] never waits for it in its
+own thread, so a browser that stays running cannot hold it up; a
+daemon thread waits for it instead, so that an opener that exits at
+once, as [[xdg-open]] does once it has handed the URL on, is reaped
+rather than left as a zombie for the rest of the lecture.
 
 A command that cannot be started, one that does not exist or does not
 parse, is no reason to stop the lecture.  It is logged as a warning,
@@ -2616,10 +2652,40 @@ OPEN_WITH_OPTION = typer.Option(
     show_default=False,
 )
 <<functions>>=
-def _chosen_open_command(open_with: str | None) -> str:
+def _chosen_open_command(open_with: str | None) -> str | None:
     if open_with is not None:
         return open_with
-    return get_setting(OPEN_COMMAND_CONFIG) or default_open_command()
+    configured = get_setting(OPEN_COMMAND_CONFIG)
+    if configured is None:
+        return default_open_command()
+    if configured.strip().lower() in OPEN_COMMAND_OFF:
+        return None
+    return configured
+
+
+def _open_admin_index(
+    command: str, host: str, server_url: str, admin_token: str | None
+) -> None:
+    url = _admin_index_url(server_url, admin_token)
+    if admin_token is None and not _reached_through_loopback(host):
+        LOGGER.warning(
+            "not opening %s: the server listens on %s only, and its index"
+            " is admin only for a request from loopback; bind 127.0.0.1"
+            " or 0.0.0.0 to have it opened",
+            url,
+            host,
+        )
+        return
+    _open_browser(command, url)
+
+
+def _reached_through_loopback(host: str) -> bool:
+    if host in LOOPBACK_FOR_WILDCARD:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host == "localhost"
 
 
 def _admin_index_url(server_url: str, admin_token: str | None) -> str:
@@ -2630,12 +2696,12 @@ def _admin_index_url(server_url: str, admin_token: str | None) -> str:
 
 def _open_browser(command: str, url: str) -> None:
     try:
-        subprocess.Popen(
+        process = subprocess.Popen(
             _browser_argv(command, url),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            **_detached_from_the_terminal(),
         )
     except (OSError, ValueError) as error:
         LOGGER.warning(
@@ -2643,15 +2709,37 @@ def _open_browser(command: str, url: str) -> None:
             command or "an empty command",
             error,
         )
+        return
+    threading.Thread(target=process.wait, daemon=True).start()
+
+
+def _detached_from_the_terminal() -> dict:
+    if sys.platform == "win32":
+        return {
+            "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "DETACHED_PROCESS", 0)
+        }
+    return {"start_new_session": True}
 
 
 def _browser_argv(command: str, url: str) -> list[str]:
-    argv = shlex.split(command)
+    if sys.platform == "win32":
+        argv = [_unquoted(arg) for arg in shlex.split(command, posix=False)]
+    else:
+        argv = shlex.split(command)
     if not argv:
         raise ValueError("no command to run")
     if any("{url}" in arg for arg in argv):
         return [arg.replace("{url}", url) for arg in argv]
     return [*argv, url]
+
+
+def _unquoted(arg: str) -> str:
+    if len(arg) >= 2 and arg[0] == arg[-1] and arg[0] in "\"'":
+        return arg[1:-1]
+    return arg
+<<constants>>=
+OPEN_COMMAND_OFF = ("", "none")
 <<imports>>=
 import shlex
 @
@@ -7093,18 +7181,26 @@ def test_present_serves_pages_in_the_chosen_locale(tmp_path, monkeypatch):
 
 The browser command is replaced by a spy, since a test must not open
 windows on the machine that runs it.  The spy records the argument
-list and the keywords of every process [[present]] starts, checks that
-the server already listens when it is called, and fails if anyone
-waits for the process: [[present]] must go on to the watch at once.
-The rest of the run is real, as in the tests above.
+list and the keywords of every process [[present]] starts, and checks
+that the server already listens when it is called.  Its [[wait]]
+behaves like a browser that keeps running: it records the thread that
+waits and blocks until the test releases it, so a [[present]] that
+waited in its own thread would never finish.  The rest of the run is
+real, as in the tests above.
 
 <<test functions>>=
 class _BrowserSpy:
     calls = []
+    waiters = []
+    waited = threading.Event()
+    released = threading.Event()
 
     def __init__(self, argv, **options):
-        url = argv[-1] if "://" in argv[-1] else None
-        parts = urllib.parse.urlsplit(url or "http://127.0.0.1:1")
+        url = next(
+            (arg[arg.index("http://") :] for arg in argv if "http://" in arg),
+            "http://127.0.0.1:1",
+        )
+        parts = urllib.parse.urlsplit(url)
         with socket.socket() as probe:
             listening = probe.connect_ex((parts.hostname, parts.port)) == 0
         _BrowserSpy.calls.append(
@@ -7112,16 +7208,24 @@ class _BrowserSpy:
         )
 
     def wait(self, *_args, **_kwargs):
-        raise AssertionError("present must not wait for the browser")
+        _BrowserSpy.waiters.append(threading.current_thread())
+        _BrowserSpy.waited.set()
+        _BrowserSpy.released.wait(timeout=30)
+        return 0
 
-    communicate = wait
+    def communicate(self, *_args, **_kwargs):
+        raise AssertionError("present must not talk to the browser")
 
 
 @pytest.fixture
 def browser_spy(monkeypatch):
     _BrowserSpy.calls = []
+    _BrowserSpy.waiters = []
+    _BrowserSpy.waited = threading.Event()
+    _BrowserSpy.released = threading.Event()
     monkeypatch.setattr("mentipy.cli.subprocess.Popen", _BrowserSpy)
-    return _BrowserSpy.calls
+    yield _BrowserSpy.calls
+    _BrowserSpy.released.set()
 
 
 def _run_present(tmp_path, monkeypatch, *extra, steps=()):
@@ -7171,6 +7275,312 @@ def test_present_opens_the_admin_index_with_the_platform_command(
     }
     assert call["listening"] is True
     assert "No question is open yet" in result.stdout
+@
+
+The other platforms' defaults reach [[present]] the same way.
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    "platform, command",
+    [("darwin", "open"), ("win32", "explorer"), ("freebsd14", "xdg-open")],
+)
+def test_present_opens_with_each_platform_default(
+    tmp_path, monkeypatch, browser_spy, platform, command
+):
+    monkeypatch.setattr(sys, "platform", platform)
+
+    result, port = _run_present(tmp_path, monkeypatch)
+
+    assert result.exit_code == 0, result.output
+    assert browser_spy[0]["argv"] == [command, f"http://127.0.0.1:{port}/"]
+@
+
+The opener is reaped, so a browser that exits early leaves no zombie
+behind, but by a thread of its own: [[present]] finished above while
+the spy's [[wait]] was still blocked.
+
+<<test functions>>=
+def test_present_reaps_the_opener_in_another_thread(
+    tmp_path, monkeypatch, browser_spy
+):
+    result, _port = _run_present(tmp_path, monkeypatch)
+
+    assert result.exit_code == 0, result.output
+    assert _BrowserSpy.waited.wait(timeout=5)
+    assert len(_BrowserSpy.waiters) == 1
+    assert _BrowserSpy.waiters[0] is not threading.main_thread()
+    assert _BrowserSpy.waiters[0].daemon
+@
+
+The admin index is admin only for a request from the loopback address,
+unless the token makes it so.  A server bound to a loopback address or
+to every interface is reached through loopback; the test binds
+[[127.0.0.2]], a loopback address other than the usual one, and the
+real server must answer the opened URL with the index.  A server bound
+to one other address is reached through that address, and its index
+would refuse the browser, so [[present]] opens nothing and says why in
+the banner.  That needs an address of the machine outside loopback;
+the test takes the LAN address and is skipped on a machine without
+one.
+
+<<test functions>>=
+def test_present_opens_a_loopback_bind_other_than_127_0_0_1(
+    tmp_path, monkeypatch, browser_spy
+):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.2", 0))
+        port = probe.getsockname()[1]
+    set_setting("base_url", f"http://127.0.0.2:{port}")
+    statuses = []
+
+    def follow_the_link():
+        statuses.append(
+            _page_status(browser_spy[0]["argv"][-1])
+        )
+
+    _play_the_lecture(monkeypatch, follow_the_link)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "present",
+            "--host",
+            "127.0.0.2",
+            "--port",
+            str(port),
+            "--store",
+            str(tmp_path / "mentipy.json"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert browser_spy[0]["argv"][-1] == f"http://127.0.0.2:{port}/"
+    assert statuses == [200]
+
+
+@pytest.mark.parametrize(
+    "bound, asked", [("0.0.0.0", "127.0.0.1"), ("localhost", "localhost")]
+)
+def test_present_opens_a_wildcard_or_localhost_bind(
+    tmp_path, monkeypatch, browser_spy, bound, asked
+):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    port = _free_port()
+    set_setting("base_url", f"http://127.0.0.1:{port}")
+    _play_the_lecture(monkeypatch)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "present",
+            "--host",
+            bound,
+            "--port",
+            str(port),
+            "--store",
+            str(tmp_path / "mentipy.json"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert browser_spy[0]["argv"][-1] == f"http://{asked}:{port}/"
+
+
+def _page_status(url):
+    parts = urllib.parse.urlsplit(url)
+    connection = http.client.HTTPConnection(
+        parts.hostname, parts.port, timeout=5
+    )
+    connection.request("GET", parts.path or "/")
+    response = connection.getresponse()
+    response.read()
+    connection.close()
+    return response.status
+
+
+def test_present_does_not_open_an_index_that_would_refuse_it(
+    tmp_path, monkeypatch, browser_spy
+):
+    address = mentipy.network.local_ip()
+    if ipaddress.ip_address(address).is_loopback:
+        pytest.skip("this machine has no address outside loopback")
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    with socket.socket() as probe:
+        try:
+            probe.bind((address, 0))
+        except OSError:
+            pytest.skip(f"cannot bind {address}")
+        port = probe.getsockname()[1]
+    url = f"http://{address}:{port}/"
+    set_setting("base_url", url.rstrip("/"))
+    monkeypatch.setattr("mentipy.cli.CLEAR_SCREEN", "[clear]")
+    statuses = []
+    _play_the_lecture(monkeypatch, lambda: statuses.append(_page_status(url)))
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "present",
+            "--host",
+            address,
+            "--port",
+            str(port),
+            "--store",
+            str(tmp_path / "mentipy.json"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert browser_spy == []
+    assert statuses == [403]
+    frame = result.stdout.split("[clear]")[-1]
+    assert f"Warnings: 1, the last: not opening {url}:" in frame
+@
+
+Under [[--public ssh]] the token makes the index admin from any
+address, so the same bind is opened, with the token, and the real
+server accepts it.
+
+<<test functions>>=
+def test_present_opens_any_bind_with_the_token(
+    tmp_path, monkeypatch, browser_spy
+):
+    address = mentipy.network.local_ip()
+    if ipaddress.ip_address(address).is_loopback:
+        pytest.skip("this machine has no address outside loopback")
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("ssh_tunnel", "alice@example.test:9000")
+    with socket.socket() as probe:
+        try:
+            probe.bind((address, 0))
+        except OSError:
+            pytest.skip(f"cannot bind {address}")
+        port = probe.getsockname()[1]
+
+    @contextmanager
+    def fake_expose(_mode, _local_port, *, ssh_endpoint=None):
+        yield "http://public.example:9000"
+
+    monkeypatch.setattr("mentipy.cli.expose", fake_expose)
+    _play_the_lecture(monkeypatch)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "present",
+            "--host",
+            address,
+            "--port",
+            str(port),
+            "--store",
+            str(tmp_path / "mentipy.json"),
+            "--public",
+            "ssh",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    url = browser_spy[0]["argv"][-1]
+    assert url.startswith(f"http://{address}:{port}/?admin=")
+@
+
+On Windows the command is split without the POSIX rules, which would
+read the backslashes of a path as escapes, and one pair of quotes
+around a token is removed, so a path with spaces can be quoted.  The
+process is detached through creation flags rather than a new session.
+The flags exist only in Windows's [[subprocess]], so the test supplies
+them, with their Windows values, and sets the platform.
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    "command, argv",
+    [
+        (r"C:\Users\me\chrome.exe", [r"C:\Users\me\chrome.exe", "URL"]),
+        (
+            r'"C:\Program Files\Google\chrome.exe" --new-window',
+            [r"C:\Program Files\Google\chrome.exe", "--new-window", "URL"],
+        ),
+        ("explorer", ["explorer", "URL"]),
+        ("'C:\\b r\\x.exe' --app={url}", [r"C:\b r\x.exe", "--app=URL"]),
+    ],
+    ids=["path", "quoted-path", "explorer", "single-quotes"],
+)
+def test_open_browser_keeps_windows_paths(
+    monkeypatch, browser_spy, command, argv
+):
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(
+        subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False
+    )
+    monkeypatch.setattr(subprocess, "DETACHED_PROCESS", 0x8, raising=False)
+    url = "http://127.0.0.1:8080/"
+
+    mentipy.cli._open_browser(command, url)
+
+    assert browser_spy[0]["argv"] == [
+        arg.replace("URL", url) for arg in argv
+    ]
+    assert browser_spy[0]["options"] == {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "creationflags": 0x208,
+    }
+@
+
+Only a matching pair of quotes is removed: a token that merely starts
+or ends with a quote is left as it is.
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    "token, unquoted",
+    [
+        ('"x y"', "x y"),
+        ("'x y'", "x y"),
+        ("\"x'", "\"x'"),
+        ('"', '"'),
+        ("x", "x"),
+    ],
+)
+def test_unquoted_removes_one_matching_pair(token, unquoted):
+    assert mentipy.cli._unquoted(token) == unquoted
+@
+
+An empty [[mentipy.open_command]], or [[none]], turns the step off for
+good on a machine, as [[--no-open]] does for one run.  [[--open-with]]
+together with [[--no-open]] is a contradiction, which [[--no-open]]
+wins, with a warning in the banner.
+
+<<test functions>>=
+@pytest.mark.parametrize("configured", ["", "none", " None "])
+def test_present_opens_nothing_when_the_config_says_none(
+    tmp_path, monkeypatch, browser_spy, configured
+):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("open_command", configured)
+
+    result, _port = _run_present(tmp_path, monkeypatch)
+
+    assert result.exit_code == 0, result.output
+    assert browser_spy == []
+    assert "Warnings:" not in result.stdout
+
+
+def test_present_warns_about_open_with_and_no_open(
+    tmp_path, monkeypatch, browser_spy
+):
+    monkeypatch.setattr("mentipy.cli.CLEAR_SCREEN", "[clear]")
+
+    result, _port = _run_present(
+        tmp_path, monkeypatch, "--no-open", "--open-with", "firefox"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert browser_spy == []
+    frame = result.stdout.split("[clear]")[-1]
+    assert "Warnings: 1, the last: --open-with is ignored with --no-open" in (
+        frame
+    )
 @
 
 The command comes from [[mentipy.open_command]] unless [[--open-with]]
@@ -7844,6 +8254,8 @@ from typer.testing import CliRunner
 
 from mentipy.cli import *
 from mentipy.questions import *
+import ipaddress
+import mentipy.network
 import mentipy.server
 from mentipy.server import create_server
 from mentipy.store import *
