@@ -49,6 +49,7 @@ from pygments.formatters import HtmlFormatter as _HtmlFormatter
 from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
 
+from mentipy.catalogue import ENGLISH, Catalogue, load_catalogue
 from mentipy.questions import (
     ContextDownload,
     ContextSnippet,
@@ -68,7 +69,12 @@ from mentipy.questions import (
     smooth_pin_grid,
     sniff_image_mime,
 )
-from mentipy.store import DEFAULT_HEATMAP_BINS, RESULTS_WINDOWS, Store
+from mentipy.store import (
+    DEFAULT_HEATMAP_BINS,
+    DEFAULT_LOCALE,
+    RESULTS_WINDOWS,
+    Store,
+)
 @
 
 \section{Page shell and shared helpers}
@@ -83,7 +89,7 @@ fit, which makes a polling form needlessly hard to read and tap.
 <<constants>>=
 PAGE_TEMPLATE = Template(
     """<!doctype html>
-<html lang="en">
+<html lang="$lang">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -477,6 +483,19 @@ pre code.highlight {
 REFRESH_SECONDS = 2
 @
 
+Every word the server itself puts on a page comes from one locale's
+catalogue (\cref{chap:catalogue}), which [[_build_handler]] loads once
+when the server starts and hands to every renderer.  The renderers take
+it as a keyword, [[catalogue]], whose default is the English one, so a
+renderer called on its own, as most tests here do, renders the pages as
+they always were.  The page shell writes the catalogue's locale into
+[[<html lang>]], which tells a phone's browser which language to
+hyphenate, read aloud or offer to translate.  Catalogue strings are
+escaped like any other text; [[Catalogue.markup]] does it for messages
+that wrap a rendered fragment.  What never passes through a catalogue
+is the lecturer's and the respondents' text: prompts, options,
+context and answers are shown as written.
+
 The helper functions collect the logic that would otherwise be repeated across
 multiple routes.  [[_page]] takes the refresh interval as a parameter because
 the lecturer's live tally and a respondent's waiting page want different
@@ -503,6 +522,7 @@ def _page(
     *,
     refresh: bool = False,
     refresh_seconds: int = REFRESH_SECONDS,
+    catalogue: Catalogue = ENGLISH,
 ) -> str:
     refresh_tag = ""
     if refresh:
@@ -511,6 +531,7 @@ def _page(
         )
 
     return PAGE_TEMPLATE.substitute(
+        lang=escape(catalogue.locale),
         title=escape(_plain_inline(title)),
         heading=_render_inline(heading),
         refresh=refresh_tag,
@@ -566,6 +587,25 @@ Browsers usually omit a charset for uploaded files, so UTF-8 is the important
 default.  If decoding fails, we reject the upload explicitly instead of storing
 garbled text.
 
+A rejection is shown to the respondent, in the server's language, so
+the parsers raise an [[AnswerError]] that carries the catalogue key of
+the reason rather than a sentence.  It is still a [[ValueError]] whose
+message is the English text, so code that catches the error, and the
+tests that match on its message, need no translation; the handler looks
+the key up in its own catalogue.  A [[ValueError]] that is not an
+[[AnswerError]] comes from a request no form would send, such as a
+non-numeric option index, and gets the generic
+\enquote{the answer could not be read} instead of Python's own message.
+
+<<classes>>=
+class AnswerError(ValueError):
+    """A submitted answer that the form could not have produced."""
+
+    def __init__(self, key: str):
+        super().__init__(ENGLISH(key))
+        self.key = key
+@
+
 <<constants>>=
 MIN_FORM_BODY_BYTES = 64 * 1024
 MULTIPART_SLACK_BYTES = 4096
@@ -587,36 +627,34 @@ def _parse_multipart(
         + body
     )
     if not message.is_multipart():
-        raise ValueError("malformed multipart form data")
+        raise AnswerError("answer.malformed")
 
     fields: dict[str, list[str]] = {}
     for part in message.iter_parts():
         if part.get_content_disposition() != "form-data":
-            raise ValueError("malformed multipart form data")
+            raise AnswerError("answer.malformed")
 
         name = part.get_param("name", header="content-disposition")
         if not name:
-            raise ValueError("malformed multipart form data")
+            raise AnswerError("answer.malformed")
 
         payload = part.get_payload(decode=True) or b""
         charset = part.get_param("charset", header="content-type") or "utf-8"
         try:
             text = payload.decode(charset)
         except (LookupError, UnicodeDecodeError) as err:
-            raise ValueError(
-                "uploaded file is not valid text; save it as UTF-8"
-            ) from err
+            raise AnswerError("answer.not_text") from err
 
         filename = part.get_filename()
         if filename is not None:
             if part.defects:
-                raise ValueError("malformed multipart form data")
+                raise AnswerError("answer.malformed")
             safe_name = (
                 os.path.basename(filename or UPLOAD_FALLBACK_NAME)
                 or UPLOAD_FALLBACK_NAME
             )
             if "\r" in safe_name or "\n" in safe_name:
-                raise ValueError("malformed multipart form data")
+                raise AnswerError("answer.malformed")
             fields.setdefault(name, []).append(f"{safe_name}\n{text}")
         else:
             fields.setdefault(name, []).append(text)
@@ -681,7 +719,11 @@ def _max_request_body(question) -> int:
 
 The final parser step normalises all question kinds into the values the store
 records.  For open questions, that means combining the textarea text and an
-optional uploaded file into one string.  We keep the uploaded basename but strip
+optional uploaded file into one string.  The [[Text:]] and [[File]]
+markers of that string are not translated: they are part of the stored
+answer, which the JSON export and the terminal views read, not words on
+a page, and an answer must not change with the language of the server
+that received it.  We keep the uploaded basename but strip
 any path components so a browser or crafted client cannot smuggle [[../]] into
 the recorded label.
 
@@ -727,26 +769,20 @@ def _parse_answer(question, fields: dict[str, list[str]]) -> Any:
         values = fields.get("value", [])
         if question.multi:
             if not values:
-                raise ValueError("choose at least one option")
+                raise AnswerError("answer.choose_some")
 
             indices = [int(value) for value in values]
             if any(index < 0 or index >= len(question.options)
                    for index in indices):
-                raise ValueError(
-                    "multiple-choice answer outside the allowed range"
-                )
+                raise AnswerError("answer.option_range")
             if len(set(indices)) != len(indices):
-                raise ValueError(
-                    "multiple-choice answer repeats the same option"
-                )
+                raise AnswerError("answer.option_repeat")
             return indices
         if len(values) != 1:
-            raise ValueError("choose exactly one option")
+            raise AnswerError("answer.choose_one")
         index = int(values[0])
         if index < 0 or index >= len(question.options):
-            raise ValueError(
-                "multiple-choice answer outside the allowed range"
-            )
+            raise AnswerError("answer.option_range")
         return index
 
     if isinstance(question, OpenQuestion):
@@ -772,13 +808,13 @@ def _parse_answer(question, fields: dict[str, list[str]]) -> Any:
             value = text
 
         if len(value) > question.max_chars:
-            raise ValueError("text answer too long")
+            raise AnswerError("answer.too_long")
         return value
 
     if isinstance(question, WordCloudQuestion):
         text = fields.get("value", [""])[0]
         if len(text) > question.max_chars:
-            raise ValueError("text answer too long")
+            raise AnswerError("answer.too_long")
         return text
 
     if isinstance(question, RankingQuestion):
@@ -794,19 +830,17 @@ def _parse_answer(question, fields: dict[str, list[str]]) -> Any:
             try:
                 rank = int(raw)
             except ValueError:
-                raise ValueError("ranking positions must be whole numbers")
+                raise AnswerError("answer.rank_numbers")
             ranked.append((rank, index))
         if not ranked:
-            raise ValueError("rank at least one option")
+            raise AnswerError("answer.rank_some")
         if len(ranked) > limit:
-            raise ValueError("you ranked more options than allowed")
+            raise AnswerError("answer.rank_too_many")
         positions = sorted(rank for rank, _ in ranked)
         if positions != list(range(1, len(positions) + 1)):
-            raise ValueError(
-                "use each position once, starting at 1 with no gaps"
-            )
+            raise AnswerError("answer.rank_gaps")
         if question.top_n is None and len(ranked) != option_count:
-            raise ValueError("rank every option")
+            raise AnswerError("answer.rank_all")
         ranked.sort()
         return [index for _, index in ranked]
 
@@ -824,29 +858,27 @@ def _parse_answer(question, fields: dict[str, list[str]]) -> Any:
                 x = float(raw_x)
                 y = float(raw_y)
             except ValueError:
-                raise ValueError("pin coordinates must be numbers")
+                raise AnswerError("answer.pin_numbers")
             if not (0 <= x <= 1 and 0 <= y <= 1):
-                raise ValueError("pin coordinates must lie in [0, 1]")
+                raise AnswerError("answer.pin_range")
             pin = {"x": round(x, 4), "y": round(y, 4)}
             if comment:
                 if not question.allow_comment:
-                    raise ValueError(
-                        "this question does not accept pin comments"
-                    )
+                    raise AnswerError("answer.pin_no_comments")
                 if len(comment) > PIN_COMMENT_MAX_CHARS:
-                    raise ValueError("pin comment too long")
+                    raise AnswerError("answer.pin_comment_long")
                 pin["comment"] = comment
             pins.append(pin)
         if not pins:
-            raise ValueError("place at least one pin")
+            raise AnswerError("answer.pin_some")
         return pins
 
     values = fields.get("value", [])
     if len(values) != 1:
-        raise ValueError("choose exactly one scale value")
+        raise AnswerError("answer.scale_one")
     value = int(values[0])
     if value < question.low or value > question.high:
-        raise ValueError("scale answer outside the allowed range")
+        raise AnswerError("answer.scale_range")
     return value
 @
 
@@ -1335,33 +1367,42 @@ routing section, so the label can never disagree with what a respondent
 gets.  Clicking a question's results link is also how the lecturer opens
 it, which makes the index the natural place to read the lecture's state.
 A tracker-less call renders the plain list, which is what a server
-running with [[--no-lock]] shows.
+running with [[--no-lock]] shows.  The state's name stays in the
+[[status-]] class for the style sheet, and only the visible label is
+the catalogue's word for it.
 
 <<functions>>=
 
 
 def _render_index(
-    store: Store, progress: LectureProgress | None = None
+    store: Store,
+    progress: LectureProgress | None = None,
+    *,
+    catalogue: Catalogue = ENGLISH,
 ) -> str:
     items = []
     deck = store.all_questions()
+    results = escape(catalogue("index.results"))
 
     for entry in deck:
         status = ""
         if progress is not None:
             label = progress.status(entry["hash"], deck)
-            status = f' <span class="status status-{label}">{label}</span>'
+            status = (
+                f' <span class="status status-{label}">'
+                f'{escape(catalogue("status." + label))}</span>'
+            )
         items.append(
             "<li>"
             f'<a href="/{entry["url_prefix"]}"><code>{entry["url_prefix"]}</code></a> '
             f'{_render_inline(entry["text"])} '
-            f'(<a href="/{entry["url_prefix"]}/results">results</a>)'
+            f'(<a href="/{entry["url_prefix"]}/results">{results}</a>)'
             f"{status}"
             "</li>"
         )
 
     if not items:
-        return "<p>No questions have been registered yet.</p>"
+        return f"<p>{escape(catalogue('index.empty'))}</p>"
 
     return "<ul>" + "".join(items) + "</ul>"
 @
@@ -1451,28 +1492,38 @@ link text names the file and its size, because a respondent on a phone
 plan should know what a tap will cost before making it.
 
 <<functions>>=
-def _render_context(question: Question, prefix: str) -> str:
+def _render_context(
+    question: Question, prefix: str, *, catalogue: Catalogue = ENGLISH
+) -> str:
     if not question.context:
         return ""
     items = "".join(
-        _render_context_item(item, index, prefix)
+        _render_context_item(item, index, prefix, catalogue=catalogue)
         for index, item in enumerate(question.context)
     )
     return f'<section class="context">{items}</section>'
 
 
 def _render_context_item(
-    item: ContextSnippet | ContextDownload, index: int, prefix: str
+    item: ContextSnippet | ContextDownload,
+    index: int,
+    prefix: str,
+    *,
+    catalogue: Catalogue = ENGLISH,
 ) -> str:
     caption = ""
     if item.label:
         caption = f"<figcaption>{escape(item.label)}</figcaption>"
     if isinstance(item, ContextDownload):
+        link = catalogue.markup(
+            "form.download",
+            escape,
+            filename=escape(item.filename),
+            size=escape(_format_size(item.size, catalogue=catalogue)),
+        )
         body = (
             f'<a class="context-download" '
-            f'href="/{prefix}/context/{index}" download>'
-            f"Download {escape(item.filename)} "
-            f"({_format_size(item.size)})</a>"
+            f'href="/{prefix}/context/{index}" download>{link}</a>'
         )
     elif not item.language and not item.html:
         body = f'<p class="context-prose">{escape(item.text)}</p>'
@@ -1519,12 +1570,13 @@ def _render_text_body(
 
 Sizes are rounded the way people read them: bytes below a kilobyte,
 then one decimal in kilo- or megabytes, in the decimal units phones
-show.
+show.  Only the word for bytes is translated; [[kB]] and [[MB]] are
+symbols.
 
 <<functions>>=
-def _format_size(size: int) -> str:
+def _format_size(size: int, *, catalogue: Catalogue = ENGLISH) -> str:
     if size < 1000:
-        return f"{size} bytes"
+        return catalogue("form.bytes", n=size)
     if size < 1_000_000:
         return f"{size / 1000:.1f} kB"
     return f"{size / 1_000_000:.1f} MB"
@@ -1679,13 +1731,15 @@ assembled in one place: the prompt, the kind's own form, then the
 context.  The kinds render only their form.
 
 <<functions>>=
-def _render_form(store: Store, full_hash: str) -> str:
+def _render_form(
+    store: Store, full_hash: str, *, catalogue: Catalogue = ENGLISH
+) -> str:
     question = store.question(full_hash)
     prefix = store.metadata(full_hash)["url_prefix"]
     return (
         _render_prompt(question)
-        + _render_inputs(question, prefix)
-        + _render_context(question, prefix)
+        + _render_inputs(question, prefix, catalogue=catalogue)
+        + _render_context(question, prefix, catalogue=catalogue)
     )
 @
 
@@ -1695,6 +1749,9 @@ plus an uploaded artifact.  The [[accept]] list is only a browser hint, but it
 nudges the picker toward the text-like formats that [[_parse_multipart()]] can
 actually decode and that the results page can show meaningfully.
 
+Every form ends in the same Submit button, so one helper writes it in
+the server's language.
+
 Word-cloud questions render only the textarea --- no file picker and no
 multipart encoding.  Pairing a free-text token with a file body would
 not produce sensible cloud entries (the file body is either one giant
@@ -1702,7 +1759,14 @@ token or a fragmented mass of source-level identifiers), so the form
 matches what the parser actually accepts.
 
 <<functions>>=
-def _render_inputs(question: Question, prefix: str) -> str:
+def _submit_button(catalogue: Catalogue) -> str:
+    return f'<button type="submit">{escape(catalogue("form.submit"))}</button>'
+
+
+def _render_inputs(
+    question: Question, prefix: str, *, catalogue: Catalogue = ENGLISH
+) -> str:
+    submit = _submit_button(catalogue)
     if isinstance(question, MCQuestion):
         input_type = "checkbox" if question.multi else "radio"
         inputs = "".join(
@@ -1712,7 +1776,7 @@ def _render_inputs(question: Question, prefix: str) -> str:
         )
         return (
             f'<form method="post" action="/{prefix}">{inputs}'
-            "<button type=\"submit\">Submit</button></form>"
+            f"{submit}</form>"
         )
 
     if isinstance(question, OpenQuestion):
@@ -1722,7 +1786,7 @@ def _render_inputs(question: Question, prefix: str) -> str:
             f'<textarea name="value" maxlength="{question.max_chars}"></textarea>'
             '<input type="file" name="file" '
             'accept="text/*,.txt,.md,.tex,.py,.rst,.csv,.json">'
-            "<button type=\"submit\">Submit</button></form>"
+            f"{submit}</form>"
         )
 
     if isinstance(question, WordCloudQuestion):
@@ -1730,14 +1794,14 @@ def _render_inputs(question: Question, prefix: str) -> str:
             f'<form method="post" action="/{prefix}">'
             f'<textarea name="value" '
             f'maxlength="{question.max_chars}"></textarea>'
-            "<button type=\"submit\">Submit</button></form>"
+            f"{submit}</form>"
         )
 
     if isinstance(question, RankingQuestion):
-        return _render_ranking_form(question, prefix)
+        return _render_ranking_form(question, prefix, catalogue=catalogue)
 
     if isinstance(question, PinQuestion):
-        return _render_pin_form(question, prefix)
+        return _render_pin_form(question, prefix, catalogue=catalogue)
 
     inputs = "".join(
         f'<label><input type="radio" name="value" value="{value}"> '
@@ -1746,17 +1810,21 @@ def _render_inputs(question: Question, prefix: str) -> str:
     )
     low_end_label = ""
     if question.low_label:
-        low_end_label = f"<p>Low end: {escape(question.low_label)}</p>"
+        low_end_label = "<p>" + catalogue.markup(
+            "form.scale_low", escape, label=escape(question.low_label)
+        ) + "</p>"
     high_end_label = ""
     if question.high_label:
-        high_end_label = f"<p>High end: {escape(question.high_label)}</p>"
+        high_end_label = "<p>" + catalogue.markup(
+            "form.scale_high", escape, label=escape(question.high_label)
+        ) + "</p>"
 
     return (
         f'<form method="post" action="/{prefix}">'
         + low_end_label
         + inputs
         + high_end_label
-        + "<button type=\"submit\">Submit</button></form>"
+        + f"{submit}</form>"
     )
 
 
@@ -1776,7 +1844,9 @@ option in a block-level row so the choices stack vertically without any
 new stylesheet rules.
 
 <<functions>>=
-def _render_ranking_form(question: RankingQuestion, prefix: str) -> str:
+def _render_ranking_form(
+    question: RankingQuestion, prefix: str, *, catalogue: Catalogue = ENGLISH
+) -> str:
     option_count = len(question.options)
     limit = (
         question.top_n if question.top_n is not None else option_count
@@ -1793,13 +1863,13 @@ def _render_ranking_form(question: RankingQuestion, prefix: str) -> str:
         for index, option in enumerate(question.options)
     )
     if question.top_n is None:
-        instructions = "<p>Give every option a position.</p>"
+        instructions = catalogue("form.rank_all")
     else:
-        instructions = f"<p>Rank your top {question.top_n}.</p>"
+        instructions = catalogue("form.rank_top", n=question.top_n)
     return (
-        f"{instructions}"
+        f"<p>{escape(instructions)}</p>"
         f'<form method="post" action="/{prefix}">{rows}'
-        '<button type="submit">Submit</button></form>'
+        f"{_submit_button(catalogue)}</form>"
     )
 @
 
@@ -1844,39 +1914,58 @@ question allows them.  The [[<noscript>]] notice is honest rather than
 graceful: there is no degraded coordinate entry that would be worth a
 respondent's time during a live lecture.
 
-Only the integer pin cap, a boolean and the integer comment cap are
-interpolated into the script --- never any user- or lecturer-authored
-text --- so the page's script-injection surface does not grow with the
-question content.
+Only the integer pin cap, a boolean, the integer comment cap and two
+catalogue messages are interpolated into the script --- never any user-
+or lecturer-authored text --- so the page's script-injection surface
+does not grow with the question content.  The messages, the tooltip of
+a placed pin and the placeholder of its comment field, are written as
+JSON string literals with [[<]], [[>]] and [[&]] escaped, so not even a
+catalogue entry could close the [[<script>]] element.  The script fills
+the comment placeholder's [[{n}]] with the pin's number itself, since
+the number is only known when the pin is placed; the server formats the
+message with [[{n}]] standing for itself, so the field survives into
+the script.
 
 <<functions>>=
-def _render_pin_form(question, prefix: str) -> str:
+def _render_pin_form(
+    question, prefix: str, *, catalogue: Catalogue = ENGLISH
+) -> str:
     if question.max_pins == 1:
-        instructions = "<p>Tap the target to place your pin.</p>"
+        instructions = catalogue("form.pin_one")
     else:
-        instructions = (
-            f"<p>Tap the target to place up to {question.max_pins} "
-            "pins; tap a pin to remove it.</p>"
-        )
+        instructions = catalogue("form.pin_many", n=question.max_pins)
     return (
-        f"{instructions}"
-        "<noscript><p>This question needs JavaScript to record "
-        "where you tap.</p></noscript>"
+        f"<p>{escape(instructions)}</p>"
+        f"<noscript><p>{escape(catalogue('form.pin_noscript'))}</p></noscript>"
         f'<form method="post" action="/{prefix}">'
         '<div class="pin-wrap">'
         + _render_pin_target(question, prefix)
         + "</div>"
         '<div id="pin-fields"></div>'
-        '<button type="submit">Submit</button></form>'
-        + _render_pin_script(question)
+        + _submit_button(catalogue)
+        + "</form>"
+        + _render_pin_script(question, catalogue=catalogue)
     )
 
 
-def _render_pin_script(question) -> str:
+def _render_pin_script(question, *, catalogue: Catalogue = ENGLISH) -> str:
     return PIN_SCRIPT_TEMPLATE.substitute(
         max_pins=question.max_pins,
         allow_comment="true" if question.allow_comment else "false",
         comment_max=PIN_COMMENT_MAX_CHARS,
+        remove_label=_script_string(catalogue("form.pin_remove")),
+        comment_label=_script_string(
+            catalogue("form.pin_comment", n="{n}")
+        ),
+    )
+
+
+def _script_string(text: str) -> str:
+    return (
+        json.dumps(text)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
     )
 @
 
@@ -1904,7 +1993,7 @@ PIN_SCRIPT_TEMPLATE = Template(
     marker.className = "pin-marker";
     marker.style.left = (pins[index].x * 100) + "%";
     marker.style.top = (pins[index].y * 100) + "%";
-    marker.title = "Tap to remove";
+    marker.title = $remove_label;
     marker.addEventListener("click", function (event) {
       event.stopPropagation();
       pins.splice(index, 1);
@@ -1929,8 +2018,7 @@ PIN_SCRIPT_TEMPLATE = Template(
       comment.type = "text";
       comment.name = "pin_" + index + "_comment";
       comment.maxLength = $comment_max;
-      comment.placeholder =
-        "Comment on pin " + (index + 1) + " (optional)";
+      comment.placeholder = $comment_label.replace("{n}", index + 1);
       comment.value = pins[index].comment || "";
       comment.addEventListener("input", function (event) {
         pins[index].comment = event.target.value;
@@ -2387,28 +2475,27 @@ JavaScript elsewhere in the project, the URL stays bookmarkable, and
 the existing two-second [[<meta http-equiv="refresh">]] preserves the
 query string because it reloads the current URL verbatim---so the
 lecturer's filter choice survives every refresh tick without us
-writing any client-side state.
+writing any client-side state.  The options are the store's windows in
+the store's order, each labelled by the catalogue, so a window the
+store gains cannot be missing from the form without a missing message
+failing loudly.
 
 <<functions>>=
-def _render_window_filter(prefix: str, current: str) -> str:
-    options = [
-        ("session", "Since server start"),
-        ("hour", "Last hour"),
-        ("day", "Last day"),
-        ("all", "All time"),
-    ]
+def _render_window_filter(
+    prefix: str, current: str, *, catalogue: Catalogue = ENGLISH
+) -> str:
     rendered = "".join(
         f'<option value="{value}"'
         f'{" selected" if value == current else ""}>'
-        f'{escape(label)}</option>'
-        for value, label in options
+        f'{escape(catalogue("window." + value))}</option>'
+        for value in RESULTS_WINDOWS
     )
     return (
         f'<form class="window-filter" method="get" '
         f'action="/{prefix}/results">'
-        f'<label for="window">Show:</label> '
+        f'<label for="window">{escape(catalogue("window.label"))}</label> '
         f'<select id="window" name="window">{rendered}</select> '
-        f'<button type="submit">Apply</button>'
+        f'<button type="submit">{escape(catalogue("window.apply"))}</button>'
         f'</form>'
     )
 @
@@ -2474,53 +2561,64 @@ landed on most.  Scale questions get the descriptive statistics inline
 in one row.  Open questions get the average answer length.  Each helper
 returns an empty string when there are no answers, so the page degrades
 gracefully to just the window filter and the \enquote{Total responses:
-0} line.
+0} line.  The labels are the catalogue's, and the colon after a label
+stays in the markup, since both languages write it the same way.
 
 <<functions>>=
 def _render_mc_stats(
-    question: MCQuestion, summary: dict[str, Any]
+    question: MCQuestion,
+    summary: dict[str, Any],
+    *,
+    catalogue: Catalogue = ENGLISH,
 ) -> str:
     mode_index = summary.get("mode_index")
     if mode_index is None:
         return ""
     label = question.options[mode_index]
-    percentage = summary["percentages"][mode_index]
-    return (
-        f'<p class="mode-callout">'
-        f'Mode: <strong>{_render_inline(label)}</strong> '
-        f'({percentage:.0f}%)'
-        f'</p>'
+    callout = catalogue.markup(
+        "stats.mode",
+        escape,
+        label=f"<strong>{_render_inline(label)}</strong>",
+        percentage=summary["percentages"][mode_index],
     )
+    return f'<p class="mode-callout">{callout}</p>'
 @
 
 <<functions>>=
-def _render_scale_stats(summary: dict[str, Any]) -> str:
+def _render_scale_stats(
+    summary: dict[str, Any], *, catalogue: Catalogue = ENGLISH
+) -> str:
     if summary.get("mean") is None:
         return ""
     pairs = [
-        ("Mean", f'{summary["mean"]:.2f}'),
-        ("Median", f'{summary["median"]}'),
-        ("Std", f'{summary["stddev"]:.2f}'),
-        ("Min", f'{summary["min"]}'),
-        ("Max", f'{summary["max"]}'),
+        ("stats.mean", f'{summary["mean"]:.2f}'),
+        ("stats.median", f'{summary["median"]}'),
+        ("stats.std", f'{summary["stddev"]:.2f}'),
+        ("stats.min", f'{summary["min"]}'),
+        ("stats.max", f'{summary["max"]}'),
     ]
     body = " · ".join(
-        f'<span class="stat-label">{label}:</span> '
+        f'<span class="stat-label">{escape(catalogue(key))}:</span> '
         f'<strong>{value}</strong>'
-        for label, value in pairs
+        for key, value in pairs
     )
     return f'<p class="stats">{body}</p>'
 @
 
 <<functions>>=
-def _render_open_stats(summary: dict[str, Any]) -> str:
+def _render_open_stats(
+    summary: dict[str, Any], *, catalogue: Catalogue = ENGLISH
+) -> str:
     avg = summary.get("avg_length")
     if avg is None:
         return ""
+    length = catalogue.markup(
+        "stats.chars", escape, n=f"<strong>{avg:.0f}</strong>"
+    )
     return (
         f'<p class="stats">'
-        f'<span class="stat-label">Avg length:</span> '
-        f'<strong>{avg:.0f}</strong> chars'
+        f'<span class="stat-label">'
+        f'{escape(catalogue("stats.avg_length"))}:</span> {length}'
         f'</p>'
     )
 @
@@ -2763,10 +2861,13 @@ free-text reactions during a live lecture.
 
 <<functions>>=
 def _render_open_answers(
-    answers: list[dict[str, Any]], *, allow_images: bool = False
+    answers: list[dict[str, Any]],
+    *,
+    allow_images: bool = False,
+    catalogue: Catalogue = ENGLISH,
 ) -> str:
     if not answers:
-        return "<p>No free-text answers yet.</p>"
+        return f"<p>{escape(catalogue('results.no_open_answers'))}</p>"
     items = "".join(
         f'<li class="md-answer">'
         f'{_render_open_answer_markdown(answer["value"], allow_images=allow_images)}'
@@ -2789,14 +2890,17 @@ the answer set: a sparse, varied cloud has [[unique_words]] close to
 [[total_tokens]]; a clustered cloud has [[total_tokens]] much larger.
 
 <<functions>>=
-def _render_wordcloud_stats(summary: dict[str, Any]) -> str:
+def _render_wordcloud_stats(
+    summary: dict[str, Any], *, catalogue: Catalogue = ENGLISH
+) -> str:
     if not summary.get("total_tokens"):
         return ""
     return (
         f'<p class="stats">'
-        f'<span class="stat-label">Words:</span> '
+        f'<span class="stat-label">{escape(catalogue("stats.words"))}:</span> '
         f'<strong>{summary["total_tokens"]}</strong> · '
-        f'<span class="stat-label">Distinct:</span> '
+        f'<span class="stat-label">'
+        f'{escape(catalogue("stats.distinct"))}:</span> '
         f'<strong>{summary["unique_words"]}</strong>'
         f'</p>'
     )
@@ -2815,17 +2919,20 @@ keeps exact counts while still seeing the overall shape.
 def _render_wordcloud(
     question: WordCloudQuestion,
     frequencies: list[list[Any]],
+    *,
+    catalogue: Catalogue = ENGLISH,
 ) -> str:
     if not frequencies:
-        return "<p>No answers yet.</p>"
+        return f"<p>{escape(catalogue('results.no_answers'))}</p>"
     pairs = [(str(word), int(count)) for word, count in frequencies]
+    table = _render_wordcloud_table(pairs, catalogue=catalogue)
     if question.render == "table":
-        return _render_wordcloud_table(pairs)
+        return table
     if question.render == "scaled":
         visual = _render_wordcloud_scaled(pairs)
     else:
-        visual = _render_wordcloud_svg(pairs)
-    return visual + _render_wordcloud_table(pairs)
+        visual = _render_wordcloud_svg(pairs, catalogue=catalogue)
+    return visual + table
 @
 
 \subsubsection{Font scaling}
@@ -2864,7 +2971,9 @@ overview rather than a visual one --- showing the leaderboard, the
 total count, and each word's share rather than the gestalt.
 
 <<functions>>=
-def _render_wordcloud_table(pairs: list[tuple[str, int]]) -> str:
+def _render_wordcloud_table(
+    pairs: list[tuple[str, int]], *, catalogue: Catalogue = ENGLISH
+) -> str:
     total = sum(count for _, count in pairs)
     rows = "".join(
         f"<tr><td>{escape(word)}</td><td>{count}</td>"
@@ -2873,9 +2982,9 @@ def _render_wordcloud_table(pairs: list[tuple[str, int]]) -> str:
     )
     return (
         '<table class="wordcloud-table">'
-        "<thead><tr><th>Word</th>"
-        f"<th>Count ({total})</th>"
-        "<th>Percentage</th></tr></thead>"
+        f"<thead><tr><th>{escape(catalogue('wordcloud.word'))}</th>"
+        f"<th>{escape(catalogue('wordcloud.count', n=total))}</th>"
+        f"<th>{escape(catalogue('wordcloud.share'))}</th></tr></thead>"
         f"<tbody>{rows}</tbody>"
         "</table>"
     )
@@ -2915,14 +3024,19 @@ A live results page refreshes every two seconds, so the package-backed
 layout must be deterministic.  We fix its random seed, keep the words
 horizontal, and normalise the returned SVG fragment so the HTML
 contract stays the same: one inline [[<svg>]] with the
-[[wordcloud-svg]] CSS hook and an accessible label.
+[[wordcloud-svg]] CSS hook and an accessible label.  The label is the
+catalogue's word for a word cloud, escaped once by the dispatcher for
+both layouts.
 
 <<functions>>=
-def _render_wordcloud_svg(pairs: list[tuple[str, int]]) -> str:
-    svg = _render_wordcloud_svg_with_package(pairs)
+def _render_wordcloud_svg(
+    pairs: list[tuple[str, int]], *, catalogue: Catalogue = ENGLISH
+) -> str:
+    label = escape(catalogue("wordcloud.label"))
+    svg = _render_wordcloud_svg_with_package(pairs, label=label)
     if svg is not None:
         return svg
-    return _render_wordcloud_svg_fallback(pairs)
+    return _render_wordcloud_svg_fallback(pairs, label=label)
 @
 
 The optional-package path is an optimisation, not a requirement.  A
@@ -2958,7 +3072,7 @@ dependency, which is why the dependency floor is pinned in [[pyproject.toml]].
 
 <<functions>>=
 def _render_wordcloud_svg_with_package(
-    pairs: list[tuple[str, int]],
+    pairs: list[tuple[str, int]], *, label: str
 ) -> str | None:
     try:
         module = importlib.import_module("wordcloud")
@@ -2989,10 +3103,7 @@ def _render_wordcloud_svg_with_package(
         svg = svg.lstrip()
     return svg.replace(
         "<svg",
-        (
-            '<svg class="wordcloud-svg" role="img" '
-            'aria-label="Word cloud"'
-        ),
+        f'<svg class="wordcloud-svg" role="img" aria-label="{label}"',
         1,
     )
 @
@@ -3020,7 +3131,7 @@ arbitrary markup.
 
 <<functions>>=
 def _render_wordcloud_svg_fallback(
-    pairs: list[tuple[str, int]],
+    pairs: list[tuple[str, int]], *, label: str
 ) -> str:
     counts = [count for _, count in pairs]
     sizes = _wordcloud_font_scale(counts, min_size=14.0, max_size=48.0)
@@ -3050,7 +3161,7 @@ def _render_wordcloud_svg_fallback(
         f'<svg class="wordcloud-svg" '
         f'viewBox="0 0 {canvas_width:.0f} {height:.0f}" '
         f'xmlns="http://www.w3.org/2000/svg" '
-        f'role="img" aria-label="Word cloud">'
+        f'role="img" aria-label="{label}">'
         + "".join(elements)
         + "</svg>"
     )
@@ -3160,6 +3271,7 @@ def _render_prev_link(
     *,
     results: bool = False,
     window: str = RESULTS_PAGE_WINDOW,
+    catalogue: Catalogue = ENGLISH,
 ) -> str:
     prev_hash = store.prev_question(full_hash)
     if prev_hash is None:
@@ -3168,7 +3280,7 @@ def _render_prev_link(
     suffix = f"/results{_window_query(window)}" if results else ""
     return (
         f'<a class="prev-link" href="/{prev_prefix}{suffix}">'
-        f"← Previous</a>"
+        f'{escape(catalogue("nav.previous"))}</a>'
     )
 @
 
@@ -3194,6 +3306,7 @@ def _render_next_link(
     *,
     results: bool = False,
     window: str = RESULTS_PAGE_WINDOW,
+    catalogue: Catalogue = ENGLISH,
 ) -> str:
     next_hash = store.next_question(full_hash)
     if next_hash is None:
@@ -3207,7 +3320,10 @@ def _render_next_link(
     else:
         prefix = store.metadata(full_hash)["url_prefix"]
         href = f"/{prefix}/next"
-    return f'<a class="next-link" href="{href}">Next →</a>'
+    return (
+        f'<a class="next-link" href="{href}">'
+        f'{escape(catalogue("nav.next"))}</a>'
+    )
 @
 
 The lecturer's row has a third control between the two links: Skip.  The
@@ -3228,13 +3344,18 @@ last question Skip stands alone with all four corners rounded.
 
 <<functions>>=
 def _render_skip_form(
-    store: Store, full_hash: str, *, window: str = RESULTS_PAGE_WINDOW
+    store: Store,
+    full_hash: str,
+    *,
+    window: str = RESULTS_PAGE_WINDOW,
+    catalogue: Catalogue = ENGLISH,
 ) -> str:
     prefix = store.metadata(full_hash)["url_prefix"]
     action = f"/{prefix}/skip{_window_query(window)}"
     return (
         f'<form class="skip-form" method="post" action="{action}">'
-        f'<button class="skip-button" type="submit">Skip</button>'
+        f'<button class="skip-button" type="submit">'
+        f'{escape(catalogue("nav.skip"))}</button>'
         f"</form>"
     )
 @
@@ -3252,16 +3373,18 @@ def _render_question_nav(
     *,
     results: bool = False,
     window: str = RESULTS_PAGE_WINDOW,
+    catalogue: Catalogue = ENGLISH,
 ) -> str:
-    prev_link = _render_prev_link(
-        store, full_hash, results=results, window=window
-    )
+    links = dict(results=results, window=window, catalogue=catalogue)
+    prev_link = _render_prev_link(store, full_hash, **links)
     skip = (
-        _render_skip_form(store, full_hash, window=window) if results else ""
+        _render_skip_form(
+            store, full_hash, window=window, catalogue=catalogue
+        )
+        if results
+        else ""
     )
-    next_link = _render_next_link(
-        store, full_hash, results=results, window=window
-    )
+    next_link = _render_next_link(store, full_hash, **links)
     if not prev_link and not skip and not next_link:
         return ""
     return f'<nav class="question-nav">{prev_link}{skip}{next_link}</nav>'
@@ -3485,7 +3608,10 @@ that helper's count-and-percentage label does not fit a mean-rank summary.
 
 <<functions>>=
 def _render_ranking_stats(
-    question: RankingQuestion, summary: dict[str, Any]
+    question: RankingQuestion,
+    summary: dict[str, Any],
+    *,
+    catalogue: Catalogue = ENGLISH,
 ) -> str:
     option_count = len(question.options)
     mean_ranks = summary["mean_ranks"]
@@ -3495,10 +3621,12 @@ def _render_ranking_stats(
         mean = mean_ranks[index]
         if mean is None:
             width = 0.0
-            detail = "not ranked"
+            detail = catalogue("ranking.not_ranked")
         else:
             width = (option_count - mean + 1) / option_count * 100
-            detail = f"avg {mean:.1f}, {rank_counts[index]} ranked"
+            detail = catalogue(
+                "ranking.detail", mean=mean, n=rank_counts[index]
+            )
         rows.append(
             f'<div class="bar-row">'
             f'<span class="bar-label">'
@@ -3506,7 +3634,7 @@ def _render_ranking_stats(
             f'<span class="bar-bar">'
             f'<span class="bar-fill" style="width:{width:.1f}%"></span>'
             f'</span>'
-            f'<span class="bar-count">{detail}</span>'
+            f'<span class="bar-count">{escape(detail)}</span>'
             f'</div>'
         )
     return '<div class="bar-chart">' + "".join(rows) + '</div>'
@@ -3660,11 +3788,13 @@ def _render_pin_stats(
     summary: dict[str, Any],
     *,
     heatmap_bins: int = DEFAULT_HEATMAP_BINS,
+    catalogue: Catalogue = ENGLISH,
 ) -> str:
     target = _render_pin_target(question, summary["url_prefix"])
-    parts = [
-        f'<p>Total pins: <strong>{summary["pin_count"]}</strong></p>'
-    ]
+    total = catalogue.markup(
+        "pins.total", escape, n=f'<strong>{summary["pin_count"]}</strong>'
+    )
+    parts = [f"<p>{total}</p>"]
     if summary["pins"]:
         parts.append(
             _render_pin_heatmap(
@@ -3681,7 +3811,9 @@ HTML-escaped --- they are respondent text, exactly the content the
 hardening work routes through [[escape]] everywhere else.
 
 <<functions>>=
-def _render_pin_comments(summary: dict[str, Any]) -> str:
+def _render_pin_comments(
+    summary: dict[str, Any], *, catalogue: Catalogue = ENGLISH
+) -> str:
     comments = [
         pin["comment"]
         for pin in summary["pins"]
@@ -3690,7 +3822,8 @@ def _render_pin_comments(summary: dict[str, Any]) -> str:
     if not comments:
         return ""
     items = "".join(f"<li>{escape(comment)}</li>" for comment in comments)
-    return f"<h2>Comments</h2><ul>{items}</ul>"
+    heading = escape(catalogue("pins.comments"))
+    return f"<h2>{heading}</h2><ul>{items}</ul>"
 @
 
 The top-level renderer reads the window-filtered summary from the store
@@ -3722,6 +3855,8 @@ decided once, by the caller that knows the deployment, rather than rediscovered
 deep in the rendering stack.  [[heatmap_bins]] follows the same route for the
 same reason: it is the configured pin-heatmap resolution, owned by the CLI's
 configuration reading, and the renderer only carries it down to the heatmap.
+The [[catalogue]] travels the same way to every helper that writes a
+word of its own.
 
 <<functions>>=
 def _render_results(
@@ -3732,21 +3867,24 @@ def _render_results(
     admin: bool = False,
     allow_images: bool = False,
     heatmap_bins: int = DEFAULT_HEATMAP_BINS,
+    catalogue: Catalogue = ENGLISH,
 ) -> str:
     summary = store.results(full_hash, window=window)
     question = store.question(full_hash)
+    total = catalogue.markup(
+        "results.total", escape, n=f'<strong>{summary["total"]}</strong>'
+    )
 
     parts = [
         _render_window_filter(
-            summary["url_prefix"], summary["window"]
+            summary["url_prefix"], summary["window"], catalogue=catalogue
         ),
-        f'<p>Total responses: '
-        f'<strong>{summary["total"]}</strong></p>',
+        f"<p>{total}</p>",
     ]
     answer_lists = []
 
     if isinstance(question, MCQuestion):
-        parts.append(_render_mc_stats(question, summary))
+        parts.append(_render_mc_stats(question, summary, catalogue=catalogue))
         parts.append(
             _render_bar_chart(
                 list(question.options),
@@ -3755,7 +3893,7 @@ def _render_results(
             )
         )
     elif isinstance(question, ScaleQuestion):
-        parts.append(_render_scale_stats(summary))
+        parts.append(_render_scale_stats(summary, catalogue=catalogue))
         bucket_range = range(question.low, question.high + 1)
         labels = [str(value) for value in bucket_range]
         counts = [summary["counts"][value] for value in bucket_range]
@@ -3765,29 +3903,50 @@ def _render_results(
         ]
         parts.append(_render_bar_chart(labels, counts, percentages))
     elif isinstance(question, OpenQuestion):
-        parts.append(_render_open_stats(summary))
+        parts.append(_render_open_stats(summary, catalogue=catalogue))
         answer_lists.append(
             _render_open_answers(
-                summary["answers"], allow_images=allow_images
+                summary["answers"],
+                allow_images=allow_images,
+                catalogue=catalogue,
             )
         )
     elif isinstance(question, WordCloudQuestion):
-        parts.append(_render_wordcloud_stats(summary))
-        parts.append(_render_wordcloud(question, summary["frequencies"]))
+        parts.append(_render_wordcloud_stats(summary, catalogue=catalogue))
+        parts.append(
+            _render_wordcloud(
+                question, summary["frequencies"], catalogue=catalogue
+            )
+        )
     elif isinstance(question, RankingQuestion):
-        parts.append(_render_ranking_stats(question, summary))
+        parts.append(
+            _render_ranking_stats(question, summary, catalogue=catalogue)
+        )
     elif isinstance(question, PinQuestion):
         parts.append(
             _render_pin_stats(
-                question, summary, heatmap_bins=heatmap_bins
+                question,
+                summary,
+                heatmap_bins=heatmap_bins,
+                catalogue=catalogue,
             )
         )
-        answer_lists.append(_render_pin_comments(summary))
+        answer_lists.append(
+            _render_pin_comments(summary, catalogue=catalogue)
+        )
 
-    parts.append(_render_context(question, summary["url_prefix"]))
+    parts.append(
+        _render_context(question, summary["url_prefix"], catalogue=catalogue)
+    )
     parts.extend(answer_lists)
     parts.append(
-        _render_question_nav(store, full_hash, results=admin, window=window)
+        _render_question_nav(
+            store,
+            full_hash,
+            results=admin,
+            window=window,
+            catalogue=catalogue,
+        )
     )
 
     return "".join(parts)
@@ -4395,9 +4554,12 @@ has started, which is why the message is a parameter.
 <<constants>>=
 LOCKED_REFRESH_SECONDS = 5
 <<functions>>=
-def _render_waiting_body(message: str, self_path: str) -> str:
+def _render_waiting_body(
+    message: str, self_path: str, *, catalogue: Catalogue = ENGLISH
+) -> str:
     retry = (
-        f'<a class="retry-link" href="{escape(self_path)}">Try again</a>'
+        f'<a class="retry-link" href="{escape(self_path)}">'
+        f'{escape(catalogue("nav.retry"))}</a>'
     )
     return (
         f"<p>{escape(message)}</p>"
@@ -4433,7 +4595,11 @@ would inherit lecturer privileges.  [[require_token]] closes that gap---when set
 the loopback shortcut is withdrawn and the presenter routes demand the
 unguessable [[admin_token]] the CLI minted for this run.  [[allow_images]] is the
 unrelated image-embedding policy decided earlier; it is captured here because
-the GET routes are where it enters the rendering call.
+the GET routes are where it enters the rendering call.  [[locale]] picks
+the catalogue every page is rendered from.  It is loaded here, once per
+server, so an unknown locale warns once when the server starts rather
+than on every request, and every page of one lecture speaks the same
+language, the lecturer's included.
 
 <<functions>>=
 def _build_handler(
@@ -4445,8 +4611,10 @@ def _build_handler(
     require_token: bool = False,
     heatmap_bins: int = DEFAULT_HEATMAP_BINS,
     lock: bool = True,
+    locale: str = DEFAULT_LOCALE,
 ):
     progress = LectureProgress()
+    catalogue = load_catalogue(locale)
 
     class MentipyHandler(BaseHTTPRequestHandler):
         server_version = "mentipy/0.1"
@@ -4530,6 +4698,45 @@ def _redirect(self, location: str, *, headers: dict[str, str] | None = None):
     self.end_headers()
 @
 
+The routes' own HTTP errors, a 404 for a path that leads nowhere and a
+413 for an oversized answer, go through [[_send_error_page]] rather
+than the standard library's [[send_error]], whose page is English and
+would break the server's language on exactly the page a lost
+respondent sees.  The page is titled with the status code and says what
+happened in the server's language.
+
+The standard library also answers some requests itself, before any
+route runs: a 501 for a method the handler has no [[do_]] method for,
+a 400 or 414 for a request line it cannot parse.  It does so through
+[[send_error]], so the handler overrides that too.  The override keeps
+the standard library's protocol handling (the [[Connection: close]],
+no body for [[HEAD]]) and only replaces the page it sends, through the
+[[error_message_format]] template it fills in; the page's own percent
+signs are doubled for that template.  A status without a reason of its
+own gets the general one.
+
+<<constants>>=
+ERROR_PAGE_REASONS = {
+    HTTPStatus.NOT_FOUND: "error.not_found",
+    HTTPStatus.REQUEST_ENTITY_TOO_LARGE: "error.too_large",
+}
+<<mentipy handler helpers>>=
+def _error_page(self, status: HTTPStatus) -> str:
+    title = catalogue("error.status", code=status.value)
+    key = ERROR_PAGE_REASONS.get(status, "error.request")
+    reason = escape(catalogue(key))
+    return _page(title, title, f"<p>{reason}</p>", catalogue=catalogue)
+
+def _send_error_page(self, status: HTTPStatus):
+    self._send(status, self._error_page(status))
+
+def send_error(self, code, message=None, explain=None):
+    page = self._error_page(HTTPStatus(code))
+    self.error_message_format = page.replace("%", "%%")
+    self.error_content_type = "text/html; charset=utf-8"
+    super().send_error(code, message, explain)
+@
+
 A presenter authenticates by presenting [[admin_token]] either as an
 [[?admin=...]] query parameter on the link the CLI prints, or as a cookie the
 server set on a previous authenticated request.  The query form is what the
@@ -4588,14 +4795,15 @@ def _admin_cookie_headers(self) -> dict[str, str]:
     cookie["mentipy_admin"]["path"] = "/"
     return {"Set-Cookie": cookie["mentipy_admin"].OutputString()}
 
-def _deny_admin(self, subject: str):
+def _deny_admin(self, reason: str):
+    forbidden = catalogue("error.forbidden")
     self._send(
         HTTPStatus.FORBIDDEN,
         _page(
-            "Forbidden",
-            "Forbidden",
-            f"<p>{subject} only available on localhost "
-            "or via the admin link.</p>",
+            forbidden,
+            forbidden,
+            f"<p>{escape(catalogue(reason))}</p>",
+            catalogue=catalogue,
         ),
     )
 @
@@ -4650,24 +4858,28 @@ def _resolve(self, prefix: str) -> str | None:
             "</li>"
             for candidate in matches
         )
+        ambiguous = catalogue("error.ambiguous")
+        body = catalogue.markup(
+            "error.ambiguous_body", escape, prefix=escape(prefix)
+        )
         self._send(
             HTTPStatus.MULTIPLE_CHOICES,
             _page(
-                "Ambiguous prefix",
-                "Ambiguous prefix",
-                f"<p>{escape(prefix)} matches multiple questions.</p>"
-                f"<ul>{items}</ul>",
+                ambiguous,
+                ambiguous,
+                f"<p>{body}</p><ul>{items}</ul>",
+                catalogue=catalogue,
             ),
         )
         return None
 
+    unknown = catalogue("error.unknown")
+    body = catalogue.markup(
+        "error.unknown_body", escape, prefix=f"<code>{escape(prefix)}</code>"
+    )
     self._send(
         HTTPStatus.NOT_FOUND,
-        _page(
-            "Unknown question",
-            "Unknown question",
-            f"<p>No question matches <code>{escape(prefix)}</code>.</p>",
-        ),
+        _page(unknown, unknown, f"<p>{body}</p>", catalogue=catalogue),
     )
     return None
 @
@@ -4733,13 +4945,14 @@ def _resolve_for_respondent(
     self._send(
         HTTPStatus.OK,
         _page(
-            "Locked",
-            "Not yet",
+            catalogue("waiting.title"),
+            catalogue("waiting.heading"),
             _render_waiting_body(
-                "The lecturer has not opened this question yet.", self.path
+                catalogue("waiting.question"), self.path, catalogue=catalogue
             ),
             refresh=True,
             refresh_seconds=LOCKED_REFRESH_SECONDS,
+            catalogue=catalogue,
         ),
         headers={"Cache-Control": "no-store"},
     )
@@ -4800,22 +5013,25 @@ def do_GET(self):
 
     if path == "/":
         if not self._admin_allowed():
-            self._deny_admin("The question index is")
+            self._deny_admin("error.forbidden_index")
             return
 
         self._send(
             HTTPStatus.OK,
             _page(
-                "Questions",
-                "Questions",
-                _render_index(store, progress if lock else None),
+                catalogue("index.title"),
+                catalogue("index.title"),
+                _render_index(
+                    store, progress if lock else None, catalogue=catalogue
+                ),
+                catalogue=catalogue,
             ),
         )
         return
 
     segments = [segment for segment in path.split("/") if segment]
     if not segments:
-        self.send_error(HTTPStatus.NOT_FOUND)
+        self._send_error_page(HTTPStatus.NOT_FOUND)
         return
 
     if segments[0] == "active":
@@ -4829,13 +5045,12 @@ def _handle_question_get(self, segments: list[str], query: str):
         if full_hash is None:
             return
         title = store.metadata(full_hash)["text"]
-        body = (
-            "<p>Thanks, your answer was recorded.</p>"
-            + _render_question_nav(store, full_hash)
+        body = f"<p>{escape(catalogue('thanks.body'))}</p>" + (
+            _render_question_nav(store, full_hash, catalogue=catalogue)
         )
         self._send(
             HTTPStatus.OK,
-            _page("Thanks", title, body),
+            _page(catalogue("thanks.title"), title, body, catalogue=catalogue),
         )
         return
 
@@ -4857,7 +5072,7 @@ def _handle_question_get(self, segments: list[str], query: str):
         if not _results_public(
             question, public_results
         ) and not self._admin_allowed():
-            self._deny_admin("Results pages are")
+            self._deny_admin("error.forbidden_results")
             return
 
         window = _parse_window(query, default=RESULTS_PAGE_WINDOW)
@@ -4866,14 +5081,14 @@ def _handle_question_get(self, segments: list[str], query: str):
             progress.open(full_hash)
             if progress.is_skipped(full_hash):
                 banner = _render_skipped_banner(
-                    store, full_hash, window=window
+                    store, full_hash, window=window, catalogue=catalogue
                 )
 
         title = store.metadata(full_hash)["text"]
         self._send(
             HTTPStatus.OK,
             _page(
-                f"Results for {title}",
+                catalogue("results.title", title=title),
                 title,
                 banner
                 + _render_results(
@@ -4883,15 +5098,17 @@ def _handle_question_get(self, segments: list[str], query: str):
                     admin=self._admin_allowed(),
                     allow_images=allow_images,
                     heatmap_bins=heatmap_bins,
+                    catalogue=catalogue,
                 ),
                 refresh=True,
+                catalogue=catalogue,
             ),
         )
         return
 
     if len(segments) == 2 and segments[1] == "results.json":
         if not self._admin_allowed():
-            self._deny_admin("Result exports are")
+            self._deny_admin("error.forbidden_export")
             return
 
         full_hash = self._resolve(segments[0])
@@ -4907,7 +5124,7 @@ def _handle_question_get(self, segments: list[str], query: str):
         return
 
     if len(segments) != 1:
-        self.send_error(HTTPStatus.NOT_FOUND)
+        self._send_error_page(HTTPStatus.NOT_FOUND)
         return
 
     full_hash = self._resolve_for_respondent(segments[0])
@@ -4917,7 +5134,12 @@ def _handle_question_get(self, segments: list[str], query: str):
     title = store.metadata(full_hash)["text"]
     self._send(
         HTTPStatus.OK,
-        _page(title, title, _render_form(store, full_hash)),
+        _page(
+            title,
+            title,
+            _render_form(store, full_hash, catalogue=catalogue),
+            catalogue=catalogue,
+        ),
     )
 @
 
@@ -4966,11 +5188,14 @@ if location is None:
     self._send(
         HTTPStatus.OK,
         _page(
-            "Not yet",
-            "Not yet",
-            _render_waiting_body("The lecture has not started yet.", "/active"),
+            catalogue("waiting.heading"),
+            catalogue("waiting.heading"),
+            _render_waiting_body(
+                catalogue("waiting.lecture"), "/active", catalogue=catalogue
+            ),
             refresh=True,
             refresh_seconds=LOCKED_REFRESH_SECONDS,
+            catalogue=catalogue,
         ),
         headers={"Cache-Control": "no-store", "X-Mentipy-Active": "waiting"},
     )
@@ -5005,7 +5230,7 @@ if full_hash is None:
     return
 next_hash = store.next_question(full_hash)
 if next_hash is None or not store.question(full_hash).next:
-    self.send_error(HTTPStatus.NOT_FOUND)
+    self._send_error_page(HTTPStatus.NOT_FOUND)
     return
 location = None
 if (
@@ -5038,12 +5263,12 @@ if full_hash is None:
     return
 question = store.question(full_hash)
 if not isinstance(question, PinImageQuestion):
-    self.send_error(HTTPStatus.NOT_FOUND)
+    self._send_error_page(HTTPStatus.NOT_FOUND)
     return
 data = store.load_image(question.image_sha256)
 mime = sniff_image_mime(data) if data is not None else None
 if data is None or mime is None:
-    self.send_error(HTTPStatus.NOT_FOUND)
+    self._send_error_page(HTTPStatus.NOT_FOUND)
     return
 self._send_bytes(
     HTTPStatus.OK,
@@ -5079,7 +5304,7 @@ if full_hash is None:
 item = _context_download(store.question(full_hash), segments[2])
 data = store.load_image(item.sha256) if item is not None else None
 if data is None:
-    self.send_error(HTTPStatus.NOT_FOUND)
+    self._send_error_page(HTTPStatus.NOT_FOUND)
     return
 content_type, _encoding = mimetypes.guess_type(item.filename)
 self._send_bytes(
@@ -5176,7 +5401,7 @@ def do_POST(self):
     if len(segments) == 2 and segments[1] == "reopen":
         <<reopen the question>>
     if len(segments) != 1:
-        self.send_error(HTTPStatus.NOT_FOUND)
+        self._send_error_page(HTTPStatus.NOT_FOUND)
         return
 
     full_hash = self._resolve(segments[0])
@@ -5186,7 +5411,7 @@ def do_POST(self):
     question = store.question(full_hash)
     length = int(self.headers.get("Content-Length", "0"))
     if length > _max_request_body(question):
-        self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+        self._send_error_page(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
         return
 
     raw_body = self.rfile.read(length)
@@ -5205,12 +5430,17 @@ def do_POST(self):
             )
         value = _parse_answer(question, fields)
     except (TypeError, ValueError) as err:
+        reason = (
+            err.key if isinstance(err, AnswerError) else "answer.unreadable"
+        )
+        invalid = catalogue("error.invalid")
         self._send(
             HTTPStatus.BAD_REQUEST,
             _page(
-                "Invalid answer",
-                "Invalid answer",
-                f"<p>{escape(str(err))}</p>",
+                invalid,
+                invalid,
+                f"<p>{escape(catalogue(reason))}</p>",
+                catalogue=catalogue,
             ),
         )
         return
@@ -5237,7 +5467,7 @@ skipped question.
 
 <<skip the question and move on>>=
 if not self._admin_allowed():
-    self._deny_admin("Skipping questions is")
+    self._deny_admin("error.forbidden_skip")
     return
 full_hash = self._resolve(segments[0])
 if full_hash is None:
@@ -5263,15 +5493,20 @@ lecturer cannot miss that the room is not answering this question.
 
 <<functions>>=
 def _render_skipped_banner(
-    store: Store, full_hash: str, *, window: str = RESULTS_PAGE_WINDOW
+    store: Store,
+    full_hash: str,
+    *,
+    window: str = RESULTS_PAGE_WINDOW,
+    catalogue: Catalogue = ENGLISH,
 ) -> str:
     prefix = store.metadata(full_hash)["url_prefix"]
     action = f"/{prefix}/reopen{_window_query(window)}"
     return (
         '<div class="skipped-banner">'
-        "<p>Skipped: this question is locked for the room.</p>"
+        f"<p>{escape(catalogue('nav.skipped'))}</p>"
         f'<form method="post" action="{action}">'
-        '<button class="reopen-button" type="submit">Reopen</button>'
+        '<button class="reopen-button" type="submit">'
+        f"{escape(catalogue('nav.reopen'))}</button>"
         "</form></div>"
     )
 @
@@ -5281,7 +5516,7 @@ same results page, now open and active.
 
 <<reopen the question>>=
 if not self._admin_allowed():
-    self._deny_admin("Reopening questions is")
+    self._deny_admin("error.forbidden_reopen")
     return
 full_hash = self._resolve(segments[0])
 if full_hash is None:
@@ -5296,8 +5531,8 @@ return
 Creating the server is intentionally a thin wrapper around the threaded server
 class and the generated handler.  That keeps port binding visible to callers
 such as the CLI while preserving the store, the [[public_results]] policy, the
-image policy, the admin-token policy, and the [[lock]] policy inside the
-handler closure.  These
+image policy, the admin-token policy, the [[lock]] policy and the
+[[locale]] inside the handler closure.  These
 policies are passed in rather than read from configuration here so the server
 stays agnostic about where its settings come from---the CLI owns that decision.
 Creating the server is also where the session starts: the store records
@@ -5321,6 +5556,7 @@ def create_server(
     require_token: bool = False,
     heatmap_bins: int = DEFAULT_HEATMAP_BINS,
     lock: bool = True,
+    locale: str = DEFAULT_LOCALE,
 ) -> ThreadingHTTPServer:
     """Return a configured mentipy HTTP server.
 
@@ -5337,6 +5573,7 @@ def create_server(
             require_token=require_token,
             heatmap_bins=heatmap_bins,
             lock=lock,
+            locale=locale,
         ),
     )
     try:
@@ -5363,6 +5600,7 @@ def serve(
     require_token: bool = False,
     heatmap_bins: int = DEFAULT_HEATMAP_BINS,
     lock: bool = True,
+    locale: str = DEFAULT_LOCALE,
 ):
     """Run the mentipy HTTP server until interrupted."""
 
@@ -5376,11 +5614,325 @@ def serve(
         require_token=require_token,
         heatmap_bins=heatmap_bins,
         lock=lock,
+        locale=locale,
     )
     try:
         server.serve_forever()
     finally:
         server.server_close()
+@
+
+\subsection{Pages in the server's language}
+
+A server started with [[locale="sv"]] must speak Swedish on every kind
+of page, to respondents and to the lecturer alike, and the test walks
+them all through a real server: the index, both waiting pages, the
+form, thanks and results page of every question kind, a skipped
+question's banner, a rejected answer, a refusal and an unknown prefix.
+Spot checks of Swedish words would miss the one string a renderer
+forgot to pass its catalogue to, so the test also asserts the converse
+on every page: no English message that differs from its Swedish one is
+left in the page's visible text.  Visible text means the markup without
+its tags and script, since class names such as [[status-open]] and
+URLs such as [[/results]] are English by design.  The lecturer's own
+words are not translated: one option is literally \enquote{Submit},
+and it must survive, which is why the leak check first removes that
+option from the three places it appears: the form's label, the bar
+chart and the mode callout.  Removing the bare word instead would hide
+an English Submit button, so every form page is also checked for the
+Swedish button.  Every page also declares its language.
+
+The walk covers the empty results pages, fetched before the answers,
+and every refusal, requested as a respondent after the lecturer has
+opened the questions, since a closed question shows the waiting page
+before its results route could refuse.  The ambiguous-prefix page needs
+two hashes with a common prefix and has a test of its own below.
+
+<<test functions>>=
+SWEDISH = load_catalogue("sv")
+
+
+def _visible_text(page):
+    page = re.sub(r"(?s)<(script|style)\b.*?</\1>", " ", page)
+    return re.sub(r"<[^>]+>", " ", page)
+
+
+def _english_leaks(page, *, keep=()):
+    for markup in keep:
+        page = page.replace(markup, "")
+    text = _visible_text(page)
+    leaks = []
+    for key in MESSAGES:
+        if ENGLISH.messages[key] == SWEDISH.messages[key]:
+            continue
+        pieces = re.split(r"\{[^}]*\}", ENGLISH.messages[key])
+        longest = max(pieces, key=len).strip()
+        if len(longest) >= 4 and longest in text:
+            leaks.append((key, longest))
+    return leaks
+
+
+def test_a_swedish_server_speaks_swedish_on_every_page(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    digest = store.save_image(b"a,b\n1,2\n")
+    questions = [
+        MCQuestion(
+            "Vilken?",
+            ("Submit", "B"),
+            context=(ContextDownload(digest, "data.csv", 8),),
+        ),
+        ScaleQuestion("Hur?", low_label="aldrig", high_label="alltid"),
+        OpenQuestion("Varför?"),
+        WordCloudQuestion("Ett ord?"),
+        RankingQuestion("Ordna?", ("A", "B", "C"), top_n=2),
+        PinTextQuestion("Peka?", "x = 1", max_pins=3, allow_comment=True),
+    ]
+    prefixes = [store.register(question) for question in questions]
+    hashes = [store.resolve(prefix) for prefix in prefixes]
+    answers = [0, 3, "svar", "hej hopp", [0, 1],
+               [{"x": 0.5, "y": 0.5, "comment": "här"}]]
+    switch = {"remote": True}
+    pages = {}
+    option = ["> Submit</label>", "<strong>Submit</strong>", ">Submit</span>"]
+
+    with _running_server(store, locale="sv", remote=switch) as port:
+        pages["not started"] = _request(port, "GET", "/active")[1]
+        pages["locked"] = _request(port, "GET", f"/{prefixes[0]}")[1]
+        pages["forbidden"] = _request(port, "GET", "/")[1]
+        pages["unknown"] = _request(port, "GET", "/ffffffffff")[1]
+        switch["remote"] = False
+        pages["not found"] = _request(port, "GET", f"/{prefixes[0]}/a/b")[1]
+        pages["too large"] = _request(
+            port, "POST", f"/{prefixes[0]}",
+            body="x" * (MIN_FORM_BODY_BYTES + 1),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )[1]
+        for prefix, full_hash, answer in zip(prefixes, hashes, answers):
+            pages[f"form {prefix}"] = _request(port, "GET", f"/{prefix}")[1]
+            pages[f"empty {prefix}"] = _request(
+                port, "GET", f"/{prefix}/results"
+            )[1]
+            store.record(full_hash, answer)
+            pages[f"results {prefix}"] = _request(
+                port, "GET", f"/{prefix}/results"
+            )[1]
+            pages[f"thanks {prefix}"] = _request(
+                port, "GET", f"/{prefix}/thanks"
+            )[1]
+        pages["invalid"] = _request(
+            port, "POST", f"/{prefixes[0]}", body="",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )[1]
+        _request(port, "POST", f"/{prefixes[1]}/skip")
+        pages["skipped"] = _request(port, "GET", f"/{prefixes[1]}/results")[1]
+        pages["index"] = _request(port, "GET", "/")[1]
+        switch["remote"] = True
+        target = f"/{prefixes[2]}"
+        for name, method, path in [
+            ("results", "GET", f"{target}/results"),
+            ("export", "GET", f"{target}/results.json"),
+            ("skip", "POST", f"{target}/skip"),
+            ("reopen", "POST", f"{target}/reopen"),
+        ]:
+            pages[f"refused {name}"] = _request(port, method, path)[1]
+
+    for name, page in pages.items():
+        assert '<html lang="sv">' in page, name
+        assert _english_leaks(page, keep=option) == [], name
+    for prefix in prefixes:
+        assert '<button type="submit">Skicka</button>' in (
+            pages[f"form {prefix}"]
+        ), prefix
+    pin_form = pages[f"form {prefixes[5]}"]
+    for key in ["form.pin_remove", "form.pin_comment"]:
+        text = SWEDISH(key, n="{n}")
+        assert server_module._script_string(text) in pin_form, key
+    joined = "".join(pages.values())
+    for swedish in [
+        "Föreläsningen har inte börjat än.",
+        "Läraren har inte öppnat frågan än.",
+        "Försök igen",
+        "Frågelistan finns bara lokalt på servern",
+        "Resultaten finns bara lokalt på servern",
+        "Resultatexporten finns bara lokalt på servern",
+        "Att hoppa över frågor går bara lokalt på servern",
+        "Att öppna frågor igen går bara lokalt på servern",
+        "Fel 404",
+        "Det finns inget på den här adressen.",
+        "Fel 413",
+        "Svaret är för stort för att skickas.",
+        "Inga fritextsvar än.",
+        "Inga svar än.",
+        "Okänd fråga",
+        "Skicka",
+        "Lägst: aldrig",
+        "Högst: alltid",
+        "Rangordna de 2 bästa.",
+        "Tryck för att sätta ut högst 3 nålar",
+        "Ladda ner data.csv (8 byte)",
+        "Antal svar: <strong>1</strong>",
+        "Sedan servern startade",
+        "Typvärde: <strong>Submit</strong> (100%)",
+        "Medelvärde",
+        "Medellängd",
+        "<th>Andel</th>",
+        'aria-label="Ordmoln"',
+        "snitt 1.0, rangordnad av 1",
+        "Antal nålar: <strong>1</strong>",
+        "<h2>Kommentarer</h2>",
+        "Hoppa över",
+        "Nästa →",
+        "← Föregående",
+        "Tack, ditt svar är registrerat.",
+        "Ogiltigt svar",
+        "välj exakt ett alternativ",
+        "Överhoppad: frågan är stängd för deltagarna.",
+        "Öppna igen",
+        "överhoppad",
+        "Frågor",
+    ]:
+        assert swedish in joined, swedish
+    assert "Submit</label>" in pages[f"form {prefixes[0]}"]
+@
+
+The ambiguous-prefix page lists the candidates, so it needs two
+questions whose hashes share a prefix; as in the English test of that
+page further down, the hash is replaced to make one.
+
+<<test functions>>=
+def test_a_swedish_server_lists_an_ambiguous_prefix_in_swedish(
+    tmp_path, monkeypatch
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    hashes = {"första": "abcd" + "1" * 60, "andra": "abce" + "2" * 60}
+    monkeypatch.setattr(
+        "mentipy.store.question_hash",
+        lambda question: hashes[question.text],
+    )
+    store.register(OpenQuestion("första"))
+    store.register(OpenQuestion("andra"))
+
+    with _running_server(store, locale="sv") as port:
+        response, page = _request(port, "GET", "/abc")
+
+    assert response.status == 300
+    assert '<html lang="sv">' in page
+    assert "<h1>Tvetydigt prefix</h1>" in page
+    assert "<p>abc matchar flera frågor.</p>" in page
+    assert _english_leaks(page) == []
+@
+
+The standard library answers some requests itself, before any route
+sees them: an unsupported method gets a 501, and a request line that is
+not HTTP gets a 400.  Those pages must speak the server's language too.
+The 400 is sent over a raw socket, since no HTTP client sends such a
+request; the standard library then answers without a status line, as
+it does for any request it could not parse, so the test reads the body
+alone.
+
+<<test functions>>=
+def test_standard_library_errors_use_the_server_language(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Vilken?", ("A", "B")))
+
+    with _running_server(store, locale="sv") as port:
+        response, page = _request(port, "PUT", f"/{prefix}")
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as raw:
+            raw.sendall(b"GARBAGE\r\n\r\n")
+            garbage = b"".join(iter(lambda: raw.recv(4096), b"")).decode()
+
+    assert response.status == 501
+    for body, code in [(page, 501), (garbage, 400)]:
+        assert '<html lang="sv">' in body
+        assert f"<h1>Fel {code}</h1>" in body
+        assert "<p>Servern kunde inte hantera begäran.</p>" in body
+        assert _english_leaks(body) == []
+@
+
+An error page's reason is escaped like any other catalogue text, on
+the routes' own error pages and on the standard library's alike.  The
+built-in reasons hold no markup, so the test gives the server a
+catalogue whose reasons do.
+
+<<test functions>>=
+def test_error_pages_escape_their_reason(tmp_path, monkeypatch):
+    hostile = Catalogue(
+        "xx",
+        {**ENGLISH.messages,
+         "error.not_found": "<b>&",
+         "error.request": "<i>&"},
+    )
+    monkeypatch.setattr(server_module, "load_catalogue", lambda _: hostile)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+
+    with _running_server(store) as port:
+        _response, missing = _request(port, "GET", f"/{prefix}/a/b")
+        _response, unsupported = _request(port, "PUT", f"/{prefix}")
+
+    assert "<p>&lt;b&gt;&amp;</p>" in missing
+    assert "<p>&lt;i&gt;&amp;</p>" in unsupported
+    assert "<b>&" not in missing and "<i>&" not in unsupported
+@
+
+The pin form's two script strings are the one place a catalogue
+message reaches JavaScript, so their encoding is pinned on the
+renderer: a JSON string literal, with the angle brackets and the
+ampersand escaped so that no message can end the script element, and
+the comment placeholder's [[{n}]] left for the script to fill.
+
+<<test functions>>=
+def test_pin_script_strings_are_safe_json_literals():
+    hostile = Catalogue(
+        "xx",
+        {**ENGLISH.messages,
+         "form.pin_remove": "</script><b>&",
+         "form.pin_comment": 'Pin {n} "note"'},
+    )
+    script = server_module._render_pin_script(
+        PinTextQuestion("Peka?", "x", max_pins=2, allow_comment=True),
+        catalogue=hostile,
+    )
+
+    assert (
+        'marker.title = "\\u003c/script\\u003e\\u003cb\\u003e\\u0026";'
+        in script
+    )
+    assert (
+        'comment.placeholder = "Pin {n} \\"note\\"".replace("{n}", index + 1);'
+        in script
+    )
+    assert script.count("</script>") == 1
+@
+
+English stays the default, and a locale Mentipy has no catalogue for
+falls back to it, with a single warning when the server starts rather
+than one per request.  A request no form would send gets the generic
+reason rather than Python's own error message.
+
+<<test functions>>=
+def test_an_unknown_server_locale_serves_english_and_warns_once(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("mentipy.catalogue._WARNED_LOCALES", set())
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+
+    with pytest.warns(UserWarning, match="'tlh'") as warned:
+        with _running_server(store, locale="tlh", lock=False) as port:
+            _response, form = _request(port, "GET", f"/{prefix}")
+            _response, rejected = _request(
+                port, "POST", f"/{prefix}", body="value=x",
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded"
+                },
+            )
+
+    assert len(warned) == 1
+    assert '<html lang="en">' in form
+    assert '<button type="submit">Submit</button>' in form
+    assert "<p>the answer could not be read</p>" in rejected
+    assert "invalid literal" not in rejected
 @
 
 If the start cannot be written, a store on a read-only file system for
@@ -5565,7 +6117,7 @@ def _request(port, method, path, body=None, headers=None):
 
 @contextmanager
 def _running_server(
-    store, *, public_results=False, lock=True, remote=False
+    store, *, public_results=False, lock=True, remote=False, locale="en"
 ):
     server = create_server(
         store,
@@ -5573,6 +6125,7 @@ def _running_server(
         port=0,
         public_results=public_results,
         lock=lock,
+        locale=locale,
     )
     if remote is not False:
         switch = remote if isinstance(remote, dict) else {"remote": True}
@@ -7561,12 +8114,14 @@ import hashlib
 import http.client
 import json
 import logging
+import re
 import socket
 import threading
 
 import mentipy.server as server_module
 import pytest
 
+from mentipy.catalogue import *
 from mentipy.questions import *
 from mentipy.server import *
 from mentipy.store import *
