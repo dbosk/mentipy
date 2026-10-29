@@ -177,9 +177,10 @@ PUBLIC_HELP = (
 )
 LOCALE_HELP = (
     "Language of all web pages: en or sv. Without it, a question's "
-    "pages follow the locale its slides recorded, while a question "
-    "without one, and the pages not about one question, follow config "
-    f"setting {LOCALE_CONFIG}."
+    "pages follow the locale its slides recorded; a question without "
+    "one, and the pages not about one question, follow the locale the "
+    "store's recorded questions agree on, else config setting "
+    f"{LOCALE_CONFIG}."
 )
 RESULTS_HELP = (
     "Redirect respondents to the live results page. Questions "
@@ -645,8 +646,14 @@ def _latex_reference() -> str:
             of the helpers' locale= keyword (en or sv), which a deck
             sets once in its shared block, else of config key
             {LOCALE_CONFIG}.  The helper records that language with the
-            question, and the question's web pages follow it unless
-            `mentipy serve --locale` overrides it.  Each
+            question when one was chosen (the English fallback is not
+            recorded, and a compile that chooses nothing keeps an
+            earlier record: choose en to switch back), and the
+            question's web pages follow it unless
+            `mentipy serve --locale` overrides it.  The pages of no
+            question (the index, /active) and of a question without a
+            record follow the language that every recorded question in
+            the store agrees on, else {LOCALE_CONFIG}.  Each
             label is a macro that the snippet defines with
             \\providecommand, so a deck's own definition in its
             preamble wins: \\newcommand{{\\mentipychooseone}}{{Pick one:}}.
@@ -2309,9 +2316,10 @@ language of the pages is both: a lecturer's decks are usually in one
 language, which [[mentipy.locale]] records once, but a guest lecture
 in English on a Swedish lecturer's machine needs [[--locale en]] for
 one run.  The flag and the setting are passed on separately, because
-between them the server places the locale each question's slides
-recorded (\cref{sec:question-locale}): the flag beats the record, the
-setting does not.
+between them the server places what the slides recorded, each
+question's locale and the one the store's questions agree on
+(\cref{sec:question-locale}): the flag beats the records, the setting
+does not.
 
 <<cli setup>>=
 @cli.command(context_settings={"allow_extra_args": True})
@@ -5996,6 +6004,8 @@ def test_latex_command_prints_the_reference_and_all_config_keys():
     assert "`mentipy serve --locale`" in result.output
     assert 'layout="slide", locale=None)' in result.output
     assert "records that language with the" in result.output
+    assert "choose en to switch back" in result.output
+    assert "every recorded question in" in result.output
     for name in SLIDE_LABEL_MACROS.values():
         assert f"\\{name}" in result.output
     for key, _description in CONFIG_KEY_HELP:
@@ -6115,8 +6125,8 @@ def test_serve_command_passes_the_lock_flag(tmp_path, monkeypatch):
 @
 
 The locale reaches the server in two parts, because they rank
-differently there: [[--locale]] as given, which beats the locale a
-question's slides recorded, and the configured default, which does not.
+differently there: [[--locale]] as given, which beats the locales the
+slides recorded, and the configured default, which does not.
 Both serving branches must pass both, the public one as well.
 
 <<test functions>>=
@@ -7947,6 +7957,29 @@ def test_render_locale_reaches_the_slide_and_the_record(
     store = Store(store_path)
     [entry] = store.all_questions()
     assert store.question_locale(entry["hash"]) == "sv"
+@
+
+A trial render in a terminal without [[--locale]], on a machine with
+no configured locale, gets English labels, but it records nothing: a
+recorded English would break the agreement of a Swedish store and turn
+its index and waiting page English (\cref{sec:agreed-locale}).
+
+<<test functions>>=
+def test_render_without_a_locale_records_none(tmp_path, monkeypatch):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    monkeypatch.chdir(tmp_path)
+    store_path = tmp_path / "mentipy.json"
+
+    result = CliRunner().invoke(
+        cli,
+        ["render", "open", "Why?", "--store", str(store_path),
+         "--base-url", "http://example.test:8080"],
+    )
+
+    assert result.exit_code == 0, result.output
+    store = Store(store_path)
+    [entry] = store.all_questions()
+    assert store.question_locale(entry["hash"]) is None
 @
 
 <<test functions>>=

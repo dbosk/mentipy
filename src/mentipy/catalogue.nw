@@ -21,9 +21,10 @@ in either of them:
   comes from this catalogue, so a deck can still override a single
   label.  They record the locale the slide used with the question.
 \item[The web pages] The server renders a question's pages in the
-  language its slide recorded, and every other page in the setting's,
-  unless the [[--locale]] flag of [[mentipy serve]] names one for
-  all (\cref{sec:question-locale}).
+  language its slide recorded, and every other page in the language
+  the recorded questions agree on (\cref{sec:agreed-locale}), else in
+  the setting's, unless the [[--locale]] flag of [[mentipy serve]]
+  names one for all (\cref{sec:question-locale}).
 \end{description}
 Both import this module and nothing in it imports them, so the
 catalogue can be read, and checked, on its own.  The store module keeps
@@ -76,7 +77,7 @@ from mentipy.catalogue import *
 from dataclasses import dataclass
 from string import Formatter
 from types import MappingProxyType
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 import warnings
 @
 
@@ -685,4 +686,59 @@ def test_an_unknown_locale_falls_back_to_english_and_warns_once(
         warnings.simplefilter("error")
         assert load_catalogue("klingon") is ENGLISH
         assert load_catalogue("sv").locale == "sv"
+@
+
+\subsection{The language a store agrees on}
+\label{sec:agreed-locale}
+
+A server's pages that belong to no question, the index and the
+waiting page at [[/active]] among them, have no slide to take their
+language from.  The slides of the store's questions have each recorded
+one, though (\cref{sec:recorded-locale}), and a store usually holds
+one course's decks in one language, so the server takes the language
+they agree on.  Agreement is between the languages, not their
+spellings: [[sv]] and [[sv_SE.UTF-8]] agree, as they choose the same
+catalogue.  Two different languages are no agreement at all, rather
+than a majority vote: a mixed store is the case the [[--locale]] flag
+is for, and with a vote, compiling a few slides of another course into
+the store could flip the language of every page without a word.
+
+A recorded locale Mentipy has no catalogue for, from a hand-edited
+store or a newer Mentipy, counts as no record here, as it does for the
+question itself (\cref{sec:question-locale}).  The server cannot speak
+it, so letting it break the agreement would only replace a language the
+server knows with the configured default, and an unknown record would
+otherwise behave differently on the question's pages than on the
+others.  The rule lives here rather than in the store, because which
+languages are known is this module's knowledge; the store only reports
+what the slides recorded.
+
+<<functions>>=
+def agreed_locale(locales: Iterable[str]) -> str | None:
+    """Return the one known language `locales` agree on, or `None`.
+
+    Spellings of one language agree, a locale without a catalogue is
+    ignored, and two different languages give `None`.
+    """
+
+    known = {normalize_locale(locale) for locale in locales} & set(CATALOGUES)
+    return known.pop() if len(known) == 1 else None
+@
+
+The tests vary one thing at a time: the spelling of one language, a
+second language, an empty store, and an unknown locale beside a known
+one and on its own.  A system spelling must count as its language even
+on its own, and must disagree with another language, or a spelling the
+reduction missed would pass for an unknown locale.
+
+<<test functions>>=
+def test_the_agreed_locale_is_the_one_known_language_of_the_records():
+    assert agreed_locale(["sv", "sv_SE.UTF-8", "sv"]) == "sv"
+    assert agreed_locale(["sv_SE.UTF-8"]) == "sv"
+    assert agreed_locale(["en"]) == "en"
+    assert agreed_locale(["sv_SE.UTF-8", "en"]) is None
+    assert agreed_locale(["sv", "en"]) is None
+    assert agreed_locale([]) is None
+    assert agreed_locale(["tlh", "sv"]) == "sv"
+    assert agreed_locale(["tlh"]) is None
 @

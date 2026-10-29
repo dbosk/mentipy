@@ -1770,13 +1770,28 @@ configured default, then English:
 mentipy config mentipy.locale --set sv
 \end{minted}
 
-The default also chooses the language of the pages not tied to one
-question, the lecturer's index and the waiting page at
-[[/active]].  PythonTeX reruns a block only when its code has changed,
-so after changing the configured default, remove PythonTeX's output or
-build with [[pythontex --rerun=always]]; otherwise the slides keep their
-earlier labels.  A guest lecture in English overrides every page's
-language for one run, recorded or not:
+Only a language someone chose, by the keyword or the configured
+default, is recorded.  A slide that is English merely because nothing
+was set records nothing, and a compile that chooses nothing keeps the
+question's earlier record: a deck that drops [[locale="sv"]] gets
+English slides, but its pages stay Swedish until a compile chooses
+[[locale="en"]].
+
+PythonTeX reruns a block only when its code has changed, so after
+changing the configured default, remove PythonTeX's output or build
+with [[pythontex --rerun=always]]; otherwise the slides keep their
+earlier labels.
+
+The pages not tied to one question, the lecturer's index and the
+waiting page at [[/active]] that students see before the lecture
+starts, have no slide of their own.  When the questions in the store
+that recorded a language all recorded the same one, as one course's
+decks usually do, these pages are in it, and so are the pages of a
+question that recorded none, such as one registered before Mentipy
+recorded languages.  When the recorded languages differ, they are in
+the configured default, then English.  A store that mixes languages,
+or a guest lecture in English, sets every page's language for one
+run, recorded or not:
 
 \begin{minted}{text}
 mentipy serve --locale en
