@@ -6705,6 +6705,36 @@ def test_present_takes_the_options_of_serve_and_watch():
     assert {option[0] for option in present} >= PRESENT_ONLY_OPTIONS
 @
 
+Every test below runs [[present]] for real, and [[present]] opens the
+admin index in a browser by default.  Without a guard each run would
+start the machine's [[xdg-open]] and leave a tab in the browser of
+whoever runs the suite, once per test and once more per mutant in a
+mutation run.  So no test in this module may start a real process
+through [[subprocess.Popen]]: an automatic fixture replaces it with a
+stand-in that starts nothing.  The replacement is made on the
+[[subprocess]] module itself, which every module shares, so the real
+class is kept as [[_REAL_POPEN]] when the tests are loaded, for the one
+test that needs a real process.  The tests of the browser itself
+(\cref{sec:test-open-browser}) replace the stand-in with a spy, which
+pytest sets up after the automatic fixture, so the spy wins.
+
+<<test functions>>=
+_REAL_POPEN = subprocess.Popen
+
+
+class _NoBrowser:
+    def __init__(self, argv, **_options):
+        self.argv = argv
+
+    def wait(self, *_args, **_kwargs):
+        return 0
+
+
+@pytest.fixture(autouse=True)
+def _no_real_browser(monkeypatch):
+    monkeypatch.setattr("mentipy.cli.subprocess.Popen", _NoBrowser)
+@
+
 The main run starts a real server on a free port through [[present]]
 and plays the lecture through the sleep stub, as the watch tests do.
 The banner opens every frame after a clear, and the waiting line names
@@ -7226,6 +7256,7 @@ def test_present_serves_pages_in_the_chosen_locale(tmp_path, monkeypatch):
 @
 
 \subsection{Opening the browser}
+\label{sec:test-open-browser}
 
 The browser command is replaced by a spy, since a test must not open
 windows on the machine that runs it.  The spy records the argument
@@ -7723,10 +7754,13 @@ def test_present_opens_the_tokenised_index_under_ssh(
 
 A command that cannot be started must not stop the lecture.  This one
 does not exist, so the real [[Popen]] fails; the failure becomes a
-warning in the banner and the watch starts as usual.
+warning in the banner and the watch starts as usual.  The test puts
+the real [[Popen]] back in place of the stand-in: a command that does
+not exist opens no browser.
 
 <<test functions>>=
 def test_present_reports_an_open_command_that_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr("mentipy.cli.subprocess.Popen", _REAL_POPEN)
     monkeypatch.setattr("mentipy.cli.CLEAR_SCREEN", "[clear]")
 
     result, _port = _run_present(
