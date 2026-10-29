@@ -21,3 +21,4 @@ _minted*
 *.synctex.gz
 *.toc
 *.vrb
+latexmkrc
