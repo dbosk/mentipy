@@ -63,9 +63,11 @@ from mentipy.store import (
     QR_DIR_CONFIG,
     QR_FORMAT_CONFIG,
     SHOW_URL_CONFIG,
+    OUTSIDE_QR_TARGET,
+    OWN_QR_TARGET,
+    RememberedQrTarget,
     Store,
     get_setting,
-    in_other_checkout,
     resolve_path,
 )
 @
@@ -1105,77 +1107,76 @@ def _latex_include_path(target: Path) -> Path:
 @
 
 When callers do not override QR location or format during regeneration, the
-remembered targets are the most accurate source of truth.  Explicit overrides
-instead mean \enquote{write the conventional target for each question now}, so
-the remembered list should not fan out into stale document directories.
+remembered targets are the only source of truth.  A question with none has no
+QR code to refresh: either no render wrote one, or the store dropped what an
+older version recorded for another checkout.  Early versions wrote the
+conventional target into the server's working directory instead, which
+scatters QR codes wherever the server happens to run, the very problem the
+remembered paths solve.  Explicit overrides instead mean \enquote{write the
+conventional target for each question now}, so the remembered list should not
+fan out into stale document directories.
 
-A remembered target is not always a file this server should write.  The
-store keeps old absolute entries that lie outside its checkout
-(\cref{sec:remembered-qr-artifacts}), and some of them belong to
-another checkout of the same project: a tracked store that the main
-checkout filled, now served from a worktree, or the other way round.
-Writing those would rewrite another checkout's QR codes with this
-server's address, which is the very problem relative entries solve.
-Regeneration therefore skips any remembered target that lies in
-another checkout, recognised by a [[.git]] met on the way up from the
-target before the store's own checkout root.  This holds whether or
-not a build in this checkout has migrated the store yet, so serving a
-fresh worktree before building it is safe, and so are the orphaned
-questions that no build remembers.
+Which remembered targets this server writes follows from the kind the
+store reports for each (\cref{sec:remembered-qr-artifacts}).
 
-A target whose directory has gone is the other case to think about.
-[[make_qr]] creates missing directories, and for a file of this
-checkout that is what we want: a deleted [[mentipy-obj]] next to a
-deck whose PythonTeX output is cached would otherwise break the next
-compile, since the cached [[\input]] of the sidecar still runs, and the
-server's rewrite is what repairs it.  That holds for an old absolute
-entry of this checkout too, after a [[make clean]] and before the
-first build.  But a missing directory can also be a removed worktree,
-which has taken its [[.git]] with it, or a path on another machine.
-Recreating those would resurrect the worktree, or reproduce another
-machine's home directory here.  The rule that separates them is that
-the server recreates a deleted QR directory, never a deleted tree:
-a target is written when the directory above its QR directory exists.
-For a deck's own [[mentipy-obj]] that is the deck's directory; for a
-removed worktree or another machine's path it is gone too.  An entry
-that is absolute only on another platform names no directory here at
-all and is skipped the same way.
-
-<<functions>>=
-def _refreshable(target: Path, root: Path) -> bool:
-    return (
-        target.is_absolute()
-        and not in_other_checkout(target, root)
-        and os.path.isdir(target.parent.parent)
-    )
-@
+\begin{description}
+\item[This checkout's own file] is always written, and its directories
+  are recreated, as [[make_qr]] always did.  A deleted [[mentipy-obj]],
+  or a whole [[build]] directory holding [[build/qr]], next to a deck
+  whose PythonTeX output is cached would otherwise break the next
+  compile, since the cached [[\input]] of the sidecar still runs, and
+  the server's rewrite is what repairs it.
+\item[A deliberate target outside the checkout] is written while its
+  QR directory exists, and skipped otherwise.  The store is shared by
+  every clone, and the author's printout directory or sibling
+  repository need not exist on every machine that serves it; creating
+  it there would litter that machine with the author's directory
+  layout.
+\item[A legacy entry that is not this checkout's] is never written.  It
+  is another checkout's path, a removed worktree's, or another
+  machine's, from a store that no write has migrated yet; serving a
+  fresh worktree before building it is the typical case.
+\end{description}
 
 Skipping silently would hide a stale store, so [[regenerate_qrs]]
 reports what it skipped in one warning on the [[mentipy]] logger,
 naming the directories rather than every file, since one stale
 checkout typically accounts for a whole [[mentipy-obj]].  The command
-line turns that warning into a start-up line (\cref{sec:server-runners}), so
-that [[mentipy present]] keeps it in its banner instead of losing it
-to the first screen clear.  A skipped target does not count as a
-rewritten QR code.
+line turns that warning into a start-up line
+(\cref{sec:server-runners}), so that [[mentipy present]] keeps it in
+its banner instead of losing it to the first screen clear.  A skipped
+target does not count as a rewritten QR code.
+
+An outside target must also be absolute on this platform: an entry
+written on Windows names no directory on Linux, and probing it would
+ask the working directory instead.
+
+<<functions>>=
+def _writable(target: RememberedQrTarget) -> bool:
+    if target.kind == OWN_QR_TARGET:
+        return True
+    if target.kind == OUTSIDE_QR_TARGET:
+        return target.path.is_absolute() and os.path.isdir(target.path.parent)
+    return False
+@
 
 An explicit override writes its conventional targets unconditionally,
 since the caller asked for exactly those files, so each target comes
-with a flag that says whether it was remembered.
+with a flag that says whether to write it.
 
 <<functions>>=
 def _regeneration_targets(
-    remembered: list[Path],
+    remembered: list[RememberedQrTarget],
     prefix: str,
     qr_dir: str | Path | None,
     qr_format: str | None,
 ) -> list[tuple[Path, bool]]:
-    if qr_dir is None and qr_format is None and remembered:
-        return [(target, True) for target in remembered]
+    if qr_dir is None and qr_format is None:
+        return [(target.path, _writable(target)) for target in remembered]
 
     chosen_dir = Path(qr_dir or get_setting(QR_DIR_CONFIG, DEFAULT_QR_DIR))
     chosen_format = qr_format or get_setting(QR_FORMAT_CONFIG, DEFAULT_QR_FORMAT)
-    return [(chosen_dir / f"Q-{prefix}.{chosen_format}", False)]
+    return [(chosen_dir / f"Q-{prefix}.{chosen_format}", True)]
 <<constants>>=
 LOGGER = logging.getLogger(__name__)
 @
@@ -1196,16 +1197,15 @@ def regenerate_qrs(
 
     count = 0
     skipped: list[Path] = []
-    root = store.checkout_root()
 
     for entry in store.all_questions():
         full_hash = str(entry["hash"])
         prefix = str(entry["url_prefix"])
         url = _join_url(base_url, prefix)
-        remembered = store.qr_targets(full_hash)
+        remembered = store.remembered_qr_targets(full_hash)
         targets = _regeneration_targets(remembered, prefix, qr_dir, qr_format)
-        for target, from_store in targets:
-            if from_store and not _refreshable(target, root):
+        for target, writable in targets:
+            if not writable:
                 skipped.append(target)
                 continue
             fmt = target.suffix.lstrip(".") or DEFAULT_QR_FORMAT
@@ -1223,8 +1223,8 @@ def regenerate_qrs(
     if skipped:
         directories = dict.fromkeys(target.parent for target in skipped)
         LOGGER.warning(
-            "skipped %d remembered QR codes in another checkout or in a "
-            "directory that is gone: %s",
+            "skipped %d remembered QR codes of another checkout or in a "
+            "directory that does not exist: %s",
             len(skipped),
             ", ".join(directory.as_posix() for directory in directories),
         )
@@ -3427,80 +3427,122 @@ def test_regenerate_qrs_reuses_all_remembered_qr_targets(tmp_path, monkeypatch):
     ]
 @
 
-The two kinds of remembered target are treated differently when their
-directory has gone.  A relative one belongs to this checkout, so a
-deleted QR directory is recreated, as it always was: a deck whose
-PythonTeX output is cached still [[\input]]s the sidecar, and the
-server's rewrite is what repairs it.  An absolute one from an older
-store, here a directory outside the checkout that has been removed, is
-skipped and reported in one warning, and it does not count as a
-rewritten QR code.
+This checkout's own targets are written whatever is missing: here the
+deck's QR codes live in [[build/qr]] and the whole [[build]] directory
+has been removed, as a [[make clean]] might.  A deliberate target
+outside the checkout whose directory does not exist on this machine is
+skipped instead and reported in one warning, and it does not count as
+a rewritten QR code.
 
 <<test functions>>=
-def test_regenerate_qrs_recreates_its_own_but_skips_a_vanished_absolute(
+def _add_raw_entry(store, full_hash, key, entry):
+    data = json.loads(store.path.read_text(encoding="utf-8"))
+    data["questions"][full_hash].setdefault(key, []).append(entry)
+    store.path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_regenerate_qrs_recreates_its_own_but_skips_a_missing_outside(
     tmp_path, monkeypatch, caplog
 ):
     deck = tmp_path / "deck"
     deck.mkdir()
     monkeypatch.chdir(deck)
     store = Store("mentipy.json", min_prefix=4)
-    mc("Ready?", ["Yes", "No"], store=store, qr_dir="mentipy-obj",
+    mc("Ready?", ["Yes", "No"], store=store, qr_dir="build/qr",
        base_url="http://example.test:8080")
     [entry] = store.all_questions()
     name = f"Q-{entry['url_prefix']}.pdf"
-    vanished = (tmp_path / "removed" / "mentipy-obj" / name).resolve()
-    data = json.loads(store.path.read_text(encoding="utf-8"))
-    data["questions"][entry["hash"]][QR_TARGETS_KEY].append(
-        vanished.as_posix()
-    )
-    store.path.write_text(json.dumps(data), encoding="utf-8")
-    shutil.rmtree(deck / "mentipy-obj")
+    printouts = (tmp_path / "printouts").resolve()
+    _add_raw_entry(store, entry["hash"], QR_PATHS_KEY,
+                   (printouts / name).as_posix())
+    shutil.rmtree(deck / "build")
 
     with caplog.at_level("WARNING", logger="mentipy.latex"):
         count = regenerate_qrs(store, "http://public.example:9000")
 
-    sidecar = deck / "mentipy-obj" / name.replace(".pdf", ".pdf_tex")
+    sidecar = deck / "build" / "qr" / name.replace(".pdf", ".pdf_tex")
     assert count == 1
     assert "public.example" in sidecar.read_text()
-    assert not (tmp_path / "removed").exists()
+    assert not printouts.exists()
     [record] = caplog.records
-    assert vanished.parent.as_posix() in record.getMessage()
+    assert printouts.as_posix() in record.getMessage()
 @
 
-An old store records this checkout's files by absolute path, and
-before the first build has migrated it, a [[make clean]] may have
-removed the QR directory.  Such an entry is this checkout's file all
-the same, so its directory is recreated, as the old code did.
+A deliberate target outside the checkout is written while its
+directory exists, even when it lies in another repository: a handout
+repository next to the deck's, and a deck in its own repository whose
+store is a central one.
+
+<<test functions>>=
+def test_regenerate_qrs_writes_targets_in_other_repositories(
+    tmp_path, monkeypatch
+):
+    deck = tmp_path / "deckrepo"
+    (deck / ".git").mkdir(parents=True)
+    (tmp_path / "handouts" / ".git").mkdir(parents=True)
+    monkeypatch.chdir(deck)
+    store = Store(deck / "mentipy.json", min_prefix=4)
+    mc("Ready?", ["Yes", "No"], store=store, qr_dir="../handouts/qr",
+       base_url="http://example.test:8080")
+    course = tmp_path / "courseA"
+    (course / ".git").mkdir(parents=True)
+    (course / "slides").mkdir()
+    monkeypatch.chdir(course / "slides")
+    central = Store(tmp_path / "central" / "mentipy.json", min_prefix=4)
+    mc("Central?", ["Yes", "No"], store=central, qr_dir="mentipy-obj",
+       base_url="http://example.test:8080")
+    monkeypatch.chdir(tmp_path)
+
+    counts = [
+        regenerate_qrs(each, "http://public.example:9000")
+        for each in (store, central)
+    ]
+
+    sidecars = [
+        *(tmp_path / "handouts" / "qr").glob("*.pdf_tex"),
+        *(course / "slides" / "mentipy-obj").glob("*.pdf_tex"),
+    ]
+    assert counts == [1, 1]
+    assert len(sidecars) == 2
+    assert all("public.example" in s.read_text() for s in sidecars)
+@
+
+A store written by an older Mentipy may name a worktree that has since
+been removed: a worktree under [[.claude/worktrees]] of a repository
+whose store sits at its root, which has taken its [[.git]] and its
+directories with it.  Its entries look like this checkout's own, and
+regeneration must not resurrect the worktree's directories.
 
 <<test functions>>=
 def _as_old_store(store_path):
     data = json.loads(store_path.read_text(encoding="utf-8"))
     for meta in data["questions"].values():
+        entries = meta.pop(QR_PATHS_KEY, [])
         meta[QR_TARGETS_KEY] = [
             (store_path.parent / entry).resolve().as_posix()
-            for entry in meta.get(QR_TARGETS_KEY, [])
+            for entry in entries
         ]
     store_path.write_text(json.dumps(data), encoding="utf-8")
 
 
-def test_regenerate_qrs_recreates_an_old_entry_of_this_checkout(
+def test_regenerate_qrs_never_resurrects_a_removed_worktree(
     tmp_path, monkeypatch
 ):
-    deck = tmp_path / "deck"
-    deck.mkdir()
-    monkeypatch.chdir(deck)
-    mc("Ready?", ["Yes", "No"], store=Store("mentipy.json", min_prefix=4),
-       qr_dir="mentipy-obj", base_url="http://example.test:8080")
-    _as_old_store(deck / "mentipy.json")
-    shutil.rmtree(deck / "mentipy-obj")
+    main = tmp_path / "main"
+    (main / ".git").mkdir(parents=True)
+    monkeypatch.chdir(main)
+    store = Store("mentipy.json", min_prefix=4)
+    mc("Ready?", ["Yes", "No"], store=store, qr_dir="mentipy-obj",
+       base_url="http://example.test:8080")
+    [entry] = store.all_questions()
+    removed = (main / ".claude/worktrees/x/mentipy-obj").resolve()
+    _add_raw_entry(store, entry["hash"], QR_TARGETS_KEY,
+                   (removed / f"Q-{entry['url_prefix']}.pdf").as_posix())
 
-    count = regenerate_qrs(
-        Store(deck / "mentipy.json"), "http://public.example:9000"
-    )
+    count = regenerate_qrs(store, "http://public.example:9000")
 
-    [sidecar] = (deck / "mentipy-obj").glob("*.pdf_tex")
     assert count == 1
-    assert "public.example" in sidecar.read_text()
+    assert not (main / ".claude").exists()
 @
 
 The probes look into other people's paths, and a directory we may not
@@ -3527,11 +3569,8 @@ def test_regenerate_qrs_skips_a_target_it_may_not_look_into(
     locked = tmp_path / "locked"
     target = locked / "deck" / "mentipy-obj" / f"Q-{entry['url_prefix']}.pdf"
     target.parent.mkdir(parents=True)
-    data = json.loads(store.path.read_text(encoding="utf-8"))
-    data["questions"][entry["hash"]][QR_TARGETS_KEY].append(
-        target.resolve().as_posix()
-    )
-    store.path.write_text(json.dumps(data), encoding="utf-8")
+    _add_raw_entry(store, entry["hash"], QR_PATHS_KEY,
+                   target.resolve().as_posix())
     locked.chmod(0)
     try:
         count = regenerate_qrs(store, "http://public.example:9000")
@@ -3553,17 +3592,15 @@ def test_regenerate_qrs_never_writes_another_platforms_path(
 ):
     store = Store(tmp_path / "deck" / "mentipy.json", min_prefix=4)
     prefix = store.register(OpenQuestion("Comment?"))
-    entry = f"C:/Users/alice/printouts/Q-{prefix}.png"
-    data = json.loads(store.path.read_text(encoding="utf-8"))
-    data["questions"][store.resolve(prefix)][QR_TARGETS_KEY] = [entry]
-    store.path.write_text(json.dumps(data), encoding="utf-8")
-    (tmp_path / "C:/Users/alice").mkdir(parents=True)
+    _add_raw_entry(store, store.resolve(prefix), QR_PATHS_KEY,
+                   f"C:/Users/alice/printouts/Q-{prefix}.png")
+    (tmp_path / "C:/Users/alice/printouts").mkdir(parents=True)
     monkeypatch.chdir(tmp_path)
 
     count = regenerate_qrs(store, "http://public.example:9000")
 
     assert count == 0
-    assert not (tmp_path / "C:/Users/alice/printouts").exists()
+    assert not list((tmp_path / "C:/Users/alice/printouts").iterdir())
 @
 
 An explicit [[qr_dir]] is not a remembered target: the caller asked for
@@ -3584,6 +3621,25 @@ def test_regenerate_qrs_writes_an_explicit_qr_dir_unconditionally(
 
     assert count == 1
     assert (tmp_path / f"fresh/handout/qr/Q-{prefix}.pdf_tex").exists()
+@
+
+Without an override, a question that remembers no QR code gets none:
+nothing may appear in the server's working directory.
+
+<<test functions>>=
+def test_regenerate_qrs_writes_nothing_for_a_question_without_targets(
+    tmp_path, monkeypatch
+):
+    store = Store(tmp_path / "deck" / "mentipy.json", min_prefix=4)
+    store.register(OpenQuestion("Comment?"))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    count = regenerate_qrs(store, "http://public.example:9000")
+
+    assert count == 0
+    assert list(elsewhere.iterdir()) == []
 @
 
 \subsection{Decks bound into a book}
@@ -3755,15 +3811,18 @@ def test_regenerate_qrs_writes_into_a_copied_deck_not_the_original(
 The end-to-end version of the problem that made remembered targets
 relative.  A project tracks its store; an older Mentipy filled it in the
 main checkout with absolute paths, for three questions; a worktree gets
-a copy.  Serving the worktree before building it, and again after a
-build that renders only one of the questions (the others are orphans,
-or simply not rebuilt), must never touch the main checkout's QR codes.
-And when the main checkout builds that one question again, its store
-must lose every absolute path, the orphans' included.
+a copy of the store, either beside the main checkout or nested in it
+under [[.claude/worktrees]].  Serving the worktree before building it,
+and again after a build that renders only one of the questions (the
+others are orphans, or simply not rebuilt), must never touch the main
+checkout's QR codes, and the worktree's store must lose every path of
+the main checkout.  When the main checkout builds that one question
+again, its store must lose every absolute path, the orphans' included.
 
 <<test functions>>=
+@pytest.mark.parametrize("place", ["../worktree", ".claude/worktrees/wt"])
 def test_a_tracked_store_never_writes_into_another_checkout(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, place
 ):
     deck = Path("modules/recap/slides")
     main = tmp_path / "main"
@@ -3775,7 +3834,7 @@ def test_a_tracked_store_never_writes_into_another_checkout(
         mc(text, ["Yes", "No"], store=Store("mentipy.json", min_prefix=4),
            **common)
     _as_old_store(main / deck / "mentipy.json")
-    worktree = tmp_path / "worktree"
+    worktree = Path(os.path.normpath(main / place))
     (worktree / deck).mkdir(parents=True)
     (worktree / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
     shutil.copy(main / deck / "mentipy.json", worktree / deck)
@@ -3798,14 +3857,17 @@ def test_a_tracked_store_never_writes_into_another_checkout(
     assert len(main_sidecars) == 3
     assert all("example.test" in s.read_text() for s in main_sidecars)
     assert "public.example" in own.read_text()
-    data = json.loads((main / deck / "mentipy.json").read_text())
-    entries = [
-        entry
-        for meta in data["questions"].values()
-        for entry in meta[QR_TARGETS_KEY]
-    ]
-    assert len(entries) == 3
-    assert all(entry.startswith("mentipy-obj/") for entry in entries)
+    for store_file, expected in [(worktree / deck / "mentipy.json", 1),
+                                 (main / deck / "mentipy.json", 3)]:
+        data = json.loads(store_file.read_text(encoding="utf-8"))
+        entries = [
+            entry
+            for meta in data["questions"].values()
+            for entry in meta.get(QR_PATHS_KEY, [])
+        ]
+        assert not any(QR_TARGETS_KEY in m for m in data["questions"].values())
+        assert len(entries) == expected
+        assert all(entry.startswith("mentipy-obj/") for entry in entries)
 @
 
 A snippet lands in the deck's QR directory by default and reports the

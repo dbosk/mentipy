@@ -2193,7 +2193,7 @@ def test_start_lines_carry_the_warning_about_skipped_qr_codes(
     [entry] = store.all_questions()
     gone = tmp_path / "removed" / "mentipy-obj"
     data = json.loads(store.path.read_text(encoding="utf-8"))
-    data["questions"][entry["hash"]][QR_TARGETS_KEY].append(
+    data["questions"][entry["hash"]][QR_PATHS_KEY].append(
         (gone / "Q.pdf").as_posix()
     )
     store.path.write_text(json.dumps(data), encoding="utf-8")

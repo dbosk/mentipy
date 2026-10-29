@@ -1709,15 +1709,18 @@ replaced by new compile-time placeholders.
 The store remembers which QR files each question wrote, so that
 [[mentipy serve]] knows what to rewrite.  A QR file in the store's checkout,
 such as [[mentipy-obj/]] next to [[mentipy.json]] or a handout directory
-beside the deck, is remembered relative to the store's directory; only a file
-outside the checkout, or in another checkout, is remembered by its absolute
-path.  A project can therefore track its store in git, and a server in a clone
-or a worktree rewrites that checkout's own QR codes, recreating a deleted QR
-directory as needed.  It never writes into another checkout, even when the
-store, written by an older Mentipy, still names that checkout's files: those
-are skipped, and the next build in this checkout respells the store's own
-entries.  A skipped QR code is reported in one start-up warning, which
-[[mentipy present]] keeps in its banner.
+beside the deck, is remembered relative to the store's directory, so a
+project can track its store in git: a server in a clone, a copy or a
+worktree rewrites that copy's own QR codes, recreating deleted directories
+as needed.  A QR file outside the checkout, a printout directory or a
+handout repository beside the deck's, is remembered by its absolute path
+and rewritten wherever that directory exists.  A QR file in a worktree
+nested in the checkout is that worktree's business and is not remembered.
+A store written by an older Mentipy holds absolute paths of whichever
+checkout built it; the server writes only those that lie in its own
+checkout, and the first write of the store after the upgrade keeps those
+and drops the rest for good.  Anything the server skips is reported in one
+start-up warning, which [[mentipy present]] keeps in its banner.
 
 \ltnote{%
   \textbf{Variation pattern}: Fusion
