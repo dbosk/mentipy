@@ -1075,7 +1075,9 @@ The render helpers still accept per-call [[qr_dir]] and [[qr_format]]
 overrides.  Later regeneration therefore cannot reconstruct the right artifact
 paths from today's global defaults alone.  After each render we remember the
 concrete QR targets in the store, and [[regenerate_qrs()]] reuses those exact
-files unless its caller passes an explicit override.  The remembered absolute
+files unless its caller passes an explicit override.  The store records a
+target inside its own directory relative to that directory, so that a tracked
+store works in every clone, and returns every target absolute.  Those absolute
 paths are only for the runtime file write.  The sidecar keeps the original
 document-facing include path so slide sources do not suddenly switch to
 absolute [[\includegraphics]] paths after [[mentipy serve]] refreshes the URL.
@@ -1103,6 +1105,23 @@ remembered targets are the most accurate source of truth.  Explicit overrides
 instead mean \enquote{write the conventional target for each question now}, so
 the remembered list should not fan out into stale document directories.
 
+A remembered target whose directory no longer exists is skipped rather than
+recreated.  [[make_qr]] creates missing parent directories, which is right for
+a render, but regeneration only refreshes QR codes that a build already wrote.
+A missing directory means that build is gone: a removed git worktree, or a
+checkout on another machine whose absolute path an older store still records.
+Recreating it would resurrect a deleted worktree's directories, or litter
+this machine with another machine's paths.  The one case that looks like a
+loss is a fresh clone of a project that tracks its store, served before its
+first build: its QR directory does not exist yet.  But a fresh clone has no
+PythonTeX cache, so its first build runs every render helper, and each one
+writes its QR code with a compile-time URL, overwriting whatever the server
+had written there.  The workflow is build, then serve, then recompile, as it
+is for any compile-time placeholder (\cref{sec:serving-and-recompiling}),
+so skipping loses nothing.  An explicit override still writes its
+conventional targets unconditionally, since the caller asked for exactly
+those files.
+
 <<functions>>=
 def _regeneration_targets(
     remembered: list[Path],
@@ -1111,7 +1130,7 @@ def _regeneration_targets(
     qr_format: str | None,
 ) -> list[Path]:
     if qr_dir is None and qr_format is None and remembered:
-        return remembered
+        return [target for target in remembered if target.parent.is_dir()]
 
     chosen_dir = Path(qr_dir or get_setting(QR_DIR_CONFIG, DEFAULT_QR_DIR))
     chosen_format = qr_format or get_setting(QR_FORMAT_CONFIG, DEFAULT_QR_FORMAT)
@@ -3351,6 +3370,31 @@ def test_regenerate_qrs_reuses_all_remembered_qr_targets(tmp_path, monkeypatch):
     ]
 @
 
+A remembered target whose directory has gone, such as a removed
+worktree's, is skipped rather than recreated, and it does not count as
+a rewritten QR code.  The other targets of the same question are still
+refreshed.
+
+<<test functions>>=
+def test_regenerate_qrs_skips_targets_whose_directory_is_gone(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    for qr_dir in ("slides", "worktree/slides"):
+        mc("Ready?", ["Yes", "No"], store=store, qr_dir=qr_dir,
+           base_url="http://example.test:8080")
+    shutil.rmtree(tmp_path / "worktree")
+
+    count = regenerate_qrs(store, "http://public.example:9000")
+
+    [entry] = store.all_questions()
+    sidecar = tmp_path / "slides" / f"Q-{entry['url_prefix']}.pdf_tex"
+    assert count == 1
+    assert "public.example" in sidecar.read_text()
+    assert not (tmp_path / "worktree").exists()
+@
+
 \subsection{Decks bound into a book}
 
 These tests set up the situation the base directory exists for: a book
@@ -3480,6 +3524,41 @@ def test_regenerate_qrs_keeps_the_rendered_include_path(
         (tmp_path / "deck").resolve()
     )
     assert "public.example" in target.with_suffix(".pdf_tex").read_text()
+@
+
+A project may track its store in git, and every clone or worktree then
+carries the same [[mentipy.json]].  We simulate a second checkout by
+copying a compiled deck: serving the copy's store must refresh the
+copy's QR codes and leave the original checkout alone.
+
+<<test functions>>=
+def test_regenerate_qrs_writes_into_a_copied_deck_not_the_original(
+    tmp_path, monkeypatch
+):
+    deck = tmp_path / "deck"
+    deck.mkdir()
+    monkeypatch.chdir(deck)
+    mc("Ready?", ["Yes", "No"], store=Store("mentipy.json", min_prefix=4),
+       qr_dir="mentipy-obj", base_url="http://example.test:8080")
+    clone = tmp_path / "clone"
+    shutil.copytree(deck, clone)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    count = regenerate_qrs(
+        Store(clone / "mentipy.json"), "http://public.example:9000"
+    )
+
+    [entry] = Store(clone / "mentipy.json").all_questions()
+    name = f"Q-{entry['url_prefix']}.pdf_tex"
+    copied = (clone / "mentipy-obj" / name).read_text()
+    assert count == 1
+    assert "public.example" in copied
+    assert "example.test" in (deck / "mentipy-obj" / name).read_text()
+    assert sidecar_include_path(clone / "mentipy-obj" / name) == (
+        Path("mentipy-obj") / f"Q-{entry['url_prefix']}.pdf"
+    )
 @
 
 A snippet lands in the deck's QR directory by default and reports the

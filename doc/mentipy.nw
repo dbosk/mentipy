@@ -1706,6 +1706,16 @@ As long as the lecture source does not change the PythonTeX code block, the
 regenerated QR images and captions survive into the next PDF rather than being
 replaced by new compile-time placeholders.
 
+The store remembers which QR files each question wrote, so that
+[[mentipy serve]] knows what to rewrite.  A QR file inside the store's
+directory, such as [[mentipy-obj/]] next to [[mentipy.json]], is remembered
+relative to that directory.  A project can therefore track its store in git:
+every clone, and every git worktree, rewrites its own QR codes and never
+another checkout's.  A remembered QR file whose directory no longer exists,
+say that of a removed worktree, is skipped rather than recreated; in a fresh
+clone the first build writes the QR codes, and the server refreshes them from
+then on.
+
 \ltnote{%
   \textbf{Variation pattern}: Fusion
 

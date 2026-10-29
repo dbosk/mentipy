@@ -1510,13 +1510,76 @@ QR regeneration needs one extra piece of operational metadata that should not
 change the question's identity: the concrete files earlier renders wrote.  The
 same question can appear in more than one document directory or image format,
 so we remember a de-duplicated list of those QR targets beside the canonical
-question payload.  We store the resolved absolute paths, because later
-[[mentipy serve]] runs may happen from a different working directory than the
-original render and still need to refresh the same files.
+question payload.
+
+How to spell such a path is the design question.  A path relative to the
+working directory will not do, because a later [[mentipy serve]] may run
+from anywhere and must still refresh the same files.  An absolute path
+was the first answer, and it fails as soon as the store travels.  Some
+projects track [[mentipy.json]] in git, so that every clone serves the
+same prefixes; with absolute paths, the store then carries one
+machine's home directory into every clone, and a build in a git
+worktree records the worktree's paths, after which [[mentipy serve]] in
+the main checkout writes QR codes into the worktree.  What does not
+change between clones is where a QR file lies relative to the store
+file: a deck's QR directory sits next to its store.  We therefore
+record a target inside the store's directory relative to that
+directory, in POSIX form so the entry reads the same on every
+platform, and keep the absolute path only for a target outside it,
+where a relative spelling would have to climb out of the store's
+directory with [[..]] and would be no more portable than the absolute
+one.
+
+The store's directory is the one the store file is read from, resolved
+when it is needed.  [[self.path]] went through [[resolve_path]] at
+construction (\cref{sec:base-directory}), so under a base directory it
+is already absolute; without one it may be relative and then names the
+store in the current working directory, which is exactly the file the
+next read or write will use.  Resolving it the same way when we write
+an entry and when we read one back is what keeps the two in agreement.
+
+<<store methods>>=
+def _store_dir(self) -> Path:
+    return self.path.parent.resolve()
+@
+
+One function spells every entry, the new target and the stored ones
+alike.  An absolute path inside the store's directory becomes relative;
+any other absolute path stays as it is; a relative entry is already
+relative to the store's directory, because that is the only way this
+function writes one, so it is kept.
+
+<<functions>>=
+def _portable_qr_target(target: Path, store_dir: Path) -> str:
+    """Spell `target` relative to `store_dir` if it lies inside it.
+
+    `target` is either absolute or already relative to `store_dir`.
+    """
+
+    if target.is_absolute() and target.is_relative_to(store_dir):
+        return target.relative_to(store_dir).as_posix()
+    return target.as_posix()
+@
+
+Stores written by older versions of Mentipy hold absolute entries for files
+inside their own directory, and they must keep working.  Rather than carry two
+spellings for ever, remembering any target passes every stored entry
+through [[_portable_qr_target]] as well, which turns an old in-store
+absolute entry into its relative form and leaves entries outside the
+store as they were.  The new target itself is first made absolute
+against the working directory, as before, because that is what the
+caller's path means.  Respelling first and de-duplicating afterwards
+collapses an old absolute entry and a new relative one for the same
+file into one, so the file is not regenerated twice.  The store is
+written only when the list actually changed, as before.
 
 <<store methods>>=
 def remember_qr_target(self, full_hash: str, qr_path: str | Path):
-    """Remember that ``full_hash`` wrote a QR artifact to ``qr_path``."""
+    """Remember that `full_hash` wrote a QR artifact to `qr_path`.
+
+    A target inside the store's directory is recorded relative to it,
+    so the store stays valid when the directory is cloned or moved.
+    """
 
     with self._lock:
         data = self._data()
@@ -1525,24 +1588,37 @@ def remember_qr_target(self, full_hash: str, qr_path: str | Path):
             raise KeyError(full_hash)
 
         meta = data["questions"][full_hash]
-        target = Path(qr_path).resolve().as_posix()
-        targets = meta.setdefault(QR_TARGETS_KEY, [])
-        if target in targets:
+        store_dir = self._store_dir()
+        stored = meta.get(QR_TARGETS_KEY, [])
+        entries = [*map(Path, stored), Path(qr_path).resolve()]
+        targets = list(dict.fromkeys(
+            _portable_qr_target(entry, store_dir) for entry in entries
+        ))
+        if targets == stored:
             return
 
-        targets.append(target)
+        meta[QR_TARGETS_KEY] = targets
         self._write(data)
 @
 
 The regeneration path returns [[Path]] objects rather than raw JSON strings so
-callers can work at the filesystem abstraction level immediately.
+callers can work at the filesystem abstraction level immediately.  Joining
+every entry onto the store's directory resolves the relative ones and
+leaves the absolute ones as they are, since [[pathlib]] discards the left
+operand when the right one is absolute.  Old and new spellings of one file
+then compare equal, so the read de-duplicates too: a store can hold both
+without a remember in between, for instance after a merge of two branches
+of a tracked store.
 
 <<store methods>>=
 def qr_targets(self, full_hash: str) -> list[Path]:
-    """Return remembered QR artifact paths for ``full_hash``."""
+    """Return remembered QR artifact paths for `full_hash`, absolute."""
 
     meta = self._data()["questions"][full_hash]
-    return [Path(path) for path in meta.get(QR_TARGETS_KEY, [])]
+    store_dir = self._store_dir()
+    return list(dict.fromkeys(
+        store_dir / entry for entry in meta.get(QR_TARGETS_KEY, [])
+    ))
 @
 
 Rendering the same question again into the same file should not multiply the
@@ -1562,6 +1638,139 @@ def test_remember_qr_target_deduplicates_repeated_paths(tmp_path):
     assert store.qr_targets(full_hash) == [target.resolve()]
     assert QR_TARGETS_KEY not in store.metadata(full_hash)
     assert QR_TARGETS_KEY not in store.all_questions()[0]
+@
+
+The next tests pin what the store file itself says, so they read the raw
+JSON rather than going through [[qr_targets]], which would hide a
+relative entry behind the absolute path it resolves to.  A deck's QR
+directory lies inside the deck, next to the store, so its entry must
+not name the directory the deck happens to be checked out in.
+
+<<test functions>>=
+def _raw_qr_targets(store_path, full_hash):
+    data = json.loads(store_path.read_text(encoding="utf-8"))
+    return data["questions"][full_hash][QR_TARGETS_KEY]
+
+
+def test_a_qr_target_inside_the_store_dir_is_stored_relative(tmp_path):
+    deck = tmp_path / "deck"
+    store = Store(deck / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    full_hash = store.resolve(prefix)
+    target = deck / "mentipy-obj" / f"Q-{prefix}.pdf"
+
+    store.remember_qr_target(full_hash, target)
+
+    assert _raw_qr_targets(store.path, full_hash) == [
+        f"mentipy-obj/Q-{prefix}.pdf"
+    ]
+    assert store.qr_targets(full_hash) == [target.resolve()]
+@
+
+A relative entry is relative to the store's directory, never to the
+working directory of whoever reads it: [[mentipy serve --store]] may
+run from anywhere.  Copying the whole deck elsewhere, as a second clone
+or a git worktree does, must make the copy's store name the copy's
+files.
+
+<<test functions>>=
+def test_relative_qr_targets_follow_the_store_not_the_cwd(
+    tmp_path, monkeypatch
+):
+    deck = tmp_path / "deck"
+    deck.mkdir()
+    monkeypatch.chdir(deck)
+    store = Store("mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    full_hash = store.resolve(prefix)
+    store.remember_qr_target(full_hash, f"mentipy-obj/Q-{prefix}.pdf")
+    clone = tmp_path / "clone"
+    shutil.copytree(deck, clone)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    original = Store(deck / "mentipy.json").qr_targets(full_hash)
+    copied = Store(clone / "mentipy.json").qr_targets(full_hash)
+
+    assert original == [(deck / "mentipy-obj" / f"Q-{prefix}.pdf").resolve()]
+    assert copied == [(clone / "mentipy-obj" / f"Q-{prefix}.pdf").resolve()]
+@
+
+A file outside the store's directory, such as a handout directory next
+to the deck, has no path relative to the store without climbing out of
+it, so it keeps its absolute path as before.
+
+<<test functions>>=
+def test_a_qr_target_outside_the_store_dir_stays_absolute(tmp_path):
+    deck = tmp_path / "deck"
+    store = Store(deck / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    full_hash = store.resolve(prefix)
+    target = tmp_path / "handout" / f"Q-{prefix}.png"
+
+    store.remember_qr_target(full_hash, target)
+
+    assert _raw_qr_targets(store.path, full_hash) == [
+        target.resolve().as_posix()
+    ]
+    assert store.qr_targets(full_hash) == [target.resolve()]
+@
+
+Stores written before this change hold absolute entries for files
+inside the store's directory.  We fake one by rewriting the JSON the
+way the old code wrote it.  Remembering any target migrates every such
+entry to its relative form, and the old and the new spelling of the
+same file collapse into one entry, so the file is not regenerated
+twice.
+
+<<test functions>>=
+def _write_raw_qr_targets(store_path, full_hash, targets):
+    data = json.loads(store_path.read_text(encoding="utf-8"))
+    data["questions"][full_hash][QR_TARGETS_KEY] = targets
+    store_path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_remembering_migrates_old_absolute_qr_targets(tmp_path):
+    deck = tmp_path / "deck"
+    store = Store(deck / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    full_hash = store.resolve(prefix)
+    slides = deck / "slides" / f"Q-{prefix}.pdf"
+    handout = deck / "handout" / f"Q-{prefix}.png"
+    _write_raw_qr_targets(store.path, full_hash, [
+        slides.resolve().as_posix(),
+        handout.resolve().as_posix(),
+    ])
+
+    store.remember_qr_target(full_hash, slides)
+
+    assert _raw_qr_targets(store.path, full_hash) == [
+        f"slides/Q-{prefix}.pdf",
+        f"handout/Q-{prefix}.png",
+    ]
+    assert store.qr_targets(full_hash) == [
+        slides.resolve(), handout.resolve()
+    ]
+@
+
+A store can also hold both spellings without a remember in between,
+for instance after a merge of two branches of a tracked store.
+Reading collapses them too.
+
+<<test functions>>=
+def test_qr_targets_reads_old_and_new_spellings_as_one(tmp_path):
+    deck = tmp_path / "deck"
+    store = Store(deck / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    full_hash = store.resolve(prefix)
+    target = deck / "mentipy-obj" / f"Q-{prefix}.pdf"
+    _write_raw_qr_targets(store.path, full_hash, [
+        target.resolve().as_posix(),
+        f"mentipy-obj/Q-{prefix}.pdf",
+    ])
+
+    assert store.qr_targets(full_hash) == [target.resolve()]
 @
 
 \subsection{The locale the slides used}
@@ -2935,8 +3144,10 @@ def test_results_empty_window_collapses_stats_to_none(tmp_path):
 @
 
 <<test [[store.py]]>>=
+import json
 import os
 import pytest
+import shutil
 import sys
 import time
 
