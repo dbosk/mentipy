@@ -26,11 +26,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import logging
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import statistics
 import threading
-from typing import Any, Iterator
+from typing import Any, Iterator, NamedTuple
 from contextlib import contextmanager
 
 import typerconf
@@ -742,9 +743,15 @@ it encodes the sequence in which questions were last registered, which the
 \enquote{Next $\rightarrow$} navigation walks.  Sorting on disk would erase that
 information.  Python's JSON library preserves dict insertion order on dump and
 recovers it on load, so the round-trip carries the sequence faithfully.
+Every write also tidies the remembered QR targets
+(\cref{sec:remembered-qr-artifacts}): it migrates the lists older
+versions of Mentipy wrote, so a store is migrated by whatever first
+writes it after an upgrade, and it drops targets outside the checkout
+whose directory has gone.
 
 <<store methods>>=
 def _write(self, data: dict[str, Any]):
+    self._tidy_qr_targets(data)
     self.path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = self.path.with_name(f"{self.path.name}.tmp")
 
@@ -1154,7 +1161,7 @@ def test_register_keeps_dropped_question_as_orphan_at_front(tmp_path):
     ]
 @
 
-Re-registration must keep the auxiliary [[qr_targets]] list that
+Re-registration must keep the auxiliary [[qr_paths]] list that
 [[remember_qr_target]] writes after the original registration --- otherwise
 every PythonTeX rebuild would lose the lecturer's record of which printed
 QR codes the question owns, and stale handouts would no longer be
@@ -1173,7 +1180,7 @@ def test_register_refresh_preserves_remembered_qr_targets(tmp_path):
 
     store.register(WordCloudQuestion("Words?", render="table"))
 
-    assert store.qr_targets(full_hash) == [target.resolve()]
+    assert _remembered_paths(store, full_hash) == [target.resolve()]
 @
 
 Refreshing a question back to default presentation values must clear the old
@@ -1330,6 +1337,7 @@ the newest live suffix.
 <<functions>>=
 def _public_question_metadata(meta: dict[str, Any]) -> dict[str, Any]:
     visible = dict(meta)
+    visible.pop(QR_PATHS_KEY, None)
     visible.pop(QR_TARGETS_KEY, None)
     visible.pop(LOCALE_KEY, None)
     visible.pop(REGISTRATION_SERIAL_KEY, None)
@@ -1534,18 +1542,197 @@ def iter_prefixes(self) -> Iterator[str]:
 @
 
 \subsection{Remembered QR artifacts}
+\label{sec:remembered-qr-artifacts}
 
 QR regeneration needs one extra piece of operational metadata that should not
 change the question's identity: the concrete files earlier renders wrote.  The
 same question can appear in more than one document directory or image format,
 so we remember a de-duplicated list of those QR targets beside the canonical
-question payload.  We store the resolved absolute paths, because later
-[[mentipy serve]] runs may happen from a different working directory than the
-original render and still need to refresh the same files.
+question payload.
+
+How to spell such a path is the design question.  A path relative to the
+working directory will not do, because a later [[mentipy serve]] may run
+from anywhere and must still refresh the same files.  Older versions of
+Mentipy stored absolute paths, and those fail as soon as the store
+travels.  Some projects track [[mentipy.json]] in git, so that every
+clone serves the same prefixes.  With absolute paths the store then
+carries one machine's home directory into every clone, and a build in a
+git worktree records the worktree's paths, after which [[mentipy serve]]
+in the main checkout writes QR codes into the worktree.
+
+\paragraph{Two keys.}
+
+We keep the entries this version writes under a new key, [[qr_paths]],
+and read the old key, [[qr_targets]], only to migrate it.  The separate
+key is what lets the rest of this section decide how far to trust an
+entry by where it is stored instead of guessing from its shape.  An
+entry under [[qr_paths]] was written by the rules below, so it means
+what it says.  An entry under [[qr_targets]] is an absolute path from
+some checkout on some machine, perhaps this one, perhaps a worktree
+that has since been removed, perhaps a colleague's laptop, and nothing
+in the entry itself tells which.  Both keys are auxiliary: hidden from
+[[metadata()]], kept out of the hash, and carried over by
+refresh-on-merge like every key that is not part of the question's own
+payload.
+
+<<constants>>=
+QR_PATHS_KEY = "qr_paths"
+@
+
+\paragraph{Checkouts.}
+
+What a clone does preserve is the layout inside the checkout.  A
+checkout is recognised by the [[.git]] entry at its root: a directory in
+a clone, a file in a worktree or a submodule.  The store's checkout is
+the nearest directory, from the store's directory upwards, that has
+one.  Asking the file system rather than running [[git]] keeps the
+store free of a subprocess on every render.  Outside version control
+there is no checkout to go by, and the parent of the store's directory
+stands in for it, so that a deck and a handout directory beside it
+still travel together when the parent is copied.
+
+A checkout can contain other checkouts, and they come in two sorts.
+A worktree under [[.claude/worktrees]] of a repository whose store sits
+at its root is another copy of this project: it carries its own copy
+of the tracked store, and its files are that copy's business.  A
+submodule, or a course repository below a central store that is not
+under version control, is part of this checkout's layout instead: it
+does not carry the store, and it travels with the checkout.  We tell
+them apart by exactly that difference.  Walking up from a path, the
+first [[.git]] below the store's checkout root marks a nested
+checkout, and it is another copy of the project when it holds the
+store at the same place relative to its root as the store's checkout
+does.
+
+Every probe goes through [[os.path.exists]] and [[os.path.isdir]]
+rather than their [[pathlib]] counterparts.  The paths probed include
+old stores' paths, perhaps in another user's home on a shared machine,
+and up to Python 3.11 [[Path.exists]] raises [[PermissionError]] for a
+directory it may not enter, where the [[os.path]] functions answer
+[[False]].
+
+<<classes>>=
+class _Checkout(NamedTuple):
+    root: Path
+    store: Path
+<<functions>>=
+def _checkout_of(store_file: Path) -> _Checkout:
+    directory = store_file.parent
+    for candidate in (directory, *directory.parents):
+        if os.path.exists(candidate / ".git"):
+            return _Checkout(candidate, store_file.relative_to(candidate))
+    root = directory.parent
+    return _Checkout(root, store_file.relative_to(root))
+
+
+def _in_other_copy(path: Path, checkout: _Checkout) -> bool:
+    for directory in path.parents:
+        if directory == checkout.root:
+            return False
+        if os.path.exists(directory / ".git"):
+            return os.path.exists(directory / checkout.store)
+    return False
+@
+
+The store's directory is the one the store file is read from, resolved
+when it is needed.  [[self.path]] went through [[resolve_path]] at
+construction (\cref{sec:base-directory}), so under a base directory it
+is already absolute; without one it may be relative and then names the
+store in the current working directory, which is exactly the file the
+next read or write will use.  Resolving it the same way when we write
+an entry and when we read one back is what keeps the two in agreement.
+
+<<store methods>>=
+def _store_dir(self) -> Path:
+    return self.path.parent.resolve()
+
+
+def _checkout(self) -> _Checkout:
+    return _checkout_of(self._store_dir() / self.path.name)
+@
+
+\paragraph{Recording a target.}
+
+A new target is made absolute against the working directory, as
+before, because that is what the caller's path means.  Where it lies
+then decides how it is recorded.
+
+\begin{description}
+\item[In the store's checkout] it is recorded relative to the store's
+  directory, in POSIX form so the entry reads the same on every
+  platform.  That covers the deck's QR directory next to the store,
+  and also a handout directory beside the deck's directory, which the
+  entry reaches by climbing out of the store's directory with [[..]]:
+  inside a repository the sibling layout is the same in every clone.
+  The spelling is lexical ([[os.path.relpath]]), which is safe because
+  both paths are resolved first, and it cannot fail on the different
+  drives of Windows, since the target shares the checkout's drive.
+\item[In another copy of the project] nested in the checkout, it is
+  not recorded at all.  It is that copy's file, and that copy's own
+  store records it.  A relative entry would spread
+  [[.claude/worktrees/x/...]] through git to every clone, and an
+  absolute one would make this checkout's server rewrite the other
+  copy's QR codes.
+\item[Anywhere else] it is recorded by its absolute path.  This is a
+  target the author chose deliberately outside the checkout: a
+  handout directory in a sibling repository, a printout directory, or
+  a deck in its own repository whose store is a central one configured
+  with [[mentipy.store]].  A relative spelling would make every clone
+  write, and create, a directory outside itself.
+\end{description}
+
+The price of relative entries is a store moved alone, away from its
+decks, which then names files that are not there; that is a rarer case
+than a store that travels with its checkout.
+
+Recognising another copy by the store it carries has one blind spot.
+A store at the root of its checkout under the default name
+[[mentipy.json]] takes a nested repository with a root
+[[mentipy.json]] of its own, a submodule holding another deck say, for
+another copy, so a handout written into that submodule is not
+recorded.  A target that is not recorded is therefore logged as a
+warning, so that the author finds out from the build rather than from
+a QR code that is never refreshed.
+
+<<constants>>=
+LOGGER = logging.getLogger(__name__)
+<<functions>>=
+def _spell_qr_path(
+    target: Path, store_dir: Path, checkout: _Checkout
+) -> str | None:
+    if not target.is_relative_to(checkout.root):
+        return target.as_posix()
+    if _in_other_copy(target, checkout):
+        return None
+    return Path(os.path.relpath(target, store_dir)).as_posix()
+@
+
+A hand-edited store may hold something other than a string where a
+path belongs, and one bad entry must not stop every later render.  We
+read only the strings of a list and ignore everything else.
+
+<<functions>>=
+def _string_entries(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [entry for entry in value if isinstance(entry, str)]
+@
+
+The store is written only when the question's list actually changed,
+so rebuilding a deck does not rewrite the store once per question, or
+when the store still holds legacy lists, so that the build migrates
+them (below).
 
 <<store methods>>=
 def remember_qr_target(self, full_hash: str, qr_path: str | Path):
-    """Remember that ``full_hash`` wrote a QR artifact to ``qr_path``."""
+    """Remember that `full_hash` wrote a QR artifact to `qr_path`.
+
+    A target in the store's checkout is recorded relative to the store's
+    directory, so the store stays valid in every clone; a target in
+    another copy of the project nested in the checkout (a worktree with
+    its own copy of the store) is not recorded; any other target is
+    recorded by its absolute path.
+    """
 
     with self._lock:
         data = self._data()
@@ -1554,29 +1741,240 @@ def remember_qr_target(self, full_hash: str, qr_path: str | Path):
             raise KeyError(full_hash)
 
         meta = data["questions"][full_hash]
-        target = Path(qr_path).resolve().as_posix()
-        targets = meta.setdefault(QR_TARGETS_KEY, [])
-        if target in targets:
+        store_dir = self._store_dir()
+        target = Path(qr_path).resolve()
+        spelled = _spell_qr_path(target, store_dir, self._checkout())
+        if spelled is None:
+            LOGGER.warning(
+                "not remembering QR code %s: it lies in another copy of "
+                "the project, which carries its own %s",
+                target.as_posix(),
+                self.path.name,
+            )
+        stored = meta.get(QR_PATHS_KEY, [])
+        paths = _string_entries(stored)
+        if spelled is not None:
+            paths.append(spelled)
+        paths = list(dict.fromkeys(paths))
+        if paths != stored:
+            meta[QR_PATHS_KEY] = paths
+        elif not _has_legacy_qr_targets(data):
             return
-
-        targets.append(target)
         self._write(data)
 @
 
-The regeneration path returns [[Path]] objects rather than raw JSON strings so
-callers can work at the filesystem abstraction level immediately.
+\paragraph{Legacy entries.}
 
+An old [[qr_targets]] entry is trusted only when it is evidently this
+checkout's own file: an absolute path on this platform, in the store's
+checkout and not in another copy of the project, whose QR directory
+exists.  Such an entry is respelled relative and moved to [[qr_paths]].
+Every other legacy entry is dropped: another checkout's path, another
+machine's, a non-string.  This is what finally prunes the personal
+paths that older versions wrote into tracked stores.
+
+The existing directory is evidence that separates this checkout's file
+from a removed worktree under [[.claude/worktrees]], which has lost its
+[[.git]] together with its directory and would otherwise pass for this
+checkout's own.  The cost falls on a store migrated while its QR
+directory was deleted, after a [[make clean]], say: those entries are
+dropped, and the next build records them again.
+
+The directory alone is not enough, though.  An older [[mentipy serve]]
+recreated the directories of every remembered target, a removed
+worktree's included, so a worktree's QR directory may exist again
+without its [[.git]] or its store; and a worktree switched to a branch
+without the store keeps its untracked QR directory too.  Such a path
+still has the shape of another copy of the project: relative to the
+checkout root it reads [[P/D/...]], where [[D]] is the store's own
+directory relative to the root and [[P]] is not empty, as in
+[[.claude/worktrees/x/modules/recap/slides/mentipy-obj/Q-ab12.pdf]] for
+a store in [[modules/recap/slides]].  Legacy entries of that shape are
+dropped as well.  A store at the root of its checkout has an empty
+[[D]], so the shape says nothing there, and we accept that such a
+resurrected directory can be migrated; the read below still keeps it
+from being written once a worktree is created there again.
+
+<<functions>>=
+def _in_copy_layout(path: Path, checkout: _Checkout) -> bool:
+    store_dir = checkout.store.parent.parts
+    if not store_dir:
+        return False
+    parts = path.relative_to(checkout.root).parts
+    size = len(store_dir)
+    return any(
+        parts[start:start + size] == store_dir
+        for start in range(1, len(parts) - size)
+    )
+
+
+def _migrated_legacy_entry(
+    entry: str, store_dir: Path, checkout: _Checkout
+) -> str | None:
+    path = Path(entry)
+    if (
+        path.is_relative_to(checkout.root)
+        and not _in_other_copy(path, checkout)
+        and not _in_copy_layout(path, checkout)
+        and os.path.isdir(path.parent)
+    ):
+        return Path(os.path.relpath(path, store_dir)).as_posix()
+    return None
+
+
+def _has_legacy_qr_targets(data: dict[str, Any]) -> bool:
+    return any(QR_TARGETS_KEY in meta for meta in data["questions"].values())
+@
+
+A legacy entry that is not absolute on this platform, a Windows path
+read on Linux for instance, is a relative [[Path]] here and is never
+relative to the root, so the first condition drops it as well.
+
+\paragraph{Tidying on every write.}
+
+The migration runs on every write of the store, for every question,
+not only the remembered one.  A store keeps questions that no longer
+appear on any slide, and no build remembers those, so a migration
+driven by remembering alone would leave their old paths in the store
+for ever.  The legacy key is removed once its entries are moved, so a
+store pays for those probes only on its first write after the upgrade.
+
+The same pass drops an absolute [[qr_paths]] entry whose QR directory
+does not exist, which is the condition under which regeneration skips
+it (\cref{sec:qr-regeneration}).  Without the drop, a printout
+directory that has been removed would be warned about on every serve
+for ever; with it, the next build that writes there records it again.
+The price is churn in a store shared across machines: the first write
+on a machine without the author's printout directory drops the entry,
+and the author's next build adds it back.  A tracked store should not
+carry such personal paths in the first place, which is the point of
+the issue that motivated this section, so we accept it.  The pass also
+drops whatever is not a string.  An entry is probed once per write,
+and a store holds few absolute entries, so even a write per answer
+during a lecture costs no more than a few [[stat]] calls.
+
+<<functions>>=
+def _directory_exists(entry: str) -> bool:
+    path = Path(entry)
+    return path.is_absolute() and os.path.isdir(path.parent)
 <<store methods>>=
-def qr_targets(self, full_hash: str) -> list[Path]:
-    """Return remembered QR artifact paths for ``full_hash``."""
+def _tidy_qr_targets(self, data: dict[str, Any]):
+    store_dir = self._store_dir()
+    checkout = None
+    for meta in data["questions"].values():
+        if QR_PATHS_KEY not in meta and QR_TARGETS_KEY not in meta:
+            continue
+        stored = meta.get(QR_PATHS_KEY)
+        paths = [
+            entry for entry in _string_entries(stored)
+            if not _is_absolute_entry(entry) or _directory_exists(entry)
+        ]
+        if QR_TARGETS_KEY in meta:
+            checkout = checkout or self._checkout()
+            for entry in _string_entries(meta.pop(QR_TARGETS_KEY)):
+                migrated = _migrated_legacy_entry(entry, store_dir, checkout)
+                if migrated is not None:
+                    paths.append(migrated)
+        meta[QR_PATHS_KEY] = list(dict.fromkeys(paths))
+@
+
+\paragraph{Reading the targets back.}
+
+Regeneration treats the entries differently (\cref{sec:qr-regeneration}),
+so each remembered target comes back with its kind.
+
+\begin{description}
+\item[ [[own]] ] A relative [[qr_paths]] entry that resolves into this
+  checkout and not into another copy, or a legacy entry that the
+  migration would keep: this checkout's file.
+\item[ [[outside]] ] An absolute [[qr_paths]] entry: a deliberate target
+  outside the checkout.
+\item[ [[foreign]] ] Anything else.  A legacy entry the migration would
+  drop is reported so that regeneration can skip it visibly, before any
+  write has migrated the store.  A relative entry can be foreign too,
+  because the checkout it was recorded in need not be the checkout it
+  is read in.  A deck built outside version control records a handout
+  beside it as [[../handout/...]], the store's directory's parent
+  standing in for the checkout; once the deck directory becomes a git
+  repository of its own, that entry leads out of every clone.  And an
+  entry migrated from a resurrected worktree directory of a store at
+  the root of its checkout leads into another copy of the project once
+  a worktree is created there again.  Checking where a relative entry
+  lands, every time it is read, keeps both from being written.
+\end{description}
+
+A relative entry is joined onto the store's directory and normalised
+lexically, like the [[os.path.relpath]] that wrote it, so [[../handout]]
+comes back as the sibling directory itself.  Whether an entry is
+absolute must not depend on the platform that reads it: a tracked store
+can be written on Windows and read on Linux, where [[pathlib]] takes
+[[C:/Users/alice/printouts/Q.png]] for a relative path that joined onto
+the store's directory would make the server create [[C:/Users/alice]]
+inside the deck; and on Windows a [[/home/...]] entry has no drive.  An
+entry is therefore absolute when either platform's rules say so.  The
+same file may be listed twice, under both keys or in two spellings
+after a merge of two branches of a tracked store; it comes back once,
+with the most trusted of its kinds.
+
+<<constants>>=
+OWN_QR_TARGET = "own"
+OUTSIDE_QR_TARGET = "outside"
+FOREIGN_QR_TARGET = "foreign"
+<<classes>>=
+class RememberedQrTarget(NamedTuple):
+    """A remembered QR artifact: its path and how far to trust it.
+
+    `kind` is `OWN_QR_TARGET` for a file of the store's checkout,
+    `OUTSIDE_QR_TARGET` for a deliberate target outside it, and
+    `FOREIGN_QR_TARGET` for an entry that does not belong to this
+    checkout: a legacy entry of another checkout, or a relative entry
+    that leads out of the checkout or into another copy of it.
+    """
+
+    path: Path
+    kind: str
+<<functions>>=
+def _is_absolute_entry(entry: str) -> bool:
+    return PurePosixPath(entry).is_absolute() or (
+        PureWindowsPath(entry).is_absolute()
+    )
+<<store methods>>=
+def remembered_qr_targets(self, full_hash: str) -> list[RememberedQrTarget]:
+    """Return the remembered QR artifacts of `full_hash` with their kinds."""
 
     meta = self._data()["questions"][full_hash]
-    return [Path(path) for path in meta.get(QR_TARGETS_KEY, [])]
+    store_dir = self._store_dir()
+    checkout = self._checkout()
+    found: list[tuple[Path, str]] = []
+    for entry in _string_entries(meta.get(QR_PATHS_KEY)):
+        if _is_absolute_entry(entry):
+            found.append((Path(entry), OUTSIDE_QR_TARGET))
+            continue
+        path = Path(os.path.normpath(store_dir / entry))
+        if path.is_relative_to(checkout.root) and not _in_other_copy(
+            path, checkout
+        ):
+            found.append((path, OWN_QR_TARGET))
+        else:
+            found.append((path, FOREIGN_QR_TARGET))
+    for entry in _string_entries(meta.get(QR_TARGETS_KEY)):
+        migrated = _migrated_legacy_entry(entry, store_dir, checkout)
+        if migrated is None:
+            found.append((Path(entry), FOREIGN_QR_TARGET))
+        else:
+            found.append((store_dir / migrated, OWN_QR_TARGET))
+    trust = (OWN_QR_TARGET, OUTSIDE_QR_TARGET, FOREIGN_QR_TARGET)
+    kinds: dict[Path, str] = {}
+    for path, kind in found:
+        path = Path(os.path.normpath(path))
+        kinds[path] = min(kinds.get(path, kind), kind, key=trust.index)
+    return [RememberedQrTarget(path, kind) for path, kind in kinds.items()]
 @
+
 
 Rendering the same question again into the same file should not multiply the
 remembered targets, and the public metadata helpers should still hide those
-local paths.
+local paths, under either key.
 
 <<test functions>>=
 def test_remember_qr_target_deduplicates_repeated_paths(tmp_path):
@@ -1588,9 +1986,535 @@ def test_remember_qr_target_deduplicates_repeated_paths(tmp_path):
     store.remember_qr_target(full_hash, target)
     store.remember_qr_target(full_hash, target)
 
-    assert store.qr_targets(full_hash) == [target.resolve()]
-    assert QR_TARGETS_KEY not in store.metadata(full_hash)
-    assert QR_TARGETS_KEY not in store.all_questions()[0]
+    assert _remembered_paths(store, full_hash) == [target.resolve()]
+    for key in (QR_PATHS_KEY, QR_TARGETS_KEY):
+        assert key not in store.metadata(full_hash)
+        assert key not in store.all_questions()[0]
+@
+
+The next tests pin what the store file itself says, so they read the raw
+JSON rather than going through [[remembered_qr_targets]], which would
+hide a relative entry behind the absolute path it resolves to.  Where a
+test only wants the files the store stands behind, it lists the paths
+of the targets that are not foreign.  A deck's QR
+directory lies inside the deck, next to the store, so its entry must
+not name the directory the deck happens to be checked out in.
+
+<<test functions>>=
+def _remembered_paths(store, full_hash):
+    return [
+        target.path
+        for target in store.remembered_qr_targets(full_hash)
+        if target.kind != FOREIGN_QR_TARGET
+    ]
+
+
+def _raw_qr_paths(store_path, full_hash):
+    data = json.loads(store_path.read_text(encoding="utf-8"))
+    return data["questions"][full_hash].get(QR_PATHS_KEY)
+
+
+def _write_raw(store_path, full_hash, key, entries):
+    data = json.loads(store_path.read_text(encoding="utf-8"))
+    data["questions"][full_hash][key] = entries
+    store_path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_a_qr_target_inside_the_store_dir_is_stored_relative(tmp_path):
+    deck = tmp_path / "deck"
+    store = Store(deck / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    full_hash = store.resolve(prefix)
+    target = deck / "mentipy-obj" / f"Q-{prefix}.pdf"
+
+    store.remember_qr_target(full_hash, target)
+
+    assert _raw_qr_paths(store.path, full_hash) == [
+        f"mentipy-obj/Q-{prefix}.pdf"
+    ]
+    assert store.remembered_qr_targets(full_hash) == [
+        RememberedQrTarget(target.resolve(), OWN_QR_TARGET)
+    ]
+@
+
+A relative entry is relative to the store's directory, never to the
+working directory of whoever reads it: [[mentipy serve --store]] may
+run from anywhere.  Copying the whole deck elsewhere, as a second clone
+or a git worktree does, must make the copy's store name the copy's
+files.
+
+<<test functions>>=
+def test_relative_qr_targets_follow_the_store_not_the_cwd(
+    tmp_path, monkeypatch
+):
+    deck = tmp_path / "deck"
+    deck.mkdir()
+    monkeypatch.chdir(deck)
+    store = Store("mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    full_hash = store.resolve(prefix)
+    store.remember_qr_target(full_hash, f"mentipy-obj/Q-{prefix}.pdf")
+    clone = tmp_path / "clone"
+    shutil.copytree(deck, clone)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    original = _remembered_paths(Store(deck / "mentipy.json"), full_hash)
+    copied = _remembered_paths(Store(clone / "mentipy.json"), full_hash)
+
+    assert original == [(deck / "mentipy-obj" / f"Q-{prefix}.pdf").resolve()]
+    assert copied == [(clone / "mentipy-obj" / f"Q-{prefix}.pdf").resolve()]
+@
+
+The remaining tests need checkouts.  Mentipy recognises one by the
+[[.git]] entry at its root, a directory in a clone and a file in a
+worktree, so that is all a test has to create.
+
+<<test functions>>=
+def _checkout(path, *, worktree=False):
+    path.mkdir(parents=True, exist_ok=True)
+    if worktree:
+        (path / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+    else:
+        (path / ".git").mkdir()
+    return path
+
+
+def _new_question(store):
+    number = len(store.all_questions())
+    prefix = store.register(OpenQuestion(f"Comment {number}?"))
+    return prefix, store.resolve(prefix)
+@
+
+A handout directory beside the deck's directory lies outside the
+store's directory but inside the checkout, so every clone has it at the
+same place relative to the store.  Its entry climbs out of the store's
+directory, and a copied checkout must still name its own handout.
+
+<<test functions>>=
+def test_a_qr_target_beside_the_store_dir_follows_a_copied_checkout(
+    tmp_path,
+):
+    repo = _checkout(tmp_path / "repo")
+    store = Store(repo / "slides" / "mentipy.json", min_prefix=4)
+    prefix, full_hash = _new_question(store)
+    name = f"handout/qr/Q-{prefix}.png"
+
+    store.remember_qr_target(full_hash, repo / name)
+    clone = tmp_path / "clone"
+    shutil.copytree(repo, clone)
+
+    assert _raw_qr_paths(store.path, full_hash) == [f"../{name}"]
+    copied = Store(clone / "slides" / "mentipy.json")
+    assert _remembered_paths(copied, full_hash) == [(clone / name).resolve()]
+@
+
+A target outside the checkout is recorded by its absolute path and
+stays so on every later build: a handout in a sibling repository next
+to a deck repository whose store sits at its root, and a printout
+directory outside any repository.  Remembering the deck's own file of
+the same name must not disturb either.
+
+<<test functions>>=
+def test_a_qr_target_outside_the_checkout_stays_absolute(tmp_path):
+    repo = _checkout(tmp_path / "repo")
+    store = Store(repo / "mentipy.json", min_prefix=4)
+    prefix, full_hash = _new_question(store)
+    name = f"mentipy-obj/Q-{prefix}.pdf"
+    handout = (_checkout(tmp_path / "handouts") / name).resolve()
+    printout = (tmp_path / "printouts" / name).resolve()
+    for target in (handout, printout):
+        target.parent.mkdir(parents=True)
+
+    for target in (handout, printout, repo / name, repo / name):
+        store.remember_qr_target(full_hash, target)
+
+    assert _raw_qr_paths(store.path, full_hash) == [
+        handout.as_posix(), printout.as_posix(), name
+    ]
+    assert [t.kind for t in store.remembered_qr_targets(full_hash)] == [
+        OUTSIDE_QR_TARGET, OUTSIDE_QR_TARGET, OWN_QR_TARGET
+    ]
+@
+
+A worktree nested in the store's own checkout, with its own copy of
+the store, keeps its own files.  A target there is not recorded,
+however often it is remembered, and the store is not even written for
+it.
+
+<<test functions>>=
+def _nested_worktree(main, store_in_checkout):
+    nested = _checkout(main / ".claude/worktrees/x", worktree=True)
+    copy = nested / store_in_checkout
+    copy.parent.mkdir(parents=True, exist_ok=True)
+    copy.write_text("{}", encoding="utf-8")
+    return nested
+
+
+def test_a_target_in_a_nested_worktree_is_not_recorded(tmp_path):
+    main = _checkout(tmp_path / "main")
+    nested = _nested_worktree(main, "mentipy.json")
+    store = Store(main / "mentipy.json", min_prefix=4)
+    prefix, full_hash = _new_question(store)
+    own = main / f"mentipy-obj/Q-{prefix}.pdf"
+    theirs = nested / f"mentipy-obj/Q-{prefix}.pdf"
+
+    store.remember_qr_target(full_hash, theirs)
+    written = store.path.read_text(encoding="utf-8")
+    store.remember_qr_target(full_hash, theirs)
+    unchanged = store.path.read_text(encoding="utf-8") == written
+    store.remember_qr_target(full_hash, own)
+    store.remember_qr_target(full_hash, theirs)
+
+    assert unchanged
+    assert _raw_qr_paths(store.path, full_hash) == [
+        f"mentipy-obj/Q-{prefix}.pdf"
+    ]
+@
+
+A nested checkout without a copy of the store is part of this
+checkout's layout, a submodule for instance, so its targets are
+recorded relative like any other in the checkout.  The same holds for
+a course repository below a central store that is not under version
+control: the store's directory's parent stands in for the checkout,
+and the course repository lies inside it.
+
+<<test functions>>=
+def test_a_nested_checkout_without_the_store_is_part_of_the_layout(
+    tmp_path,
+):
+    repo = _checkout(tmp_path / "repo")
+    _checkout(repo / "handouts", worktree=True)
+    store = Store(repo / "mentipy.json", min_prefix=4)
+    prefix, full_hash = _new_question(store)
+    central = Store(tmp_path / "central" / "mentipy.json", min_prefix=4)
+    central_prefix, central_hash = _new_question(central)
+    course = _checkout(tmp_path / "central" / "courseA")
+
+    store.remember_qr_target(full_hash, repo / f"handouts/Q-{prefix}.png")
+    central.remember_qr_target(
+        central_hash, course / f"slides/mentipy-obj/Q-{central_prefix}.pdf"
+    )
+
+    assert _raw_qr_paths(store.path, full_hash) == [
+        f"handouts/Q-{prefix}.png"
+    ]
+    assert _raw_qr_paths(central.path, central_hash) == [
+        f"courseA/slides/mentipy-obj/Q-{central_prefix}.pdf"
+    ]
+@
+
+Outside version control the parent of the store's directory stands in
+for the checkout, so a deck and a handout directory beside it still
+travel together, while anything further out stays absolute.
+
+<<test functions>>=
+def test_without_git_the_store_dirs_parent_bounds_relative_targets(
+    tmp_path,
+):
+    course = tmp_path / "course"
+    store = Store(course / "deck" / "mentipy.json", min_prefix=4)
+    prefix, full_hash = _new_question(store)
+    beside = course / "handout" / f"Q-{prefix}.png"
+    further = (tmp_path / "printouts" / f"Q-{prefix}.png").resolve()
+    further.parent.mkdir()
+
+    store.remember_qr_target(full_hash, beside)
+    store.remember_qr_target(full_hash, further)
+
+    assert _raw_qr_paths(store.path, full_hash) == [
+        f"../handout/Q-{prefix}.png",
+        further.as_posix(),
+    ]
+@
+
+Stores written by older versions hold absolute paths under the legacy
+key.  We fake one by writing the JSON the way the old code wrote it.
+Any write of the store migrates every question's legacy list, here a
+plain registration of an unrelated question.  The entries of this
+checkout whose directory exists move to [[qr_paths]], relative and
+merged with what is already there; everything else is dropped: an
+entry whose directory has gone, a nested worktree's file, a sibling
+worktree's, another platform's path, and a non-string.  The legacy key
+is gone afterwards.
+
+<<test functions>>=
+def test_any_write_migrates_the_legacy_entries_of_every_question(
+    tmp_path,
+):
+    main = _checkout(tmp_path / "main")
+    nested = _nested_worktree(main, "deck/mentipy.json")
+    sibling = _checkout(tmp_path / "sibling", worktree=True)
+    deck = main / "deck"
+    store = Store(deck / "mentipy.json", min_prefix=4)
+    prefix, full_hash = _new_question(store)
+    orphan_prefix, orphan = _new_question(store)
+    own = deck / f"mentipy-obj/Q-{prefix}.pdf"
+    orphan_own = deck / f"handout/Q-{orphan_prefix}.png"
+    for directory in (own.parent, orphan_own.parent,
+                      nested / "deck/mentipy-obj",
+                      sibling / "deck/mentipy-obj"):
+        directory.mkdir(parents=True, exist_ok=True)
+    _write_raw(store.path, full_hash, QR_PATHS_KEY, [
+        f"mentipy-obj/Q-{prefix}.pdf"
+    ])
+    _write_raw(store.path, full_hash, QR_TARGETS_KEY, [
+        own.resolve().as_posix(),
+        (deck / f"gone/Q-{prefix}.pdf").resolve().as_posix(),
+        (nested / f"deck/mentipy-obj/Q-{prefix}.pdf").resolve().as_posix(),
+    ])
+    _write_raw(store.path, orphan, QR_TARGETS_KEY, [
+        None,
+        (sibling / f"deck/mentipy-obj/Q-{orphan_prefix}.pdf").as_posix(),
+        f"C:/Users/alice/deck/mentipy-obj/Q-{orphan_prefix}.pdf",
+        orphan_own.resolve().as_posix(),
+    ])
+
+    store.register(OpenQuestion("Something new?"))
+
+    data = json.loads(store.path.read_text(encoding="utf-8"))
+    assert not any(QR_TARGETS_KEY in meta
+                   for meta in data["questions"].values())
+    assert _raw_qr_paths(store.path, full_hash) == [
+        f"mentipy-obj/Q-{prefix}.pdf"
+    ]
+    assert _raw_qr_paths(store.path, orphan) == [
+        f"handout/Q-{orphan_prefix}.png"
+    ]
+@
+
+Before any write has migrated a store, reading it applies the same
+rule in memory: the legacy entries the migration would keep come back
+as this checkout's own, merged with the same file under the new key,
+and the others come back marked, so that regeneration can skip them
+visibly.
+
+<<test functions>>=
+def test_unmigrated_legacy_entries_are_read_with_the_same_rule(tmp_path):
+    main = _checkout(tmp_path / "main")
+    worktree = _checkout(tmp_path / "worktree", worktree=True)
+    store = Store(worktree / "deck" / "mentipy.json", min_prefix=4)
+    prefix, full_hash = _new_question(store)
+    own = (worktree / f"deck/mentipy-obj/Q-{prefix}.pdf").resolve()
+    theirs = (main / f"deck/mentipy-obj/Q-{prefix}.pdf").resolve()
+    for path in (own, theirs):
+        path.parent.mkdir(parents=True)
+    _write_raw(store.path, full_hash, QR_PATHS_KEY, [
+        f"mentipy-obj/Q-{prefix}.pdf"
+    ])
+    _write_raw(store.path, full_hash, QR_TARGETS_KEY, [
+        theirs.as_posix(), own.as_posix()
+    ])
+
+    assert store.remembered_qr_targets(full_hash) == [
+        RememberedQrTarget(own, OWN_QR_TARGET),
+        RememberedQrTarget(theirs, FOREIGN_QR_TARGET),
+    ]
+    assert _remembered_paths(store, full_hash) == [own]
+@
+
+The same file can be listed as this checkout's own and as a legacy
+entry the migration would drop, its directory having been deleted; a
+merge of a migrated branch of a tracked store with an unmigrated one
+produces exactly that.  It is this checkout's file, so the server must
+still rewrite it.
+
+<<test functions>>=
+def test_the_most_trusted_spelling_of_a_file_wins(tmp_path):
+    deck = _checkout(tmp_path / "deck")
+    store = Store(deck / "mentipy.json", min_prefix=4)
+    prefix, full_hash = _new_question(store)
+    name = f"build/qr/Q-{prefix}.pdf"
+    _write_raw(store.path, full_hash, QR_TARGETS_KEY, [
+        (deck / name).resolve().as_posix()
+    ])
+    _write_raw(store.path, full_hash, QR_PATHS_KEY, [name])
+
+    assert store.remembered_qr_targets(full_hash) == [
+        RememberedQrTarget((deck / name).resolve(), OWN_QR_TARGET)
+    ]
+@
+
+A rebuild that records nothing new must still write the store when
+legacy lists are left, or a deck whose targets are all recorded would
+never migrate the rest of its store.
+
+<<test functions>>=
+def test_a_rebuild_migrates_the_store_even_without_new_targets(tmp_path):
+    deck = _checkout(tmp_path / "deck")
+    store = Store(deck / "mentipy.json", min_prefix=4)
+    prefix, full_hash = _new_question(store)
+    _, orphan = _new_question(store)
+    target = deck / f"mentipy-obj/Q-{prefix}.pdf"
+    store.remember_qr_target(full_hash, target)
+    _write_raw(store.path, orphan, QR_TARGETS_KEY, ["/elsewhere/Q.pdf"])
+
+    store.remember_qr_target(full_hash, target)
+
+    data = json.loads(store.path.read_text(encoding="utf-8"))
+    assert QR_TARGETS_KEY not in data["questions"][orphan]
+@
+
+An absolute entry written on another platform must be read as
+absolute, not joined onto the store's directory.  On Linux a Windows
+path is the dangerous case, since [[pathlib]] would take it for a
+relative one.  Non-strings in the list are ignored.
+
+<<test functions>>=
+def test_entries_of_another_platform_and_non_strings(tmp_path):
+    deck = tmp_path / "deck"
+    store = Store(deck / "mentipy.json", min_prefix=4)
+    prefix, full_hash = _new_question(store)
+    windows = f"C:/Users/alice/printouts/Q-{prefix}.png"
+    unc = f"//server/share/printouts/Q-{prefix}.png"
+    _write_raw(store.path, full_hash, QR_PATHS_KEY, [
+        windows, None, unc, 7, f"mentipy-obj/Q-{prefix}.pdf"
+    ])
+
+    assert [
+        (target.path.is_relative_to(deck.resolve()), target.kind)
+        for target in store.remembered_qr_targets(full_hash)
+    ] == [
+        (False, OUTSIDE_QR_TARGET),
+        (False, OUTSIDE_QR_TARGET),
+        (True, OWN_QR_TARGET),
+    ]
+@
+
+Any write tidies the lists: it drops an absolute entry whose QR
+directory does not exist, here a printout directory that has been
+removed and another platform's paths, as well as the non-strings, and
+keeps the deliberate target whose directory exists.  Another
+platform's path names no directory here even when the working
+directory happens to contain one of that name.
+
+<<test functions>>=
+def test_any_write_drops_outside_targets_whose_directory_is_gone(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "C:/Users/alice/printouts").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    deck = _checkout(tmp_path / "deck")
+    store = Store(deck / "mentipy.json", min_prefix=4)
+    prefix, full_hash = _new_question(store)
+    kept = (tmp_path / "printouts" / f"Q-{prefix}.png").resolve()
+    kept.parent.mkdir()
+    gone = (tmp_path / "removed" / f"Q-{prefix}.png").resolve()
+    _write_raw(store.path, full_hash, QR_PATHS_KEY, [
+        f"C:/Users/alice/printouts/Q-{prefix}.png",
+        gone.as_posix(),
+        None,
+        kept.as_posix(),
+        f"mentipy-obj/Q-{prefix}.pdf",
+    ])
+
+    store.register(OpenQuestion("Something new?"))
+
+    assert _raw_qr_paths(store.path, full_hash) == [
+        kept.as_posix(), f"mentipy-obj/Q-{prefix}.pdf"
+    ]
+@
+
+A relative entry is checked against the checkout it is read in.  A deck
+built outside version control records a handout beside it as
+[[../handout/...]]; after [[git init]] in the deck's directory, that
+entry leads out of the checkout, and a clone must not write there.  An
+entry that leads into another copy of the project, a worktree created
+where an older Mentipy had left a directory, is not this checkout's
+either.
+
+<<test functions>>=
+def test_relative_entries_out_of_the_checkout_are_foreign(tmp_path):
+    course = tmp_path / "course"
+    store = Store(course / "deck" / "mentipy.json", min_prefix=4)
+    prefix, full_hash = _new_question(store)
+    store.remember_qr_target(full_hash, course / f"handout/Q-{prefix}.png")
+    (course / "deck" / ".git").mkdir()
+    main = _checkout(tmp_path / "main")
+    root_store = Store(main / "mentipy.json", min_prefix=4)
+    root_prefix, root_hash = _new_question(root_store)
+    entry = f".claude/worktrees/x/mentipy-obj/Q-{root_prefix}.pdf"
+    _write_raw(root_store.path, root_hash, QR_PATHS_KEY, [entry])
+    _nested_worktree(main, "mentipy.json")
+
+    assert [t.kind for t in store.remembered_qr_targets(full_hash)] == [
+        FOREIGN_QR_TARGET
+    ]
+    assert root_store.remembered_qr_targets(root_hash) == [
+        RememberedQrTarget((main / entry).resolve(), FOREIGN_QR_TARGET)
+    ]
+@
+
+An older [[mentipy serve]] may have recreated a removed worktree's QR
+directory, without its [[.git]] and without its store.  The directory
+exists, so only its shape gives it away: relative to the checkout root
+it sits under a copy of the store's own directory.  The migration drops
+it, and keeps this checkout's own entry.
+
+<<test functions>>=
+def test_migration_drops_a_resurrected_worktree_directory(tmp_path):
+    main = _checkout(tmp_path / "main")
+    deck = Path("modules/recap/slides")
+    store = Store(main / deck / "mentipy.json", min_prefix=4)
+    prefix, full_hash = _new_question(store)
+    own = main / deck / f"mentipy-obj/Q-{prefix}.pdf"
+    resurrected = main / ".claude/worktrees/x" / deck / own.name
+    for path in (own, resurrected):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    _write_raw(store.path, full_hash, QR_TARGETS_KEY, [
+        own.resolve().as_posix(), resurrected.resolve().as_posix()
+    ])
+
+    store.register(OpenQuestion("Any write?"))
+
+    assert _raw_qr_paths(store.path, full_hash) == [
+        f"mentipy-obj/Q-{prefix}.pdf"
+    ]
+@
+
+A store at the root of its checkout has no directory of its own to
+recognise a copy's layout by, so the check must leave its legacy
+entries to the other rules: its own entry is migrated.
+
+<<test functions>>=
+def test_migration_keeps_a_root_stores_own_entries(tmp_path):
+    main = _checkout(tmp_path / "main")
+    store = Store(main / "mentipy.json", min_prefix=4)
+    prefix, full_hash = _new_question(store)
+    own = main / f"mentipy-obj/Q-{prefix}.pdf"
+    own.parent.mkdir()
+    _write_raw(store.path, full_hash, QR_TARGETS_KEY, [
+        own.resolve().as_posix()
+    ])
+
+    store.register(OpenQuestion("Any write?"))
+
+    assert _raw_qr_paths(store.path, full_hash) == [
+        f"mentipy-obj/Q-{prefix}.pdf"
+    ]
+@
+
+A target that is not recorded is reported, so that an author whose
+handout lands in what looks like another copy of the project finds out
+at build time: here a store at the root of its checkout and a nested
+repository with a [[mentipy.json]] of its own.
+
+<<test functions>>=
+def test_a_target_that_is_not_recorded_is_reported(tmp_path, caplog):
+    repo = _checkout(tmp_path / "repo")
+    handouts = _checkout(repo / "handouts", worktree=True)
+    (handouts / "mentipy.json").write_text("{}", encoding="utf-8")
+    store = Store(repo / "mentipy.json", min_prefix=4)
+    prefix, full_hash = _new_question(store)
+    target = handouts / f"qr/Q-{prefix}.png"
+
+    with caplog.at_level("WARNING", logger="mentipy.store"):
+        store.remember_qr_target(full_hash, target)
+
+    [record] = caplog.records
+    assert target.resolve().as_posix() in record.getMessage()
+    assert _raw_qr_paths(store.path, full_hash) is None
 @
 
 \subsection{The locale the slides used}
@@ -3054,8 +3978,10 @@ def test_results_empty_window_collapses_stats_to_none(tmp_path):
 @
 
 <<test [[store.py]]>>=
+import json
 import os
 import pytest
+import shutil
 import sys
 import time
 
