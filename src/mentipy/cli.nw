@@ -647,7 +647,9 @@ def _latex_reference() -> str:
             sets once in its shared block, else of config key
             {LOCALE_CONFIG}.  The helper records that language with the
             question when one was chosen (the English fallback is not
-            recorded), and the question's web pages follow it unless
+            recorded, and a compile that chooses nothing keeps an
+            earlier record: choose en to switch back), and the
+            question's web pages follow it unless
             `mentipy serve --locale` overrides it.  The pages of no
             question (the index, /active) and of a question without a
             record follow the language that every recorded question in
@@ -5900,6 +5902,7 @@ def test_latex_command_prints_the_reference_and_all_config_keys():
     assert "`mentipy serve --locale`" in result.output
     assert 'layout="slide", locale=None)' in result.output
     assert "records that language with the" in result.output
+    assert "choose en to switch back" in result.output
     assert "every recorded question in" in result.output
     for name in SLIDE_LABEL_MACROS.values():
         assert f"\\{name}" in result.output

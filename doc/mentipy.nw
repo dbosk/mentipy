@@ -1740,13 +1740,18 @@ helper records it with the question, so the question's web pages are
 in Swedish too, wherever the deck is served from: a deck compiled on a
 laptop configured for Swedish and served from a machine configured for
 English still answers in Swedish.  A deck that says nothing uses the
-configured default, then English; only a language someone chose is
-recorded, so a slide that is English merely because nothing was set
-records nothing:
+configured default, then English:
 
 \begin{minted}{text}
 mentipy config mentipy.locale --set sv
 \end{minted}
+
+Only a language someone chose, by the keyword or the configured
+default, is recorded.  A slide that is English merely because nothing
+was set records nothing, and a compile that chooses nothing keeps the
+question's earlier record: a deck that drops [[locale="sv"]] gets
+English slides, but its pages stay Swedish until a compile chooses
+[[locale="en"]].
 
 PythonTeX reruns a block only when its code has changed, so after
 changing the configured default, remove PythonTeX's output or build

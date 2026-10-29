@@ -4692,17 +4692,15 @@ one language and its [[<html lang>]] says which.  An attribute of the
 handler instance is safe across the server's threads, since every
 connection gets its own instance.  A connection may carry several
 requests, though, once the server speaks HTTP/1.1 with keep-alive, so
-the request's state is reset in [[parse_request]], which the standard
-library calls at the start of every request, before any route.  The
-class attributes cover the first request on a connection when it fails
-before [[parse_request]], as a request line too long for a 414 does;
-on a kept-alive connection such a failure would reuse the previous
-request's catalogue, which cannot happen while the server speaks
-HTTP/1.0.
+the request's state is reset in [[handle_one_request]], which the
+standard library calls once per request, before it even reads the
+request line.  [[parse_request]] would be too late: a request line too
+long to parse gets its 414 page before that, and would show the
+previous request's language.
 
 [[catalogue]] is a property that decides the language only when a page
-first needs it: [[_resolve]] and [[parse_request]] merely note the
-question, or that there is none, and forget the previous decision.
+first needs it: [[_resolve]] and [[handle_one_request]] merely note
+the question, or that there is none, and forget the previous decision.
 Many responses render no words at all: the redirect of [[/active]],
 which a bare [[mentipy watch]] requests on every tick, the image and
 context files, the results export, the redirects of [[/next]], a
@@ -4775,10 +4773,10 @@ strips the token from the URL can carry the [[Set-Cookie]] that replaces it.
 def log_message(self, *_args):
     return
 
-def parse_request(self):
+def handle_one_request(self):
     self._catalogue = None
     self._question = None
-    return super().parse_request()
+    super().handle_one_request()
 
 def _is_local(self) -> bool:
     return is_local_address(self.client_address[0])
@@ -6185,8 +6183,9 @@ spies on the store's two record readers rather than counting reads of
 the file, since the routes read the file for their own purposes too,
 and counting those would pin the routes rather than the language
 choice.  After the lecturer opens the question, the redirects of
-[[/active]] and [[/next]], the results export and the image ask for no
-language; the index, which renders words, asks for the store's once.
+[[/active]] and [[/next]], the results export, the image, a context
+file, a submitted answer, a skip and a reopen ask for no language; the
+index, which renders words, asks for the store's once.
 
 <<test functions>>=
 def test_a_response_without_words_does_not_look_up_the_language(
@@ -6197,7 +6196,10 @@ def test_a_response_without_words_does_not_look_up_the_language(
         PinImageQuestion.from_image_bytes("Peka?", PNG_SAMPLE)
     )
     store.save_image(PNG_SAMPLE)
-    store.register(OpenQuestion("Nästa?"))
+    digest = store.save_image(b"a,b\n1,2\n")
+    following = store.register(OpenQuestion(
+        "Nästa?", context=(ContextDownload(digest, "data.csv", 8),)
+    ))
     lookups = []
     for name in ["recorded_locales", "question_locale"]:
         method = getattr(store, name)
@@ -6215,8 +6217,17 @@ def test_a_response_without_words_does_not_look_up_the_language(
                      f"/{prefix}/next"]:
             response, _page = _request(port, "GET", path)
             assert response.status in (200, 303), (path, response.status)
-        response, _image = _request_bytes(port, "GET", f"/{prefix}/image")
-        assert response.status == 200
+        for path in [f"/{prefix}/image", f"/{following}/context/0"]:
+            response, _file = _request_bytes(port, "GET", path)
+            assert response.status == 200, path
+        form = {"Content-Type": "application/x-www-form-urlencoded"}
+        for path, body in [(f"/{following}", "value=svar"),
+                           (f"/{prefix}/skip", ""),
+                           (f"/{prefix}/reopen", "")]:
+            response, _page = _request(
+                port, "POST", path, body=body, headers=form
+            )
+            assert response.status == 303, (path, response.status)
         assert lookups == []
         _request(port, "GET", "/")
     assert lookups == ["recorded_locales"]
@@ -6234,7 +6245,9 @@ per connection and so per instance, but a keep-alive connection would
 reuse the instance, and the second request on it must not inherit the
 first one's question language.  The test switches the handler to
 HTTP/1.1 and sends a Swedish question's form and then an unknown
-prefix over one connection.  The store holds an English question too,
+prefix over one connection, and at the end the form again followed by
+a request line too long to parse, whose 414 page the standard library
+sends before any parsing.  The store holds an English question too,
 so that it agrees on no language and the unknown prefix has the
 server's English default to fall back to.
 
@@ -6269,7 +6282,8 @@ def test_each_request_on_a_kept_alive_connection_chooses_its_language(
             "127.0.0.1", server.server_address[1], timeout=5
         )
         pages = []
-        for path in [f"/{prefix}", "/ffffffffff", "/nope/a/b"]:
+        for path in [f"/{prefix}", "/ffffffffff", "/nope/a/b",
+                     f"/{prefix}", "/" + "x" * 70000]:
             connection.request("GET", path)
             pages.append(connection.getresponse().read().decode("utf-8"))
         connection.close()
@@ -6280,7 +6294,8 @@ def test_each_request_on_a_kept_alive_connection_chooses_its_language(
 
     langs = [re.search(r'<html lang="(\w+)">', page).group(1)
              for page in pages]
-    assert langs == ["sv", "en", "en"]
+    assert langs == ["sv", "en", "en", "sv", "en"]
+    assert "<h1>Error 414</h1>" in pages[-1]
 @
 
 The pin form's two script strings are the one place a catalogue

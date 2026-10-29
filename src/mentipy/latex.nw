@@ -1182,8 +1182,12 @@ def regenerate_qrs(
 The generic renderer is the only public function that performs all the side
 effects: registration, QR writing, and remembering the QR targets and the
 locale the slide used, when it was chosen (\cref{sec:slide-labels}).  A
-recorded locale is one with a catalogue, which is then the catalogue the
-LaTeX is rendered with, so the record cannot disagree with the slide.
+locale recorded in this compile is one with a catalogue, which is then the
+catalogue the LaTeX is rendered with, so a new record always matches its
+slide.  An earlier record can still outlive its slide: a compile that
+chooses nothing records nothing and leaves the earlier record in place, so
+a deck that drops [[locale="sv"]] gets English slides while its pages stay
+Swedish, until a compile chooses [[en]].
 Doing them in
 one place keeps the question wrappers honest: every question kind follows the
 same identity and artifact rules once it has been converted to a [[Question]]
