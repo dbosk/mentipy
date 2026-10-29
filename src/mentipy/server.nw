@@ -4662,9 +4662,7 @@ the invalidation that the store avoids by reading its file on every
 operation.  It costs one more read of the store, beside the several
 that most requests make anyway (the index makes one, a question's form
 five), and it is a read: a GET still writes nothing.  With the flag set
-it is never computed.  A question that has left the store between the
-request's resolution and its page, which a concurrent edit of the file
-could cause, gets the store's language rather than an error.
+it is never computed.
 
 <<question catalogue>>=
 default_catalogue = load_catalogue(locale or default_locale)
@@ -4680,10 +4678,7 @@ def store_catalogue() -> Catalogue:
 def catalogue_for(full_hash: str) -> Catalogue:
     if locale:
         return default_catalogue
-    try:
-        recorded = normalize_locale(store.question_locale(full_hash))
-    except KeyError:
-        recorded = None
+    recorded = normalize_locale(store.question_locale(full_hash))
     if recorded in CATALOGUES:
         return CATALOGUES[recorded]
     return store_catalogue()
