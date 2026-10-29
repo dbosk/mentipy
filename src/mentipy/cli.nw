@@ -646,7 +646,8 @@ def _latex_reference() -> str:
             of the helpers' locale= keyword (en or sv), which a deck
             sets once in its shared block, else of config key
             {LOCALE_CONFIG}.  The helper records that language with the
-            question, and the question's web pages follow it unless
+            question when one was chosen (the English fallback is not
+            recorded), and the question's web pages follow it unless
             `mentipy serve --locale` overrides it.  The pages of no
             question (the index, /active) and of a question without a
             record follow the language that every recorded question in
@@ -7817,6 +7818,29 @@ def test_render_locale_reaches_the_slide_and_the_record(
     store = Store(store_path)
     [entry] = store.all_questions()
     assert store.question_locale(entry["hash"]) == "sv"
+@
+
+A trial render in a terminal without [[--locale]], on a machine with
+no configured locale, gets English labels, but it records nothing: a
+recorded English would break the agreement of a Swedish store and turn
+its index and waiting page English (\cref{sec:agreed-locale}).
+
+<<test functions>>=
+def test_render_without_a_locale_records_none(tmp_path, monkeypatch):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    monkeypatch.chdir(tmp_path)
+    store_path = tmp_path / "mentipy.json"
+
+    result = CliRunner().invoke(
+        cli,
+        ["render", "open", "Why?", "--store", str(store_path),
+         "--base-url", "http://example.test:8080"],
+    )
+
+    assert result.exit_code == 0, result.output
+    store = Store(store_path)
+    [entry] = store.all_questions()
+    assert store.question_locale(entry["hash"]) is None
 @
 
 <<test functions>>=

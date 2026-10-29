@@ -287,6 +287,35 @@ def get_setting(key: str, default: Any = None) -> Any:
         return fallback
 @
 
+Some callers must tell a value the lecturer set from the built-in
+default it falls back to: the slide helpers record the locale of a
+slide only when someone chose it (\cref{sec:recorded-locale}), and the
+built-in [[en]] is nobody's choice.  [[configured_setting]] therefore
+returns [[None]] for an unset key instead of the default.
+
+<<functions>>=
+def configured_setting(key: str) -> Any:
+    """Return the value set for ``key`` in the configuration, or ``None``."""
+
+    full_key = normalize_config_key(key)
+    try:
+        return _coerce_setting_value(full_key, load_config().get(full_key))
+    except KeyError:
+        return None
+@
+
+<<test functions>>=
+def test_configured_setting_tells_a_set_value_from_the_default(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    assert get_setting(LOCALE_CONFIG) == DEFAULT_LOCALE
+    assert configured_setting(LOCALE_CONFIG) is None
+
+    set_setting("locale", "en")
+    assert configured_setting(LOCALE_CONFIG) == "en"
+@
+
 Writing a setting uses the same normalisation path as reading, so the CLI can
 remain concise without creating a second spelling of each configuration key on
 disk.
@@ -1578,6 +1607,18 @@ next to the question, and the server reads it back
 than the keyword is what makes a deck compiled on a Swedish-configured
 laptop serve Swedish from an English-configured server.
 
+Only a locale someone chose is recorded, though: the helper's keyword
+or a configured [[mentipy.locale]], and only when Mentipy has a
+catalogue for it, so that the slide really is in it.  A slide that is
+English because nothing was chosen, or because the choice is a
+language Mentipy lacks, records nothing.  That English is nobody's
+decision, and recording it would be harmful: a trial render in a
+terminal, a deck file that forgot the shared keyword or a co-teacher's
+machine without the setting would break the language the store's
+questions agree on (\cref{sec:agreed-locale}) and turn the index and
+the waiting page English.  A later compile that chose nothing leaves an
+earlier record in place, since [[register]] carries the key over.
+
 The locale is presentation, like the QR targets: two decks in two
 languages that ask the same question share its prefix, its QR code and
 its answers, so the locale must never enter the hash.  It is therefore
@@ -1607,7 +1648,20 @@ def remember_locale(self, full_hash: str, locale: str):
 def question_locale(self, full_hash: str) -> str | None:
     """Return the recorded slide locale of ``full_hash``, if any."""
 
-    return self._data()["questions"][full_hash].get(LOCALE_KEY)
+    return _locale_record(self._data()["questions"][full_hash])
+@
+
+The two readers of the record go through one helper, which reports a
+record only if it is text.  The store is a JSON file that people edit
+by hand, and a number or a list where a locale belongs would otherwise
+reach the server's language choice and fail every page that makes it,
+the error pages included, with the connection closed and no answer.
+Such a value is no record at all, like an absent one.
+
+<<functions>>=
+def _locale_record(meta: dict[str, Any]) -> str | None:
+    value = meta.get(LOCALE_KEY)
+    return value if isinstance(value, str) and value else None
 @
 
 Recording the locale is idempotent for the store, which is never
@@ -1654,9 +1708,9 @@ def recorded_locales(self) -> set[str]:
     """Return each locale that a question's slide recorded, once."""
 
     return {
-        meta[LOCALE_KEY]
+        record
         for meta in self._data()["questions"].values()
-        if meta.get(LOCALE_KEY)
+        if (record := _locale_record(meta)) is not None
     }
 @
 
@@ -1680,6 +1734,27 @@ def test_the_recorded_locales_are_each_language_the_slides_recorded(
 
     store.remember_locale(second, "en")
     assert store.recorded_locales() == {"sv", "en"}
+@
+
+A hand-edited record that is not text is ignored by both readers.
+
+
+<<test functions>>=
+def test_a_recorded_locale_that_is_not_text_is_no_record(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    swedish, number, listed = [
+        store.resolve(store.register(OpenQuestion(text)))
+        for text in ("Sv?", "Five?", "List?")
+    ]
+    store.remember_locale(swedish, "sv")
+    data = json.loads(store.path.read_text(encoding="utf-8"))
+    data["questions"][number][LOCALE_KEY] = 5
+    data["questions"][listed][LOCALE_KEY] = ["sv"]
+    store.path.write_text(json.dumps(data), encoding="utf-8")
+
+    assert store.question_locale(number) is None
+    assert store.question_locale(listed) is None
+    assert store.recorded_locales() == {"sv"}
 @
 
 \section{Registered images}

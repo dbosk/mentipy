@@ -4628,10 +4628,10 @@ lecturer gave, or [[None]], and it beats everything.
 [[default_locale]] is the configured [[mentipy.locale]], and it gives
 way to what the slides recorded (\cref{sec:recorded-locale}): a deck
 was compiled in that language, perhaps on another machine, and its
-questions should be answered in it.  Between the two lie two records,
-a question's own and the store's, the language that the recorded
-questions of the store agree on (\cref{sec:agreed-locale}).  So the
-precedence is:
+questions should be answered in it.  Between the two lie the
+question's own record and the store's locale, which is derived from
+all the records: the language that the recorded questions of the store
+agree on (\cref{sec:agreed-locale}).  So the precedence is:
 \begin{description}
 \item[A question's pages] (its form, thanks and results pages, its
   waiting page and the banners on them): the flag, else the question's
@@ -4662,7 +4662,9 @@ the invalidation that the store avoids by reading its file on every
 operation.  It costs one more read of the store, beside the several
 that most requests make anyway (the index makes one, a question's form
 five), and it is a read: a GET still writes nothing.  With the flag set
-it is never computed.
+it is never computed.  A question that has left the store between the
+request's resolution and its page, which a concurrent edit of the file
+could cause, gets the store's language rather than an error.
 
 <<question catalogue>>=
 default_catalogue = load_catalogue(locale or default_locale)
@@ -4678,45 +4680,52 @@ def store_catalogue() -> Catalogue:
 def catalogue_for(full_hash: str) -> Catalogue:
     if locale:
         return default_catalogue
-    recorded = normalize_locale(store.question_locale(full_hash))
+    try:
+        recorded = normalize_locale(store.question_locale(full_hash))
+    except KeyError:
+        recorded = None
     if recorded in CATALOGUES:
         return CATALOGUES[recorded]
     return store_catalogue()
 @
 
 The handler then holds the catalogue of the request it is serving as
-[[self.catalogue]]: the store's one until [[_resolve]] has found the
-question the request is about.  Every page the handler renders takes
-[[self.catalogue]], so a page is always in one language and its
-[[<html lang>]] says which.  An attribute of the handler instance is
-safe across the server's threads, since every connection gets its own
-instance.  A connection may carry several requests, though, once the
-server speaks HTTP/1.1 with keep-alive, so the attribute is reset in
-[[parse_request]], which the standard library calls at the start of
-every request, before any route or error page; the class attribute
-covers a request that fails even earlier.
+[[self.catalogue]]: the store's one, or the question's once
+[[_resolve]] has found the question the request is about.  Every page
+the handler renders takes [[self.catalogue]], so a page is always in
+one language and its [[<html lang>]] says which.  An attribute of the
+handler instance is safe across the server's threads, since every
+connection gets its own instance.  A connection may carry several
+requests, though, once the server speaks HTTP/1.1 with keep-alive, so
+the request's state is reset in [[parse_request]], which the standard
+library calls at the start of every request, before any route.  The
+class attributes cover the first request on a connection when it fails
+before [[parse_request]], as a request line too long for a 414 does;
+on a kept-alive connection such a failure would reuse the previous
+request's catalogue, which cannot happen while the server speaks
+HTTP/1.0.
 
-The reset does not compute the store's catalogue, it only forgets the
-previous one: [[catalogue]] is a property that asks the store the
-first time a page needs it.  A redirect of [[/active]], which a bare
-[[mentipy watch]] requests on every tick, renders no words, and it
-should not pay for a read of the store it does not use.  The routes of
-a question choose their catalogue in [[_resolve]] instead, the
-question's own record first, so they ask for the store's only when the
-question has no record.
+[[catalogue]] is a property that decides the language only when a page
+first needs it: [[_resolve]] and [[parse_request]] merely note the
+question, or that there is none, and forget the previous decision.
+Many responses render no words at all: the redirect of [[/active]],
+which a bare [[mentipy watch]] requests on every tick, the image and
+context files, the results export, the redirects of [[/next]], a
+submitted answer, a skip or a reopen.  They should not pay for reading
+the store's records they do not use.
 
 <<mentipy handler catalogue>>=
 _catalogue = None
+_question = None
 
 @property
 def catalogue(self) -> Catalogue:
     if self._catalogue is None:
-        self._catalogue = store_catalogue()
+        if self._question is None:
+            self._catalogue = store_catalogue()
+        else:
+            self._catalogue = catalogue_for(self._question)
     return self._catalogue
-
-@catalogue.setter
-def catalogue(self, chosen: Catalogue):
-    self._catalogue = chosen
 @
 
 <<functions>>=
@@ -4773,6 +4782,7 @@ def log_message(self, *_args):
 
 def parse_request(self):
     self._catalogue = None
+    self._question = None
     return super().parse_request()
 
 def _is_local(self) -> bool:
@@ -4971,7 +4981,8 @@ ambiguous case returns [[300 Multiple Choices]] rather than guessing.
 def _resolve(self, prefix: str) -> str | None:
     full_hash = store.resolve(prefix)
     if full_hash is not None:
-        self.catalogue = catalogue_for(full_hash)
+        self._question = full_hash
+        self._catalogue = None
         return full_hash
 
     matches = _ambiguous_matches(store, prefix)
@@ -5955,8 +5966,9 @@ questions whose hashes share a prefix; as in the English test of that
 page further down, the hash is replaced to make one.
 
 <<test functions>>=
+@pytest.mark.parametrize("chosen_by", ["flag", "store"])
 def test_a_swedish_server_lists_an_ambiguous_prefix_in_swedish(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, chosen_by
 ):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     hashes = {"första": "abcd" + "1" * 60, "andra": "abce" + "2" * 60}
@@ -5966,8 +5978,12 @@ def test_a_swedish_server_lists_an_ambiguous_prefix_in_swedish(
     )
     store.register(OpenQuestion("första"))
     store.register(OpenQuestion("andra"))
+    if chosen_by == "store":
+        for full_hash in hashes.values():
+            store.remember_locale(full_hash, "sv")
+    flag = "sv" if chosen_by == "flag" else None
 
-    with _running_server(store, locale="sv") as port:
+    with _running_server(store, locale=flag) as port:
         response, page = _request(port, "GET", "/abc")
 
     assert response.status == 300
@@ -5986,11 +6002,17 @@ it does for any request it could not parse, so the test reads the body
 alone.
 
 <<test functions>>=
-def test_standard_library_errors_use_the_server_language(tmp_path):
+@pytest.mark.parametrize("chosen_by", ["flag", "store"])
+def test_standard_library_errors_use_the_server_language(
+    tmp_path, chosen_by
+):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(MCQuestion("Vilken?", ("A", "B")))
+    if chosen_by == "store":
+        store.remember_locale(store.resolve(prefix), "sv")
+    flag = "sv" if chosen_by == "flag" else None
 
-    with _running_server(store, locale="sv") as port:
+    with _running_server(store, locale=flag) as port:
         response, page = _request(port, "PUT", f"/{prefix}")
         with socket.create_connection(("127.0.0.1", port), timeout=5) as raw:
             raw.sendall(b"GARBAGE\r\n\r\n")
@@ -6129,9 +6151,87 @@ def test_pages_without_a_question_take_the_locale_the_store_agrees_on(
         assert set(langs(port, paths + ["/active"])) == {"en"}
 @
 
+The store is a file that people edit, and a record that is not text,
+a number or a list, is no record (\cref{sec:recorded-locale}).  Every
+page of no question reads all the records, the 404 and the 501
+included, so one such value must not fail them all; nor must it fail
+its own question's pages, which here take the store's Swedish.
+
+<<test functions>>=
+def test_a_record_that_is_not_text_is_no_record(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    swedish, number, listed = [
+        store.register(OpenQuestion(text)) for text in ("Sv?", "5?", "[]?")
+    ]
+    store.remember_locale(store.resolve(swedish), "sv")
+    data = json.loads(store.path.read_text(encoding="utf-8"))
+    data["questions"][store.resolve(number)]["locale"] = 5
+    data["questions"][store.resolve(listed)]["locale"] = ["sv"]
+    store.path.write_text(json.dumps(data), encoding="utf-8")
+
+    with _running_server(store, lock=False) as port:
+        pages = [
+            _request(port, method, path)
+            for method, path in [
+                ("GET", "/"), ("GET", "/ffffffffff"), ("PUT", "/"),
+                ("GET", f"/{number}"), ("GET", f"/{listed}"),
+            ]
+        ]
+
+    assert [response.status for response, _page in pages] == [
+        200, 404, 501, 200, 200
+    ]
+    for _response, page in pages:
+        assert '<html lang="sv">' in page
+@
+
+A response without words must not read the records at all.  The test
+spies on the store's two record readers rather than counting reads of
+the file, since the routes read the file for their own purposes too,
+and counting those would pin the routes rather than the language
+choice.  After the lecturer opens the question, the redirects of
+[[/active]] and [[/next]], the results export and the image ask for no
+language; the index, which renders words, asks for the store's once.
+
+<<test functions>>=
+def test_a_response_without_words_does_not_look_up_the_language(
+    tmp_path, monkeypatch
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(
+        PinImageQuestion.from_image_bytes("Peka?", PNG_SAMPLE)
+    )
+    store.save_image(PNG_SAMPLE)
+    store.register(OpenQuestion("Nästa?"))
+    lookups = []
+    for name in ["recorded_locales", "question_locale"]:
+        method = getattr(store, name)
+        monkeypatch.setattr(
+            store, name,
+            lambda *args, method=method, name=name: (
+                lookups.append(name) or method(*args)
+            ),
+        )
+
+    with _running_server(store, lock=False) as port:
+        _request(port, "GET", f"/{prefix}/results")
+        lookups.clear()
+        for path in ["/active", f"/{prefix}/results.json",
+                     f"/{prefix}/next"]:
+            response, _page = _request(port, "GET", path)
+            assert response.status in (200, 303), (path, response.status)
+        response, _image = _request_bytes(port, "GET", f"/{prefix}/image")
+        assert response.status == 200
+        assert lookups == []
+        _request(port, "GET", "/")
+    assert lookups == ["recorded_locales"]
+@
+
 A recorded locale the server has no catalogue for, from a hand-edited
 store or a newer Mentipy, is treated as no record: the question gets
-the server's default, not English, and no warning per request.
+the store's language, and here, where it is the only record and so
+leaves the store without one, the server's default; not English, and
+no warning per request.
 
 The catalogue must also be chosen afresh for every request, not once
 per handler instance.  The server speaks HTTP/1.0 today, one request

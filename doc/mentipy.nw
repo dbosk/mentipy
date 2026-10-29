@@ -1740,7 +1740,9 @@ helper records it with the question, so the question's web pages are
 in Swedish too, wherever the deck is served from: a deck compiled on a
 laptop configured for Swedish and served from a machine configured for
 English still answers in Swedish.  A deck that says nothing uses the
-configured default, then English:
+configured default, then English; only a language someone chose is
+recorded, so a slide that is English merely because nothing was set
+records nothing:
 
 \begin{minted}{text}
 mentipy config mentipy.locale --set sv
