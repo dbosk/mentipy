@@ -5443,9 +5443,9 @@ def _attachment_disposition(filename: str) -> str:
 
 A file name with a quote, a backslash or a line break must stay inside
 the header in both forms: the fallback replaces the three, and the
-encoded form percent-encodes them.  A name with no Latin letters at
-all, here two Japanese characters, leaves nothing for the ASCII form,
-which then falls back to [[download]].  The test writes those
+encoded form percent-encodes them.  A name with no character that
+decomposes to ASCII, here two Japanese characters, leaves nothing for
+the ASCII form, which then falls back to [[download]].  The test writes those
 characters as Python escapes, because this listing is woven into the
 manual, and pdfLaTeX cannot set CJK characters in it.
 
