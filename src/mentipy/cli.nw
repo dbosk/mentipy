@@ -2122,8 +2122,8 @@ def _public_start_lines(
     lock: bool,
     admin_token: str | None,
 ) -> list[str]:
-    count = regenerate_qrs(store, public_url)
-    lines = [_address_line(f"Public URL: {public_url}", count)]
+    count, warnings = _regenerated(store, public_url)
+    lines = [_address_line(f"Public URL: {public_url}", count), *warnings]
     if admin_token is not None:
         lines.append(
             "Presenter admin link (keep private; localhost trust is "
@@ -2170,6 +2170,43 @@ def test_public_start_rewrites_the_qr_codes_of_the_served_checkout(
     assert "Regenerated 1 QR codes" in lines[0]
     assert "public.example" in (clone / sidecar).read_text()
     assert "example.test" in (repo / sidecar).read_text()
+@
+
+A QR code that regeneration skips must be reported where the lecturer
+looks.  In [[present]] the start-up lines become the banner, which
+survives every screen clear, while a warning logged to the terminal
+would not; so the warning has to be among the lines, and nothing may
+reach the terminal on the side.
+
+<<test functions>>=
+def test_start_lines_carry_the_warning_about_skipped_qr_codes(
+    tmp_path, monkeypatch, capsys
+):
+    from mentipy.latex import mc
+
+    deck = tmp_path / "deck"
+    deck.mkdir()
+    monkeypatch.chdir(deck)
+    store = Store("mentipy.json", min_prefix=4)
+    mc("Ready?", ["Yes", "No"], store=store, qr_dir="mentipy-obj",
+       base_url="http://example.test:8080")
+    [entry] = store.all_questions()
+    gone = tmp_path / "removed" / "mentipy-obj"
+    data = json.loads(store.path.read_text(encoding="utf-8"))
+    data["questions"][entry["hash"]][QR_TARGETS_KEY].append(
+        (gone / "Q.pdf").as_posix()
+    )
+    store.path.write_text(json.dumps(data), encoding="utf-8")
+
+    lines = mentipy.cli._public_start_lines(
+        store, "127.0.0.1", 8080, "https://public.example",
+        results=True, lock=False, admin_token=None,
+    )
+    banner = str(mentipy.cli._PresentBanner(lines))
+
+    assert lines[1].startswith("Warning: skipped 1 remembered QR codes")
+    assert gone.as_posix() in banner
+    assert capsys.readouterr().err == ""
 @
 
 \section{Command setup}
@@ -2441,12 +2478,15 @@ def _local_start_lines(
     configured_base = _configured_base(None)
     if configured_base not in (None, "", "auto"):
         base = configured_base
-        count = regenerate_qrs(store, base)
-        lines = [_address_line(f"Serving at {base}", count)]
+        count, warnings = _regenerated(store, base)
+        lines = [_address_line(f"Serving at {base}", count), *warnings]
     else:
         base = resolve_base_url(configured_base, port)
-        count = regenerate_qrs(store, base)
-        lines = [_address_line(f"Serving at {base}", count, always=True)]
+        count, warnings = _regenerated(store, base)
+        lines = [
+            _address_line(f"Serving at {base}", count, always=True),
+            *warnings,
+        ]
     if not results:
         lines.append(_format_index_hint(base, host, port))
     if lock:
@@ -2462,6 +2502,33 @@ def _address_line(address: str, count: int, *, always: bool = False) -> str:
         f"Regenerated {count} QR codes; recompile your slides so "
         "they embed the new images."
     )
+@
+
+Regeneration may warn that it skipped QR codes of another checkout or
+in a directory that is gone (\cref{sec:qr-regeneration}).  That warning
+is logged, and in [[mentipy present]] it would be logged too early:
+the banner starts collecting the [[mentipy]] logger's records only
+once the server is bound, after the start-up lines, so the warning
+would go to the terminal and vanish with the first screen clear.  We
+collect what regeneration logs and make it start-up lines instead.
+Both commands then show it the same way, [[serve]] printing it and
+[[present]] keeping it in its banner for the whole lecture.
+
+<<functions>>=
+class _WarningLines(logging.Handler):
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.lines: list[str] = []
+
+    def emit(self, record: logging.LogRecord):
+        self.lines.append(f"Warning: {record.getMessage()}")
+
+
+def _regenerated(store: Store, base_url: str) -> tuple[int, list[str]]:
+    collector = _WarningLines()
+    with _logging_into(collector):
+        count = regenerate_qrs(store, base_url)
+    return count, collector.lines
 @
 
 \subsection{Presenting: serving and following in one terminal}
