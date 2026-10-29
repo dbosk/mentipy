@@ -2137,6 +2137,41 @@ def _public_start_lines(
     return lines
 @
 
+Most tests of the start-up lines replace [[regenerate_qrs]], because
+they are about the lines.  This one keeps it real, because it is about
+where the rewrite lands: [[mentipy serve --store]] with the store of a
+copied checkout, started from an unrelated directory, must rewrite the
+copy's QR codes, not those of the checkout the store was built in.
+
+<<test functions>>=
+def test_public_start_rewrites_the_qr_codes_of_the_served_checkout(
+    tmp_path, monkeypatch
+):
+    from mentipy.latex import mc
+
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "slides").mkdir()
+    monkeypatch.chdir(repo / "slides")
+    mc("Ready?", ["Yes", "No"], store=Store("mentipy.json", min_prefix=4),
+       qr_dir="../handout/qr", base_url="http://example.test:8080")
+    clone = tmp_path / "clone"
+    shutil.copytree(repo, clone)
+    monkeypatch.chdir(tmp_path)
+    store = Store(clone / "slides" / "mentipy.json")
+    [entry] = store.all_questions()
+    sidecar = Path("handout/qr") / f"Q-{entry['url_prefix']}.pdf_tex"
+
+    lines = mentipy.cli._public_start_lines(
+        store, "127.0.0.1", 8080, "https://public.example",
+        results=True, lock=False, admin_token=None,
+    )
+
+    assert "Regenerated 1 QR codes" in lines[0]
+    assert "public.example" in (clone / sidecar).read_text()
+    assert "example.test" in (repo / sidecar).read_text()
+@
+
 \section{Command setup}
 
 Typer lets us keep the public CLI declaration close to the implementation.

@@ -22,6 +22,7 @@ stable polling contract.
 <<imports>>=
 import ast
 from dataclasses import dataclass, replace
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -62,6 +63,7 @@ from mentipy.store import (
     QR_DIR_CONFIG,
     QR_FORMAT_CONFIG,
     SHOW_URL_CONFIG,
+    RememberedQrTarget,
     Store,
     get_setting,
     resolve_path,
@@ -1059,6 +1061,7 @@ def _render_question(
 @
 
 \section{QR target regeneration}
+\label{sec:qr-regeneration}
 
 The generic factory performs the side effects once, and the public wrappers only
 need to construct the appropriate question object.  When no base URL is pinned,
@@ -1076,9 +1079,10 @@ overrides.  Later regeneration therefore cannot reconstruct the right artifact
 paths from today's global defaults alone.  After each render we remember the
 concrete QR targets in the store, and [[regenerate_qrs()]] reuses those exact
 files unless its caller passes an explicit override.  The store records a
-target inside its own directory relative to that directory, so that a tracked
-store works in every clone, and returns every target absolute.  Those absolute
-paths are only for the runtime file write.  The sidecar keeps the original
+target inside its checkout relative to its own directory, so that a tracked
+store works in every clone (\cref{sec:remembered-qr-artifacts}), and returns
+every target absolute.  Those absolute paths are only for the runtime file
+write.  The sidecar keeps the original
 document-facing include path so slide sources do not suddenly switch to
 absolute [[\includegraphics]] paths after [[mentipy serve]] refreshes the URL.
 
@@ -1105,36 +1109,53 @@ remembered targets are the most accurate source of truth.  Explicit overrides
 instead mean \enquote{write the conventional target for each question now}, so
 the remembered list should not fan out into stale document directories.
 
-A remembered target whose directory no longer exists is skipped rather than
-recreated.  [[make_qr]] creates missing parent directories, which is right for
-a render, but regeneration only refreshes QR codes that a build already wrote.
-A missing directory means that build is gone: a removed git worktree, or a
-checkout on another machine whose absolute path an older store still records.
-Recreating it would resurrect a deleted worktree's directories, or litter
-this machine with another machine's paths.  The one case that looks like a
-loss is a fresh clone of a project that tracks its store, served before its
-first build: its QR directory does not exist yet.  But a fresh clone has no
-PythonTeX cache, so its first build runs every render helper, and each one
-writes its QR code with a compile-time URL, overwriting whatever the server
-had written there.  The workflow is build, then serve, then recompile, as it
-is for any compile-time placeholder (\cref{sec:serving-and-recompiling}),
-so skipping loses nothing.  An explicit override still writes its
-conventional targets unconditionally, since the caller asked for exactly
-those files.
+What to do when a target's directory has gone depends on how the store
+recorded it.  A target recorded relative is a file of this checkout,
+and its directory is recreated, as [[make_qr]] always did: a deleted
+[[mentipy-obj]] next to a deck whose PythonTeX output is cached would
+otherwise break the next compile, since the cached [[\input]] of the
+sidecar still runs, and the server's rewrite is what repairs it.
+
+A target recorded absolute is skipped when its directory has gone.
+After the store's migration (\cref{sec:remembered-qr-artifacts}), such
+an entry is either this machine's file outside the checkout or an old
+entry that no build in this checkout has migrated yet, and the latter
+may name a removed worktree or a checkout on another machine.
+Recreating its directories would resurrect the worktree, or reproduce
+another machine's home directory here.  The cost is a missing printout
+directory that the server no longer recreates; the next build that
+writes there creates it again.  Skipping silently would hide a stale
+store, so [[regenerate_qrs]] reports the skipped files in one warning
+on the [[mentipy]] logger, which [[mentipy present]] shows in its
+banner.  A skipped target does not count as a rewritten QR code.
+
+The skip does not make every old store safe.  An old absolute entry for
+another checkout that still exists is written to until a build in this
+checkout migrates the store, so a lecturer serving a fresh worktree of
+a project with an old tracked store should build it first.  That is the
+usual order anyway: the build writes every QR code with a compile-time
+URL, the server rewrites them, and the slides are recompiled
+(\cref{sec:serving-and-recompiling}).
+
+An explicit override writes its conventional targets unconditionally,
+since the caller asked for exactly those files, so each target comes
+with a flag that says whether regeneration may create its directory.
 
 <<functions>>=
 def _regeneration_targets(
-    remembered: list[Path],
+    remembered: list[RememberedQrTarget],
     prefix: str,
     qr_dir: str | Path | None,
     qr_format: str | None,
-) -> list[Path]:
+) -> list[tuple[Path, bool]]:
     if qr_dir is None and qr_format is None and remembered:
-        return [target for target in remembered if target.parent.is_dir()]
+        return [(target.path, target.relative) for target in remembered]
 
     chosen_dir = Path(qr_dir or get_setting(QR_DIR_CONFIG, DEFAULT_QR_DIR))
     chosen_format = qr_format or get_setting(QR_FORMAT_CONFIG, DEFAULT_QR_FORMAT)
-    return [chosen_dir / f"Q-{prefix}.{chosen_format}"]
+    return [(chosen_dir / f"Q-{prefix}.{chosen_format}", True)]
+<<constants>>=
+LOGGER = logging.getLogger(__name__)
 @
 
 Regeneration walks the store rather than the filesystem because the store knows
@@ -1152,13 +1173,18 @@ def regenerate_qrs(
     """Rewrite remembered QR images to point at ``base_url`` and return the count."""
 
     count = 0
+    skipped: list[Path] = []
 
     for entry in store.all_questions():
         full_hash = str(entry["hash"])
         prefix = str(entry["url_prefix"])
         url = _join_url(base_url, prefix)
-        remembered = store.qr_targets(full_hash)
-        for target in _regeneration_targets(remembered, prefix, qr_dir, qr_format):
+        remembered = store.remembered_qr_targets(full_hash)
+        targets = _regeneration_targets(remembered, prefix, qr_dir, qr_format)
+        for target, create in targets:
+            if not create and not target.parent.is_dir():
+                skipped.append(target)
+                continue
             fmt = target.suffix.lstrip(".") or DEFAULT_QR_FORMAT
             make_qr(
                 url,
@@ -1171,6 +1197,12 @@ def regenerate_qrs(
             )
             count += 1
 
+    if skipped:
+        LOGGER.warning(
+            "skipped %d remembered QR codes whose directory is gone: %s",
+            len(skipped),
+            ", ".join(target.as_posix() for target in skipped),
+        )
     return count
 @
 
@@ -3370,29 +3402,44 @@ def test_regenerate_qrs_reuses_all_remembered_qr_targets(tmp_path, monkeypatch):
     ]
 @
 
-A remembered target whose directory has gone, such as a removed
-worktree's, is skipped rather than recreated, and it does not count as
-a rewritten QR code.  The other targets of the same question are still
-refreshed.
+The two kinds of remembered target are treated differently when their
+directory has gone.  A relative one belongs to this checkout, so a
+deleted QR directory is recreated, as it always was: a deck whose
+PythonTeX output is cached still [[\input]]s the sidecar, and the
+server's rewrite is what repairs it.  An absolute one from an older
+store, here a directory outside the checkout that has been removed, is
+skipped and reported in one warning, and it does not count as a
+rewritten QR code.
 
 <<test functions>>=
-def test_regenerate_qrs_skips_targets_whose_directory_is_gone(
-    tmp_path, monkeypatch
+def test_regenerate_qrs_recreates_its_own_but_skips_a_vanished_absolute(
+    tmp_path, monkeypatch, caplog
 ):
-    monkeypatch.chdir(tmp_path)
-    store = Store(tmp_path / "mentipy.json", min_prefix=4)
-    for qr_dir in ("slides", "worktree/slides"):
-        mc("Ready?", ["Yes", "No"], store=store, qr_dir=qr_dir,
-           base_url="http://example.test:8080")
-    shutil.rmtree(tmp_path / "worktree")
-
-    count = regenerate_qrs(store, "http://public.example:9000")
-
+    deck = tmp_path / "deck"
+    deck.mkdir()
+    monkeypatch.chdir(deck)
+    store = Store("mentipy.json", min_prefix=4)
+    mc("Ready?", ["Yes", "No"], store=store, qr_dir="mentipy-obj",
+       base_url="http://example.test:8080")
     [entry] = store.all_questions()
-    sidecar = tmp_path / "slides" / f"Q-{entry['url_prefix']}.pdf_tex"
+    name = f"Q-{entry['url_prefix']}.pdf"
+    vanished = (tmp_path / "removed" / "mentipy-obj" / name).resolve()
+    data = json.loads(store.path.read_text(encoding="utf-8"))
+    data["questions"][entry["hash"]][QR_TARGETS_KEY].append(
+        vanished.as_posix()
+    )
+    store.path.write_text(json.dumps(data), encoding="utf-8")
+    shutil.rmtree(deck / "mentipy-obj")
+
+    with caplog.at_level("WARNING", logger="mentipy.latex"):
+        count = regenerate_qrs(store, "http://public.example:9000")
+
+    sidecar = deck / "mentipy-obj" / name.replace(".pdf", ".pdf_tex")
     assert count == 1
     assert "public.example" in sidecar.read_text()
-    assert not (tmp_path / "worktree").exists()
+    assert not (tmp_path / "removed").exists()
+    [record] = caplog.records
+    assert vanished.as_posix() in record.getMessage()
 @
 
 \subsection{Decks bound into a book}
@@ -3561,6 +3608,58 @@ def test_regenerate_qrs_writes_into_a_copied_deck_not_the_original(
     )
 @
 
+The end-to-end version of the problem that made remembered targets
+relative: a project tracks its store, an older Mentipy recorded the main
+checkout's absolute paths in it, and the deck is then built in a
+worktree.  The build must migrate the store so that the worktree's
+server rewrites the worktree's QR codes and leaves the main checkout's
+alone, which is what the store would otherwise carry into the next
+commit.
+
+<<test functions>>=
+def test_a_worktree_build_stops_a_tracked_store_writing_into_main(
+    tmp_path, monkeypatch
+):
+    main = tmp_path / "main"
+    (main / ".git").mkdir(parents=True)
+    deck = Path("modules/recap/slides")
+    (main / deck).mkdir(parents=True)
+    monkeypatch.chdir(main / deck)
+    mc("Ready?", ["Yes", "No"], store=Store("mentipy.json", min_prefix=4),
+       qr_dir="mentipy-obj", base_url="http://example.test:8080")
+    store_path = main / deck / "mentipy.json"
+    [entry] = Store(store_path).all_questions()
+    name = f"mentipy-obj/Q-{entry['url_prefix']}.pdf"
+    data = json.loads(store_path.read_text(encoding="utf-8"))
+    data["questions"][entry["hash"]][QR_TARGETS_KEY] = [
+        (main / deck / name).resolve().as_posix()
+    ]
+    store_path.write_text(json.dumps(data), encoding="utf-8")
+    worktree = tmp_path / "worktree"
+    (worktree / deck).mkdir(parents=True)
+    (worktree / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+    shutil.copy(store_path, worktree / deck / "mentipy.json")
+    monkeypatch.chdir(worktree / deck)
+    mc("Ready?", ["Yes", "No"], store=Store("mentipy.json", min_prefix=4),
+       qr_dir="mentipy-obj", base_url="http://example.test:8080")
+    monkeypatch.chdir(tmp_path)
+
+    count = regenerate_qrs(
+        Store(worktree / deck / "mentipy.json"), "http://public.example:9000"
+    )
+
+    sidecar = Path(name).with_suffix(".pdf_tex")
+    worktree_data = json.loads(
+        (worktree / deck / "mentipy.json").read_text(encoding="utf-8")
+    )
+    assert worktree_data["questions"][entry["hash"]][QR_TARGETS_KEY] == [
+        name
+    ]
+    assert count == 1
+    assert "public.example" in (worktree / deck / sidecar).read_text()
+    assert "example.test" in (main / deck / sidecar).read_text()
+@
+
 A snippet lands in the deck's QR directory by default and reports the
 path LaTeX should use; rewriting identical content leaves the file
 untouched.
@@ -3582,6 +3681,7 @@ def test_write_snippet_writes_under_the_base_dir(book, tmp_path):
 
 <<test [[latex.py]]>>=
 import hashlib
+import json
 import shutil
 import subprocess
 import unicodedata
