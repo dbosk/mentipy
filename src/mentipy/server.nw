@@ -53,6 +53,7 @@ from mentipy.catalogue import (
     CATALOGUES,
     ENGLISH,
     Catalogue,
+    agreed_locale,
     load_catalogue,
     normalize_locale,
 )
@@ -4625,42 +4626,98 @@ The page language comes in two parts that rank differently, which is
 why the CLI does not merge them.  [[locale]] is the [[--locale]] the
 lecturer gave, or [[None]], and it beats everything.
 [[default_locale]] is the configured [[mentipy.locale]], and it gives
-way to the locale a question's slides recorded
-(\cref{sec:recorded-locale}): the deck was compiled in that language,
-perhaps on another machine, and its questions should be answered in
-it.  So a question's pages --- its form, thanks and results pages, its
-waiting page and the banners on them --- are in the flag's language,
-else the recorded one, else the configured default, else English.  The
-pages not tied to one question, the index, [[/active]], an unknown
-prefix, take the flag or the default.  The default catalogue is loaded
-here, once per server, so an unknown locale warns once at start rather
-than on every request.  A recorded locale the server has no catalogue
-for, from a hand-edited store or a newer Mentipy, counts as no record:
-the question gets the server's default, silently, rather than English
-with a warning on every request.
+way to what the slides recorded (\cref{sec:recorded-locale}): a deck
+was compiled in that language, perhaps on another machine, and its
+questions should be answered in it.  Between the two lie two records,
+a question's own and the store's, the language that the recorded
+questions of the store agree on (\cref{sec:agreed-locale}).  So the
+precedence is:
+\begin{description}
+\item[A question's pages] (its form, thanks and results pages, its
+  waiting page and the banners on them): the flag, else the question's
+  recorded locale, else the store's, else the configured default, else
+  English.
+\item[The pages of no question] (the index, [[/active]] and its
+  waiting page, an unknown or ambiguous prefix, the standard library's
+  error pages): the flag, else the store's locale, else the configured
+  default, else English.
+\end{description}
+The store's locale is what lets a question registered before slides
+recorded their locale, and the waiting page a student sees before the
+lecture starts, follow a deck that is Swedish throughout, without
+turning the lecturer's English courses Swedish by configuration.
+
+The default catalogue is loaded here, once per server, so an unknown
+locale warns once at start rather than on every request.  A recorded
+locale the server has no catalogue for, from a hand-edited store or a
+newer Mentipy, counts as no record, for the question and for the
+store's agreement alike: the question gets the store's language or the
+server's default, silently, rather than English with a warning on
+every request.
+
+The store's locale is computed afresh whenever a page needs it, never
+cached for the server's lifetime.  A lecturer recompiles a deck while
+the server runs, which records new questions, and a cache would need
+the invalidation that the store avoids by reading its file on every
+operation.  It costs one more read of the store, beside the several
+that most requests make anyway (the index makes one, a question's form
+five), and it is a read: a GET still writes nothing.  With the flag set
+it is never computed.
 
 <<question catalogue>>=
 default_catalogue = load_catalogue(locale or default_locale)
+
+
+def store_catalogue() -> Catalogue:
+    if locale:
+        return default_catalogue
+    agreed = agreed_locale(store.recorded_locales())
+    return CATALOGUES[agreed] if agreed else default_catalogue
 
 
 def catalogue_for(full_hash: str) -> Catalogue:
     if locale:
         return default_catalogue
     recorded = normalize_locale(store.question_locale(full_hash))
-    return CATALOGUES.get(recorded, default_catalogue)
+    if recorded in CATALOGUES:
+        return CATALOGUES[recorded]
+    return store_catalogue()
 @
 
 The handler then holds the catalogue of the request it is serving as
-[[self.catalogue]]: the default one until [[_resolve]] has found the
+[[self.catalogue]]: the store's one until [[_resolve]] has found the
 question the request is about.  Every page the handler renders takes
 [[self.catalogue]], so a page is always in one language and its
 [[<html lang>]] says which.  An attribute of the handler instance is
 safe across the server's threads, since every connection gets its own
 instance.  A connection may carry several requests, though, once the
-server speaks HTTP/1.1 with keep-alive, so the attribute is reset to
-the default in [[parse_request]], which the standard library calls at
-the start of every request, before any route or error page; the class
-attribute covers a request that fails even earlier.
+server speaks HTTP/1.1 with keep-alive, so the attribute is reset in
+[[parse_request]], which the standard library calls at the start of
+every request, before any route or error page; the class attribute
+covers a request that fails even earlier.
+
+The reset does not compute the store's catalogue, it only forgets the
+previous one: [[catalogue]] is a property that asks the store the
+first time a page needs it.  A redirect of [[/active]], which a bare
+[[mentipy watch]] requests on every tick, renders no words, and it
+should not pay for a read of the store it does not use.  The routes of
+a question choose their catalogue in [[_resolve]] instead, the
+question's own record first, so they ask for the store's only when the
+question has no record.
+
+<<mentipy handler catalogue>>=
+_catalogue = None
+
+@property
+def catalogue(self) -> Catalogue:
+    if self._catalogue is None:
+        self._catalogue = store_catalogue()
+    return self._catalogue
+
+@catalogue.setter
+def catalogue(self, chosen: Catalogue):
+    self._catalogue = chosen
+@
 
 <<functions>>=
 def _build_handler(
@@ -4680,8 +4737,8 @@ def _build_handler(
 
     class MentipyHandler(BaseHTTPRequestHandler):
         server_version = "mentipy/0.1"
-        catalogue = default_catalogue
 
+        <<mentipy handler catalogue>>
         <<mentipy handler helpers>>
         <<mentipy handler admin access>>
         <<mentipy handler prefix resolution>>
@@ -4715,7 +4772,7 @@ def log_message(self, *_args):
     return
 
 def parse_request(self):
-    self.catalogue = default_catalogue
+    self._catalogue = None
     return super().parse_request()
 
 def _is_local(self) -> bool:
@@ -5727,6 +5784,14 @@ chart and the mode callout.  Removing the bare word instead would hide
 an English Submit button, so every form page is also checked for the
 Swedish button.  Every page also declares its language.
 
+The walk runs twice, once for each way a whole server comes to speak
+Swedish: by the [[--locale]] flag, and by a store whose recorded
+questions all agree on Swedish, served with no flag and English
+configured (\cref{sec:question-locale}).  In the second run the last
+question, the pin, records nothing, so its pages must take the store's
+language too.  A page that took the server's default catalogue rather
+than the request's would pass the first run and fail the second.
+
 The walk covers the empty results pages, fetched before the answers,
 and every refusal, requested as a respondent after the lecturer has
 opened the questions, since a closed question shows the waiting page
@@ -5757,7 +5822,8 @@ def _english_leaks(page, *, keep=()):
     return leaks
 
 
-def test_a_swedish_server_speaks_swedish_on_every_page(tmp_path):
+@pytest.mark.parametrize("chosen_by", ["flag", "store"])
+def test_a_swedish_server_speaks_swedish_on_every_page(tmp_path, chosen_by):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     digest = store.save_image(b"a,b\n1,2\n")
     questions = [
@@ -5774,13 +5840,17 @@ def test_a_swedish_server_speaks_swedish_on_every_page(tmp_path):
     ]
     prefixes = [store.register(question) for question in questions]
     hashes = [store.resolve(prefix) for prefix in prefixes]
+    if chosen_by == "store":
+        for full_hash in hashes[:-1]:
+            store.remember_locale(full_hash, "sv")
+    flag = "sv" if chosen_by == "flag" else None
     answers = [0, 3, "svar", "hej hopp", [0, 1],
                [{"x": 0.5, "y": 0.5, "comment": "här"}]]
     switch = {"remote": True}
     pages = {}
     option = ["> Submit</label>", "<strong>Submit</strong>", ">Submit</span>"]
 
-    with _running_server(store, locale="sv", remote=switch) as port:
+    with _running_server(store, locale=flag, remote=switch) as port:
         pages["not started"] = _request(port, "GET", "/active")[1]
         pages["locked"] = _request(port, "GET", f"/{prefixes[0]}")[1]
         pages["forbidden"] = _request(port, "GET", "/")[1]
@@ -5967,8 +6037,9 @@ its waiting page included, while a question recorded as English stays
 English on a server configured for Swedish.  A question with no record,
 such as one registered before locales were recorded, and every page
 not tied to one question, the index and the unknown prefix among them,
-take the server's default.  An explicit [[--locale]] beats every
-record.
+take the server's default, since this store's questions do not agree
+on a language (the test after this one covers a store whose questions
+do).  An explicit [[--locale]] beats every record.
 
 <<test functions>>=
 def test_each_question_speaks_the_language_its_slide_used(tmp_path):
@@ -6001,6 +6072,63 @@ def test_each_question_speaks_the_language_its_slide_used(tmp_path):
     assert lang(active) == "en"
 @
 
+The pages of no question take the language the store's recorded
+questions agree on.  In this store two questions record Swedish, in
+two spellings, and one records nothing, so with no flag and English
+configured, the waiting page of [[/active]], the refusal of the index
+to a respondent, the index itself, an unknown prefix and the standard
+library's 501 are Swedish, and so is every page of the question
+without a record, its waiting page included.  The store is read per
+request, so when that question records English while the server runs,
+the agreement is gone at once: the pages of no question fall back to
+the configured default, while the Swedish question stays Swedish.  A
+configured Swedish default then takes the pages of no question back.
+An unknown recorded locale neither breaks the agreement nor keeps its
+question out of it, and the flag still beats every record.
+
+<<test functions>>=
+def test_pages_without_a_question_take_the_locale_the_store_agrees_on(
+    tmp_path,
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    first, second, plain = [
+        store.register(OpenQuestion(text)) for text in ("Ett?", "Två?", "?")
+    ]
+    store.remember_locale(store.resolve(first), "sv")
+    store.remember_locale(store.resolve(second), "sv_SE.UTF-8")
+    switch = {"remote": True}
+
+    def lang(page):
+        return re.search(r'<html lang="(\w+)">', page).group(1)
+
+    def langs(port, paths):
+        return [lang(_request(port, "GET", path)[1]) for path in paths]
+
+    paths = ["/", "/ffffffffff", f"/{plain}", f"/{first}"]
+    with _running_server(store, remote=switch) as port:
+        _response, waiting = _request(port, "GET", "/active")
+        _response, locked = _request(port, "GET", f"/{plain}")
+        switch["remote"] = False
+        assert langs(port, paths) == ["sv", "sv", "sv", "sv"]
+        _response, index = _request(port, "GET", "/")
+        _response, unsupported = _request(port, "PUT", "/")
+        store.remember_locale(store.resolve(plain), "en")
+        assert langs(port, paths) == ["en", "en", "en", "sv"]
+    assert "Föreläsningen har inte börjat än." in waiting
+    assert "Läraren har inte öppnat frågan än." in locked
+    assert "<h1>Frågor</h1>" in index
+    assert "<h1>Fel 501</h1>" in unsupported
+
+    with _running_server(store, lock=False, default_locale="sv") as port:
+        assert langs(port, paths) == ["sv", "sv", "en", "sv"]
+
+    store.remember_locale(store.resolve(plain), "tlh")
+    with _running_server(store, lock=False) as port:
+        assert langs(port, paths) == ["sv", "sv", "sv", "sv"]
+    with _running_server(store, lock=False, locale="en") as port:
+        assert set(langs(port, paths + ["/active"])) == {"en"}
+@
+
 A recorded locale the server has no catalogue for, from a hand-edited
 store or a newer Mentipy, is treated as no record: the question gets
 the server's default, not English, and no warning per request.
@@ -6011,7 +6139,9 @@ per connection and so per instance, but a keep-alive connection would
 reuse the instance, and the second request on it must not inherit the
 first one's question language.  The test switches the handler to
 HTTP/1.1 and sends a Swedish question's form and then an unknown
-prefix over one connection.
+prefix over one connection.  The store holds an English question too,
+so that it agrees on no language and the unknown prefix has the
+server's English default to fall back to.
 
 <<test functions>>=
 def test_an_unknown_recorded_locale_gets_the_server_default(tmp_path):
@@ -6033,6 +6163,8 @@ def test_each_request_on_a_kept_alive_connection_chooses_its_language(
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(OpenQuestion("Sv?"))
     store.remember_locale(store.resolve(prefix), "sv")
+    english = store.register(OpenQuestion("En?"))
+    store.remember_locale(store.resolve(english), "en")
     server = create_server(store, host="127.0.0.1", port=0, lock=False)
     server.RequestHandlerClass.protocol_version = "HTTP/1.1"
     thread = threading.Thread(target=server.serve_forever, daemon=True)

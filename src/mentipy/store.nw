@@ -1638,6 +1638,50 @@ def test_the_recorded_locale_survives_reregistration_and_follows_a_recompile(
     assert store.resolve(prefix) == question_hash(question)
 @
 
+The server also needs the recorded locales of the whole store: its
+pages that belong to no question take the language the questions agree
+on (\cref{sec:agreed-locale}).  The store reports each language once
+and leaves the agreeing to the catalogue module, which knows the
+languages.  Every question counts, orphans from an earlier build
+included, since their pages are still served by their prefixes.  The
+server asks on every request that needs the answer, so the reply
+follows a recompile that records new questions while it runs, at the
+price of one more read of the store, beside the several that most
+requests make anyway.
+
+<<store methods>>=
+def recorded_locales(self) -> set[str]:
+    """Return each locale that a question's slide recorded, once."""
+
+    return {
+        meta[LOCALE_KEY]
+        for meta in self._data()["questions"].values()
+        if meta.get(LOCALE_KEY)
+    }
+@
+
+A question without a record adds nothing, and a recompile in another
+language shows at once.
+
+<<test functions>>=
+def test_the_recorded_locales_are_each_language_the_slides_recorded(
+    tmp_path,
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    assert store.recorded_locales() == set()
+
+    first, second, plain = [
+        store.resolve(store.register(OpenQuestion(text)))
+        for text in ("First?", "Second?", "Plain?")
+    ]
+    store.remember_locale(first, "sv")
+    store.remember_locale(second, "sv")
+    assert store.recorded_locales() == {"sv"}
+
+    store.remember_locale(second, "en")
+    assert store.recorded_locales() == {"sv", "en"}
+@
+
 \section{Registered images}
 
 Pin-image questions need the registered image bytes available at serving
