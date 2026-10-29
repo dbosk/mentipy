@@ -1714,13 +1714,21 @@ project can track its store in git: a server in a clone, a copy or a
 worktree rewrites that copy's own QR codes, recreating deleted directories
 as needed.  A QR file outside the checkout, a printout directory or a
 handout repository beside the deck's, is remembered by its absolute path
-and rewritten wherever that directory exists.  A QR file in a worktree
-nested in the checkout is that worktree's business and is not remembered.
+and rewritten while that directory exists; once it is gone, the next write
+of the store forgets it, and the next build that writes there remembers it
+again.  A QR file in a worktree nested in the checkout is that worktree's
+business and is not remembered, with a warning at build time.
+
 A store written by an older Mentipy holds absolute paths of whichever
-checkout built it; the server writes only those that lie in its own
-checkout, and the first write of the store after the upgrade keeps those
-and drops the rest for good.  Anything the server skips is reported in one
-start-up warning, which [[mentipy present]] keeps in its banner.
+checkout built it.  The server writes only those that lie in its own
+checkout and whose directory exists, and the first write of the store after
+the upgrade keeps those and drops the rest for good.  A store migrated in a
+worktree and merged back has lost the main checkout's paths of the
+questions the worktree did not rebuild; the server still refreshes their QR
+codes where a build puts them by default, in the configured QR directory
+beside the store, but a QR code written elsewhere stays stale until its
+block is rebuilt.  Anything the server skips is reported in one start-up
+warning, which [[mentipy present]] keeps in its banner.
 
 \ltnote{%
   \textbf{Variation pattern}: Fusion
