@@ -31,7 +31,13 @@ import warnings
 from pygments.lexers import get_lexer_for_filename
 from pygments.util import ClassNotFound
 
-from mentipy.catalogue import ENGLISH, Catalogue, load_catalogue
+from mentipy.catalogue import (
+    CATALOGUES,
+    ENGLISH,
+    Catalogue,
+    load_catalogue,
+    normalize_locale,
+)
 from mentipy.network import resolve_base_url
 from mentipy.qr import make_qr, sidecar_include_path
 from mentipy.questions import (
@@ -51,7 +57,6 @@ from mentipy.questions import (
 from mentipy.store import (
     BASE_URL_CONFIG,
     DEFAULT_PORT,
-    DEFAULT_LOCALE,
     DEFAULT_QUESTION_ENVIRONMENT,
     DEFAULT_QR_DIR,
     DEFAULT_QR_FORMAT,
@@ -63,6 +68,7 @@ from mentipy.store import (
     QR_FORMAT_CONFIG,
     SHOW_URL_CONFIG,
     Store,
+    configured_setting,
     get_setting,
     resolve_path,
 )
@@ -274,9 +280,16 @@ sets once in its shared block (every helper takes it), and otherwise
 from [[mentipy.locale]], then English.  The keyword is how a deck says
 what language it is in, independent of the machine compiling it; the
 setting is the lecturer's default for decks that say nothing.  The
-helper records the locale its slide actually used with the question
+helper records the locale its slide used with the question
 (\cref{sec:recorded-locale}), so that the server answers in the same
-language.
+language, but only when someone chose it: the keyword, or a setting
+that is set.  The English that a slide falls back to is nobody's
+choice, and it is not recorded, so that it cannot outvote the
+language of the rest of the store.  [[_chosen_locale]] makes that
+distinction, which is why it asks for the configured value rather than
+the setting with its built-in default, and [[_recorded_locale]] keeps
+a choice only if Mentipy has a catalogue for it, since otherwise the
+slide fell back to English after all.
 
 The catalogue is looked up when a question is rendered, that is, when
 PythonTeX runs the helper.  PythonTeX reruns a block only when its code
@@ -286,10 +299,19 @@ change of locale a deck must clear PythonTeX's output or build with
 keep the labels of the earlier language.
 
 <<functions>>=
-def _slide_catalogue(locale: str | None = None) -> Catalogue:
+def _chosen_locale(locale: str | None = None) -> str | None:
     if locale is None:
-        locale = get_setting(LOCALE_CONFIG, DEFAULT_LOCALE)
-    return load_catalogue(locale)
+        locale = configured_setting(LOCALE_CONFIG)
+    return locale or None
+
+
+def _slide_catalogue(locale: str | None = None) -> Catalogue:
+    return load_catalogue(_chosen_locale(locale))
+
+
+def _recorded_locale(locale: str | None = None) -> str | None:
+    name = normalize_locale(_chosen_locale(locale))
+    return name if name in CATALOGUES else None
 @
 
 Every slide message needs a macro, or the collector would fail with a
@@ -1159,8 +1181,13 @@ def regenerate_qrs(
 
 The generic renderer is the only public function that performs all the side
 effects: registration, QR writing, and remembering the QR targets and the
-locale the slide used (\cref{sec:slide-labels}).  The LaTeX is rendered with
-that same catalogue, so the record cannot disagree with the slide.
+locale the slide used, when it was chosen (\cref{sec:slide-labels}).  A
+locale recorded in this compile is one with a catalogue, which is then the
+catalogue the LaTeX is rendered with, so a new record always matches its
+slide.  An earlier record can still outlive its slide: a compile that
+chooses nothing records nothing and leaves the earlier record in place, so
+a deck that drops [[locale="sv"]] gets English slides while its pages stay
+Swedish, until a compile chooses [[en]].
 Doing them in
 one place keeps the question wrappers honest: every question kind follows the
 same identity and artifact rules once it has been converted to a [[Question]]
@@ -1216,7 +1243,9 @@ def question(
         include_path=qr_path,
     )
     active_store.remember_qr_target(full_hash, written)
-    active_store.remember_locale(full_hash, chosen_catalogue.locale)
+    recorded_locale = _recorded_locale(locale)
+    if recorded_locale is not None:
+        active_store.remember_locale(full_hash, recorded_locale)
     return _render_question(
         prompt,
         qr_path,
@@ -2139,13 +2168,14 @@ def test_helpers_take_a_locale_and_record_it(tmp_path, monkeypatch, factory):
     assert not any(f"{{{text}}}" in rendered for text in english)
 @
 
-Without the keyword the slide falls back on the configuration, and the
-record says what the slide fell back on: a deck compiled on a machine
-configured for Swedish records Swedish, so that it is served in
-Swedish from a machine configured for English.  An unknown locale
-records the English the slide fell back to.  A recompile in another
-language moves the record with it, and the keyword reaches the labels
-in every layout that has them, the slide half of [[auto]] included.
+Without the keyword the slide takes the configured locale, and the
+record says so: a deck compiled on a machine configured for Swedish
+records Swedish, so that it is served in Swedish from a machine
+configured for English.  An unknown configured locale gives an English
+slide, but English was nobody's choice, so nothing is recorded.  A
+recompile in another language moves the record with it, and the
+keyword reaches the labels in every layout that has them, the slide
+half of [[auto]] included.
 
 <<test functions>>=
 def test_the_recorded_locale_is_the_one_the_slide_used(
@@ -2160,7 +2190,7 @@ def test_the_recorded_locale_is_the_one_the_slide_used(
         mc("Which?", ["A", "B"], **common)
     [why, which] = store.all_questions()
     assert store.question_locale(why["hash"]) == "sv"
-    assert store.question_locale(which["hash"]) == "en"
+    assert store.question_locale(which["hash"]) is None
 
     mc("Which?", ["A", "B"], locale="sv", **common)
     assert store.question_locale(which["hash"]) == "sv"
@@ -2171,6 +2201,37 @@ def test_the_recorded_locale_is_the_one_the_slide_used(
             "Which?", ["A", "B"], layout=layout, locale="sv", **common
         )
         assert "{Välj ett alternativ:}" in rendered, layout
+@
+
+A slide that falls back to English records nothing, so a deck file
+that forgot the shared keyword does not break the language a Swedish
+store agrees on, and a recompile that chose nothing keeps the record of
+an earlier one.  A choice of English is a choice, though: the setting
+set to [[en]] records it, and so does the keyword, which then breaks
+the agreement as it should.
+
+<<test functions>>=
+def test_only_a_chosen_locale_is_recorded(tmp_path, monkeypatch):
+    common = _label_test_setup(tmp_path, monkeypatch)
+    store = common["store"]
+
+    mc("Which?", ["A", "B"], locale="sv", **common)
+    open_text("Why?", **common)
+    which, why = [row["hash"] for row in store.all_questions()]
+    assert store.question_locale(why) is None
+    assert store.recorded_locales() == {"sv"}
+
+    mc("Which?", ["A", "B"], **common)
+    assert store.question_locale(which) == "sv"
+
+    set_setting("locale", "en")
+    scale("How?", **common)
+    how = store.all_questions()[-1]["hash"]
+    assert store.question_locale(how) == "en"
+
+    open_text("Why?", locale="en", **common)
+    assert store.question_locale(why) == "en"
+    assert store.recorded_locales() == {"sv", "en"}
 @
 
 <<test functions>>=
