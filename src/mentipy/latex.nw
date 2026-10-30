@@ -1301,6 +1301,7 @@ def regenerate_qrs(
 @
 
 \section{Public helper API}
+\label{sec:public-helper-api}
 
 The generic renderer is the only public function that performs all the side
 effects: registration, QR writing, and remembering the QR targets and the
@@ -1378,6 +1379,30 @@ def question(
         layout=layout,
         catalogue=chosen_catalogue,
     )
+@
+
+Without [[store=]], each call makes its own [[Store]] from the
+configuration.  The questions of one PythonTeX run must still form one
+chain for the server's navigation (\cref{sec:live-deck}), so the run
+must belong to the store's path and not to the object.
+
+<<test functions>>=
+def test_helpers_without_a_store_keep_one_navigation_chain(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    texts = ("First?", "Second?", "Third?")
+
+    _start_registration_run()
+    for text in texts:
+        open_text(text, base_url="http://example.test:8080")
+
+    store = Store("mentipy.json")
+    first, second, third = (question_hash(OpenQuestion(t)) for t in texts)
+    assert store.prev_question(first) is None
+    assert store.next_question(first) == second
+    assert store.next_question(second) == third
 @
 
 The multiple-choice wrapper exists for author convenience: slide sources should
@@ -4058,6 +4083,7 @@ import mentipy.latex as latex_module
 
 from mentipy.latex import *
 from mentipy.store import *
+from mentipy.store import _start_registration_run
 from pathlib import Path
 
 QR_SUBPATH = Path(DEFAULT_QR_DIR).as_posix()
