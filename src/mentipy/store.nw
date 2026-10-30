@@ -1395,13 +1395,18 @@ predecessor's and 1 for the head.  The old rule walks back from the last
 question while each serial is one less than the one after it.  When the
 chain of links ends at a [[null]], its head has serial~1 and no question
 has serial~0, so the old rule stops exactly where the chain does; the
-tests check that for every way of editing a deck below.  A deck that
-asks the same question twice is the exception.  Its chain ends at the
-repeat (see below), at a head with a serial above one, and the old rule
-walks on past it as long as the serials keep falling by one: building
-[Dropped?] and then [A?, B?, A?] leaves Dropped?, B? and A? with serials
-1, 2 and 3 in that order, and an old reader shows all three where the
-links show B? and A?.  The counter that used to feed the serials is no
+tests check that for every way of editing a deck below.  The exception
+is a chain that ends at a repeat (see below), whose head has a serial
+above one: the old rule walks on past that head as long as the serials
+keep falling by one.  Two things end a chain at a repeat.  A deck that
+asks the same question twice does: building [Dropped?] and then
+[A?, B?, A?] leaves Dropped?, B? and A? with serials 1, 2 and 3 in that
+order, and an old reader shows all three where the links show B? and
+A?.  And so does a continued [[mentipy render]] of a question already in
+the deck (\cref{sec:what-counts-as-a-run}): after a build of
+[Old?, Q1?, Q2?, Q3?] and a rebuild without Old?, a render of Q1? links
+it to Q3? with serial~4, and an old reader shows Old?, Q2?, Q3? and Q1?
+where the links show the last three.  The counter that used to feed the serials is no
 longer written.  Older readers recompute it on every read as the largest
 serial, so new stores leave it out, and an old store's counter stays in
 the file untouched.
@@ -1436,7 +1441,14 @@ older build that registered the cycle's questions in the order of its
 links.  A simulation of random histories found such a store after 3 of
 about 1900 older builds, each time after a continued render.  When a
 check fails, the serial rule is exactly what the older version shows
-itself, and the next current build writes links that agree again.
+itself.  The next PythonTeX build, or a render-built deck that starts
+with [[--new-run]], writes links that agree again, because its chain
+starts at a [[null]] of its own.  A continued render does not: it links
+to the store's last question and leaves the stale links behind it in
+place, and where their serials happen to agree the walk follows them.
+After a render-built deck A, B, F, E, C, a 0.16 build of A, C, B and
+continued renders of D and A, the walk shows B, D and A, where 0.16
+shows C, B, D and A.
 
 The head check is limited to a chain that ends at a [[null]] on
 purpose.  A chain that ends at a repeat has a head that is not its run's
@@ -1555,6 +1567,14 @@ deck stays live.  [[mentipy render --new-run]] starts a run instead
 question, whose [[null]] then cuts the chain from the old build, so a
 render-built deck settles as one built by PythonTeX does.  The
 [[mentipy.latex]] helpers do neither, because their process is the run.
+So a deck that mixes the two, rendering some questions from a Makefile
+before PythonTeX registers the rest, keeps only the PythonTeX questions
+in its chain, since that run starts with a [[null]]; under the serials
+all of them were live.  Renders after the PythonTeX run continue it.
+
+Renders that run in parallel, as [[make -j]] starts them, race between
+continuing the run and registering, so their chain depends on timing,
+as the serials did.  A render-built deck should be built serially.
 
 Finally, a deck that registers its questions from several named
 PythonTeX sessions gets one process per session, so only the session
@@ -1792,6 +1812,40 @@ def test_old_readers_find_the_same_live_sequence(tmp_path, change, runs):
     data = json.loads(path.read_text())
     assert _live_hashes_by_serials(data["questions"]) == _live_sequence(store)
     assert "registration_counter" not in data
+@
+
+The two chains that end at a repeat are where the readers part, and the
+test pins what each of them shows: a deck that asks a question twice
+after an orphan, and a continued render of a question of a rebuilt
+deck whose dropped first question has serial~1.
+
+<<test functions>>=
+def _repeat_in_the_deck(path):
+    _build(path, _deck("Dropped?"))
+    _build(path, _deck("A?", "B?", "A?"))
+    return _deck("B?", "A?"), _deck("Dropped?", "B?", "A?")
+
+
+def _render_of_a_deck_question(path):
+    old, q1, q2, q3 = _deck("Old?", "Q1?", "Q2?", "Q3?")
+    _build(path, [old, q1, q2, q3])
+    _build(path, [q1, q2, q3])
+    _render(path, q1)
+    return [q2, q3, q1], [old, q2, q3, q1]
+
+
+@pytest.mark.parametrize(
+    "history", [_repeat_in_the_deck, _render_of_a_deck_question]
+)
+def test_old_readers_also_show_older_questions_after_a_repeat(
+    tmp_path, history
+):
+    path = tmp_path / "mentipy.json"
+    links, serials = history(path)
+
+    assert _live_sequence(Store(path)) == _hashes(links)
+    questions = json.loads(path.read_text())["questions"]
+    assert _live_hashes_by_serials(questions) == _hashes(serials)
 @
 
 A question registered twice in a row, in one run, must keep its link: a

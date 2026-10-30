@@ -4164,9 +4164,11 @@ order --- the order the index page lists, orphans from earlier builds
 included --- and not the navigation row's live sequence.  The live
 sequence exists to keep dropped slides out of the
 \enquote{Next $\rightarrow$} chain; for pacing it would be a liability.
-Re-registering one existing question in a run of its own --- a
-[[mentipy render]] in a terminal while the server runs --- moves that
-question to the end of the store and makes it the whole live sequence.
+Re-registering one existing question --- a [[mentipy render]] in a
+terminal while the server runs --- moves that question to the end of the
+store and leaves in the live sequence only the questions from its old
+successor on, then itself; with [[--new-run]] it is the whole live
+sequence.
 Pacing on the live sequence would then have to decide what an orphan is,
 and either answer opens or closes questions the lecturer never touched.
 Pacing on the full order changes at most the predecessor of the moved
