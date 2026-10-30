@@ -263,6 +263,14 @@ RENDER_LOCALE_HELP = (
 RENDER_LOCALE_OPTION = typer.Option(
     None, "--locale", help=RENDER_LOCALE_HELP
 )
+RENDER_NEW_RUN_HELP = (
+    "Start the deck's navigation afresh with this question instead of "
+    "following the store's last question. Pass it to the first question "
+    "of a deck rendered one command per question."
+)
+RENDER_NEW_RUN_OPTION = typer.Option(
+    False, "--new-run", help=RENDER_NEW_RUN_HELP
+)
 ENVIRONMENT_OPTION = typer.Option(None, "--env", help=ENVIRONMENT_HELP)
 LAYOUT_OPTION = typer.Option("slide", "--layout", help=LAYOUT_HELP)
 URL_VISIBILITY_OPTION = typer.Option(
@@ -697,7 +705,26 @@ shared the same way: every question kind takes a context, so the helper turns
 the [[--context]] and [[--context-download]] paths into the authoring helpers'
 items, shown files first.
 
+A render is a process of its own, and the store marks the deck's live
+sequence by the questions each process registers
+(\cref{sec:live-deck}).  A deck built with one render per question, from
+a Makefile say, would then keep only its last question in the
+\enquote{Next $\rightarrow$} chain.  So a render continues the run the
+store holds last: its question follows the store's last question.
+[[--new-run]] starts the chain afresh instead, which a Makefile passes to
+the deck's first question, so that a rebuilt deck replaces its old chain
+and an unchanged rebuild leaves the store as it was.
+
 <<functions>>=
+def _render_store(path: str | None, *, new_run: bool) -> Store:
+    store = _configured_store(path)
+    if new_run:
+        store.start_registration_run()
+    else:
+        store.continue_registration_run()
+    return store
+
+
 def _render_common_kwargs(
     *,
     store: str | None,
@@ -710,9 +737,10 @@ def _render_common_kwargs(
     qr_format: str | None,
     layout: str,
     locale: str | None = None,
+    new_run: bool = False,
 ) -> dict:
     return {
-        "store": _configured_store(store),
+        "store": _render_store(store, new_run=new_run),
         "context": [file_snippet(path) for path in context or ()]
         + [file_download(path) for path in context_download or ()],
         "environment": environment,
@@ -2967,6 +2995,7 @@ def render_mc(
     qr_format: Optional[str] = QR_FORMAT_OPTION,
     store: Optional[str] = STORE_OPTION,
     locale: Optional[str] = RENDER_LOCALE_OPTION,
+    new_run: bool = RENDER_NEW_RUN_OPTION,
 ):
     """Render a multiple-choice question as LaTeX."""
 
@@ -2989,6 +3018,7 @@ def render_mc(
                 qr_format=qr_format,
                 layout=layout,
                 locale=locale,
+                new_run=new_run,
             ),
         )
     )
@@ -3023,6 +3053,7 @@ def render_open(
     qr_format: Optional[str] = QR_FORMAT_OPTION,
     store: Optional[str] = STORE_OPTION,
     locale: Optional[str] = RENDER_LOCALE_OPTION,
+    new_run: bool = RENDER_NEW_RUN_OPTION,
 ):
     """Render an open-text question as LaTeX."""
 
@@ -3045,6 +3076,7 @@ def render_open(
                 qr_format=qr_format,
                 layout=layout,
                 locale=locale,
+                new_run=new_run,
             ),
         )
     )
@@ -3093,6 +3125,64 @@ def test_render_open_threads_the_fence_option_into_the_question(tmp_path):
     [entry] = Store(store_path).all_questions()
     question = Store(store_path).question(entry["hash"])
     assert question.fence == "python"
+@
+
+\subsection{Rendering a deck question by question}
+
+Each render below stands for a separate process, so the test forgets
+the registration runs before it, as a fresh process starts.  By default
+the second question follows the first; with [[--new-run]] it starts the
+chain again.  The store's tests (\cref{sec:live-deck}) cover what that
+does to a whole deck; these only check that the flag reaches the store.
+
+<<test functions>>=
+def _render_open(store_path, text, *extra):
+    _start_registration_run()
+    result = CliRunner().invoke(
+        cli,
+        [
+            "render",
+            "open",
+            text,
+            "--store",
+            str(store_path),
+            "--base-url",
+            "http://example.test:8080",
+            "--qr-dir",
+            str(store_path.parent / DEFAULT_QR_DIR),
+            *extra,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    return question_hash(OpenQuestion(text))
+
+
+def test_render_continues_the_run_the_store_holds_last(tmp_path):
+    store_path = tmp_path / "mentipy.json"
+    first = _render_open(store_path, "First?")
+    second = _render_open(store_path, "Second?")
+
+    assert Store(store_path).prev_question(second) == first
+
+
+def test_render_new_run_starts_the_chain_again(tmp_path):
+    store_path = tmp_path / "mentipy.json"
+    first = _render_open(store_path, "First?")
+    second = _render_open(store_path, "Second?", "--new-run")
+
+    assert Store(store_path).prev_question(second) is None
+    assert Store(store_path).next_question(first) is None
+@
+
+All seven render subcommands take the flag, since a deck may begin with
+any kind of question.
+
+<<test functions>>=
+def test_every_render_subcommand_takes_new_run():
+    render = typer.main.get_command(cli).commands["render"]
+    for name, command in render.commands.items():
+        options = {option for param in command.params for option in param.opts}
+        assert "--new-run" in options, name
 @
 
 \subsection{Web-only context}
@@ -3214,6 +3304,7 @@ def render_scale(
     qr_format: Optional[str] = QR_FORMAT_OPTION,
     store: Optional[str] = STORE_OPTION,
     locale: Optional[str] = RENDER_LOCALE_OPTION,
+    new_run: bool = RENDER_NEW_RUN_OPTION,
 ):
     """Render a scale question as LaTeX."""
 
@@ -3238,6 +3329,7 @@ def render_scale(
                 qr_format=qr_format,
                 layout=layout,
                 locale=locale,
+                new_run=new_run,
             ),
         )
     )
@@ -3316,6 +3408,7 @@ def render_word_cloud(
     qr_format: Optional[str] = QR_FORMAT_OPTION,
     store: Optional[str] = STORE_OPTION,
     locale: Optional[str] = RENDER_LOCALE_OPTION,
+    new_run: bool = RENDER_NEW_RUN_OPTION,
 ):
     """Render a word-cloud question as LaTeX."""
 
@@ -3343,6 +3436,7 @@ def render_word_cloud(
                 qr_format=qr_format,
                 layout=layout,
                 locale=locale,
+                new_run=new_run,
             ),
         )
     )
@@ -3481,6 +3575,7 @@ def render_ranking(
     qr_format: Optional[str] = QR_FORMAT_OPTION,
     store: Optional[str] = STORE_OPTION,
     locale: Optional[str] = RENDER_LOCALE_OPTION,
+    new_run: bool = RENDER_NEW_RUN_OPTION,
 ):
     """Render a ranking question as LaTeX."""
 
@@ -3503,6 +3598,7 @@ def render_ranking(
                 qr_format=qr_format,
                 layout=layout,
                 locale=locale,
+                new_run=new_run,
             ),
         )
     )
@@ -3582,6 +3678,7 @@ def render_pin_image(
     qr_format: Optional[str] = QR_FORMAT_OPTION,
     store: Optional[str] = STORE_OPTION,
     locale: Optional[str] = RENDER_LOCALE_OPTION,
+    new_run: bool = RENDER_NEW_RUN_OPTION,
 ):
     """Render a pin-on-image question as LaTeX."""
 
@@ -3605,6 +3702,7 @@ def render_pin_image(
                 qr_format=qr_format,
                 layout=layout,
                 locale=locale,
+                new_run=new_run,
             ),
         )
     )
@@ -3646,6 +3744,7 @@ def render_pin_text(
     qr_format: Optional[str] = QR_FORMAT_OPTION,
     store: Optional[str] = STORE_OPTION,
     locale: Optional[str] = RENDER_LOCALE_OPTION,
+    new_run: bool = RENDER_NEW_RUN_OPTION,
 ):
     """Render a pin-on-text question as LaTeX."""
 
@@ -3670,6 +3769,7 @@ def render_pin_text(
                 qr_format=qr_format,
                 layout=layout,
                 locale=locale,
+                new_run=new_run,
             ),
         )
     )
@@ -8494,6 +8594,7 @@ import mentipy.network
 import mentipy.server
 from mentipy.server import create_server
 from mentipy.store import *
+from mentipy.store import _start_registration_run
 
 <<test functions>>
 @
