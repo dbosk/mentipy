@@ -1205,6 +1205,13 @@ mentipy render mc "Ready?" "Yes" "No" --new-run > ready.tex
 mentipy render open "What is still unclear?" > unclear.tex
 \end{minted}
 
+Build such a deck serially: renders that [[make -j]] runs in parallel
+race for the store's last question, so the chain would depend on timing.
+Put [[.NOTPARALLEL:]] in the Makefile, or render the deck in one recipe.
+A deck that mixes the two paths, rendering some questions before
+PythonTeX registers the rest, keeps only the PythonTeX questions in the
+navigation chain, because a PythonTeX run starts its chain afresh.
+
 \ltnote{%
   \textbf{Variation pattern}: Fusion
 
