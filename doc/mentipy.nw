@@ -1191,6 +1191,20 @@ rebuild before serving again.  That reruns the registrations in deck
 order, so the new question lands between its neighbours in the chain on
 the next request.
 
+A deck built from the command line, one [[mentipy render]] per question,
+forms the same chain: each render follows the question the store
+registered last.  Rendering the deck again then appends it to its old
+chain, which keeps the navigation but changes [[mentipy.json]] on every
+build and keeps a question dropped from the end.  Passing [[--new-run]]
+to the deck's first question starts the chain afresh, so the rebuilt
+deck replaces the old one and an unchanged deck leaves the store as it
+was:
+
+\begin{minted}{text}
+mentipy render mc "Ready?" "Yes" "No" --new-run > ready.tex
+mentipy render open "What is still unclear?" > unclear.tex
+\end{minted}
+
 \ltnote{%
   \textbf{Variation pattern}: Fusion
 
