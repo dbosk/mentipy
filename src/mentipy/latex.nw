@@ -1315,15 +1315,40 @@ We keep the address in a small file in the QR directory beside the store,
 not in the store itself.  A project may track its store in a public
 repository, and at home this address is the lecturer's public IP, which
 should not end up in a commit.  It is also not worth a diff: it says where
-the deck was last served, not anything about the deck.  The QR directory has
-the right properties already.  Every deck ignores it, since it holds only
-derived files, so the address stays out of git; a clone or a worktree starts
-without it; and a [[make clean]] that removes the QR codes removes the record
-with them, so a clean build falls back to the configuration.
+the deck was last served, not anything about the deck.  The QR directory holds
+only derived files, and every [[.pdf_tex]] sidecar in it already contains this
+address.  So the record exposes nothing new: a deck that ignores the directory
+keeps both out of git, and a deck that does not ignore it has that problem
+already.  Removing the directory removes the record with the QR codes, so the
+next build falls back to the configuration.
 
+The record lives in the configured QR directory, so two things follow.  A deck
+that passes its own [[qr_dir=]] gets the record in the configured directory, not
+in its own, which that deck may not ignore.  And an absolute [[mentipy.qr_dir]]
+gives all decks the same record, so the last server of any of them decides.
+
+A loopback address is never a record.  Offline, the LAN lookup falls back to
+[[127.0.0.1]], and a build with the network back would otherwise print on the
+slide an address that only this machine can reach.  It also clears an older
+record, since that one no longer describes the running server, and the build
+then has its usual fallbacks.
+
+<<imports>>=
+import ipaddress
+from urllib.parse import urlsplit
 <<constants>>=
 SERVED_ADDRESS_FILE = ".served-base-url"
 <<functions>>=
+def _is_loopback(base_url: str) -> bool:
+    host = urlsplit(base_url).hostname
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def _served_address_path(store: Store) -> Path:
     directory = store.path.parent.resolve() / get_setting(
         QR_DIR_CONFIG, DEFAULT_QR_DIR
@@ -1336,6 +1361,9 @@ def remember_served_address(store: Store, base_url: str) -> None:
 
     path = _served_address_path(store)
     try:
+        if _is_loopback(base_url):
+            path.unlink(missing_ok=True)
+            return
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"{base_url}\n", encoding="utf-8")
     except OSError as error:
@@ -1418,6 +1446,23 @@ def test_an_explicit_base_url_outranks_the_served_address(configured_deck):
 
     [text] = _addresses_in_sidecars("mentipy-obj")
     assert "explicit.example" in text
+
+
+@pytest.mark.parametrize(
+    "loopback",
+    ["http://127.0.0.1:8080", "http://localhost:8080", "http://[::1]:8080"],
+)
+def test_a_loopback_address_is_no_record_and_clears_an_old_one(
+    configured_deck, loopback
+):
+    store = Store("mentipy.json")
+    remember_served_address(store, "http://served.example:8080")
+
+    remember_served_address(store, loopback)
+    _build_one_poll()
+
+    [text] = _addresses_in_sidecars("mentipy-obj")
+    assert "config.example" in text
 
 
 def test_the_served_address_belongs_to_one_deck(configured_deck):

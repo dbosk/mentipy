@@ -2433,7 +2433,15 @@ def _run_server(
         lines = _local_start_lines(
             store, host, port, results=results, lock=lock
         )
-        runner(lines, store, host, port, **options)
+        base = resolve_base_url(_configured_base(None), port)
+        runner(
+            lines,
+            store,
+            host,
+            port,
+            on_bound=lambda: remember_served_address(store, base),
+            **options,
+        )
         return
 
     admin_token, require_token = _admin_token_policy(public)
@@ -2454,6 +2462,7 @@ def _run_server(
             port,
             admin_token=admin_token,
             require_token=require_token,
+            on_bound=lambda: remember_served_address(store, public_url),
             **options,
         )
 
@@ -2466,6 +2475,13 @@ def _serve_runner(
     with _reporting_bind_errors(host, port):
         serve_http(store, host, port, **options)
 @
+
+The start-up lines are built, and the QR codes rewritten, before the bind, but
+the address a later build should use is recorded only through [[on_bound]], once
+the socket is ours.  A start that fails, because the port is taken say, has
+served nothing, so it must not decide what the next build writes: a rewritten QR
+code is repaired by the next rerun of PythonTeX, but a false record would keep
+putting the wrong address back.
 
 A port that is taken, or an address the machine does not have, is the
 most common way for a start to fail, and the lecturer needs the
@@ -2569,15 +2585,16 @@ def _regenerated(store: Store, base_url: str) -> tuple[int, list[str]]:
     collector = _WarningLines()
     with _logging_into(collector):
         count = regenerate_qrs(store, base_url)
-        remember_served_address(store, base_url)
     return count, collector.lines
 @
 
-The tests below follow the lecturer's order through the real start-up lines
-and the real render helper, since what matters is what a rebuild writes after
-a server has started, and each build gets a new [[Store]], as a PythonTeX
-process does.  Only the LAN lookup is replaced, because the result of the real
-one depends on the network of the machine running the tests.
+The tests below follow the lecturer's order through the real start-up path, a
+real bind and the real render helper, since what matters is what a rebuild
+writes after a server has started, and each build gets a new [[Store]], as a
+PythonTeX process does.  Three things are replaced.  The LAN lookup, because its
+result depends on the network of the machine running the tests.  The public
+address, because a real one needs a tunnel or a router.  And the wait in
+[[serve_forever]], because the test has to go on after the server has started.
 
 <<test functions>>=
 def _served_deck(tmp_path, monkeypatch, base_url):
@@ -2585,6 +2602,10 @@ def _served_deck(tmp_path, monkeypatch, base_url):
     config.write_text(json.dumps({"mentipy": {"base_url": base_url}}))
     monkeypatch.setenv("MENTIPY_CONFIG", str(config))
     monkeypatch.setattr(mentipy.network, "local_ip", lambda: "192.0.2.10")
+    monkeypatch.setattr(
+        "mentipy.server.ThreadingHTTPServer.serve_forever",
+        lambda _server: None,
+    )
     monkeypatch.chdir(tmp_path)
 
 
@@ -2597,10 +2618,24 @@ def _sidecar_text():
     return sidecar.read_text()
 
 
-def _start_public(url):
-    return mentipy.cli._public_start_lines(
-        Store("mentipy.json"), "0.0.0.0", 8080, url,
-        results=True, lock=False, admin_token=None,
+def _start_local(port=0):
+    mentipy.cli._run_server(
+        Store("mentipy.json"), "127.0.0.1", port,
+        public=None, results=True, lock=False, locale=None,
+        runner=mentipy.cli._serve_runner,
+    )
+
+
+def _start_public(monkeypatch, url):
+    @contextmanager
+    def public_url(*_args, **_kwargs):
+        yield url
+
+    monkeypatch.setattr(mentipy.cli, "_public_url_context", public_url)
+    mentipy.cli._run_server(
+        Store("mentipy.json"), "127.0.0.1", 0,
+        public=PublicMode.upnp, results=True, lock=False, locale=None,
+        runner=mentipy.cli._serve_runner,
     )
 
 
@@ -2610,7 +2645,7 @@ def test_a_rebuild_keeps_the_public_address_of_the_server(
     _served_deck(tmp_path, monkeypatch, "auto")
     _rebuild()
 
-    _start_public("http://203.0.113.7:8080")
+    _start_public(monkeypatch, "http://203.0.113.7:8080")
     _rebuild()
 
     assert "203.0.113.7" in _sidecar_text()
@@ -2623,9 +2658,7 @@ def test_a_rebuild_keeps_the_local_address_of_the_server(
     _rebuild()
     monkeypatch.setattr(mentipy.network, "local_ip", lambda: "192.0.2.99")
 
-    mentipy.cli._local_start_lines(
-        Store("mentipy.json"), "0.0.0.0", 8080, results=True, lock=False
-    )
+    _start_local()
     monkeypatch.setattr(mentipy.network, "local_ip", lambda: "192.0.2.11")
     _rebuild()
 
@@ -2638,7 +2671,7 @@ def test_a_public_server_outranks_a_pinned_base_url_in_a_rebuild(
     _served_deck(tmp_path, monkeypatch, "http://pinned.example:8080")
     _rebuild()
 
-    _start_public("http://203.0.113.7:8080")
+    _start_public(monkeypatch, "http://203.0.113.7:8080")
     _rebuild()
 
     assert "203.0.113.7" in _sidecar_text()
@@ -2650,7 +2683,7 @@ def test_a_first_build_after_the_server_gets_its_address(
 ):
     _served_deck(tmp_path, monkeypatch, "auto")
 
-    _start_public("http://203.0.113.7:8080")
+    _start_public(monkeypatch, "http://203.0.113.7:8080")
     _rebuild()
 
     assert "203.0.113.7" in _sidecar_text()
@@ -2660,8 +2693,8 @@ def test_restarting_the_server_replaces_the_address(tmp_path, monkeypatch):
     _served_deck(tmp_path, monkeypatch, "auto")
     _rebuild()
 
-    _start_public("http://203.0.113.7:8080")
-    _start_public("http://198.51.100.5:8080")
+    _start_public(monkeypatch, "http://203.0.113.7:8080")
+    _start_public(monkeypatch, "http://198.51.100.5:8080")
     _rebuild()
 
     assert "198.51.100.5" in _sidecar_text()
@@ -2673,24 +2706,123 @@ def test_the_served_address_stays_out_of_the_tracked_store(
     _served_deck(tmp_path, monkeypatch, "auto")
     _rebuild()
 
-    _start_public("http://203.0.113.7:8080")
+    _start_public(monkeypatch, "http://203.0.113.7:8080")
     _rebuild()
 
     assert "203.0.113.7" not in Path("mentipy.json").read_text()
+@
+
+A record is a claim that a server used this address, so a start that fails must
+leave no record.  The port really is taken here, by a socket of the test, and
+the command goes through the real command line, since the lecturer sees the
+failure there.
+
+<<test functions>>=
+def test_a_server_that_cannot_bind_leaves_no_address(tmp_path, monkeypatch):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    _rebuild()
+    remember_served_address(Store("mentipy.json"), "http://203.0.113.7:8080")
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        port = taken.getsockname()[1]
+
+        result = CliRunner().invoke(
+            cli,
+            ["serve", "--store", "mentipy.json", "--host", "127.0.0.1",
+             "--port", str(port)],
+        )
+
+    assert result.exit_code == 1
+    assert "cannot listen" in result.output
+    _rebuild()
+    assert "203.0.113.7" in _sidecar_text()
 
 
-def test_a_server_warns_when_it_cannot_leave_its_address(
+def test_present_that_cannot_bind_leaves_no_address(tmp_path, monkeypatch):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    _rebuild()
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        port = taken.getsockname()[1]
+
+        result = CliRunner().invoke(
+            cli,
+            ["present", "--store", "mentipy.json", "--host", "127.0.0.1",
+             "--port", str(port), "--no-open"],
+        )
+
+    assert result.exit_code == 1
+    assert not (Path("mentipy-obj") / mentipy.latex.SERVED_ADDRESS_FILE).exists()
+@
+
+Offline, the LAN lookup falls back to the loopback address.  That is an address
+only this machine can reach, so a build must not carry it onto a slide once the
+network is back.
+
+<<test functions>>=
+def test_an_offline_server_does_not_decide_the_address_of_later_builds(
     tmp_path, monkeypatch
+):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    _rebuild()
+    monkeypatch.setattr(mentipy.network, "local_ip", lambda: "127.0.0.1")
+
+    _start_local()
+    monkeypatch.setattr(mentipy.network, "local_ip", lambda: "192.0.2.11")
+    _rebuild()
+
+    assert "192.0.2.11" in _sidecar_text()
+@
+
+A record that cannot be written costs the next rebuild, not the lecture, so it
+is a warning.  [[serve]] logs it, and [[present]] must keep it in its banner,
+because the first screen clear would remove anything else.
+
+<<test functions>>=
+def test_serve_warns_when_it_cannot_leave_its_address(
+    tmp_path, monkeypatch, caplog
 ):
     _served_deck(tmp_path, monkeypatch, "auto")
     Path("mentipy-obj").write_text("a file where the directory should be")
 
-    lines = _start_public("http://203.0.113.7:8080")
+    _start_public(monkeypatch, "http://203.0.113.7:8080")
 
-    assert any(
-        line.startswith("Warning: cannot remember the served address")
-        for line in lines
+    assert "cannot remember the served address" in caplog.text
+
+
+def _present_at_a_lan_address(tmp_path, monkeypatch):
+    # _run_present pins a loopback address, which is never recorded.
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("base_url", "http://192.0.2.7:8080")
+    _play_the_lecture(monkeypatch)
+    return CliRunner().invoke(
+        cli,
+        ["present", "--host", "127.0.0.1", "--port", str(_free_port()),
+         "--store", str(tmp_path / "mentipy.json")],
     )
+
+
+def test_present_leaves_its_address_once_it_listens(
+    tmp_path, monkeypatch, browser_spy
+):
+    result = _present_at_a_lan_address(tmp_path, monkeypatch)
+
+    assert result.exit_code == 0, result.output
+    record = tmp_path / "mentipy-obj" / mentipy.latex.SERVED_ADDRESS_FILE
+    assert record.read_text().strip() == "http://192.0.2.7:8080"
+
+
+def test_present_keeps_the_warning_in_its_banner(
+    tmp_path, monkeypatch, browser_spy
+):
+    (tmp_path / "mentipy-obj").write_text("a file, not a directory")
+
+    result = _present_at_a_lan_address(tmp_path, monkeypatch)
+
+    assert result.exit_code == 0, result.output
+    assert "cannot remember the served address" in result.stdout
 @
 
 \subsection{Presenting: serving and following in one terminal}
@@ -2815,6 +2947,7 @@ def _present_runner(
     pin_heat: str,
     open_command: str | None,
     startup_warnings: list[str],
+    on_bound=None,
     **options,
 ):
     with _reporting_bind_errors(host, port):
@@ -2825,6 +2958,8 @@ def _present_runner(
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
+            if on_bound is not None:
+                on_bound()
             for warning in startup_warnings:
                 LOGGER.warning("%s", warning)
             if open_command is not None:
