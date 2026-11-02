@@ -14,12 +14,12 @@ compile chose.  The two artifacts can drift, and respondents see a QR that
 scans to one place and a label that reads another.
 
 We close the gap by following Inkscape's [[.pdf_tex]] export pattern.  Each
-question now owns \emph{two} on-disk artifacts that are always written
-together: the QR PDF, and a tiny sidecar LaTeX file that [[\input]]s the PDF
-and renders the URL caption beneath it.  Slides include the sidecar; the QR
-matrix and the printed URL are produced by a single call to [[make_qr]] and
-cannot diverge.  When [[regenerate_qrs]] later refreshes the QRs, the sidecars
-are refreshed in the same loop---no extra plumbing required.
+question now owns \emph{two} on-disk artifacts that are written together: the
+QR PDF, and a tiny sidecar LaTeX file that [[\input]]s the PDF and renders the
+URL caption beneath it.  Slides include the sidecar; the QR matrix and the
+printed URL are produced by a single call to [[make_qr]], so a completed call
+leaves them agreeing.  When [[regenerate_qrs]] later refreshes the QRs, the
+sidecars are refreshed in the same loop---no extra plumbing required.
 
 <<[[qr.py]]>>=
 from __future__ import annotations
@@ -172,10 +172,16 @@ both the server and every PythonTeX run write these files with nothing to change
 most of the time.  The image is always written, though, since a matching sidecar
 says nothing about it: [[Q-x.pdf]], [[Q-x.png]] and [[Q-x.svg]] in one directory
 share one sidecar, so it can match while another format still holds an old address,
-and an interrupted write leaves the two disagreeing as well.  Writing every image
-repairs all of that.  This relies on Makefiles depending on the sidecars rather
-than on the images, whose dates do move.  A sidecar that cannot be read counts as
-different, so it gets overwritten as before.
+and an interrupted write leaves the two disagreeing as well.  Writing the image on
+every call repairs that for each target the caller names, and a server start names
+every remembered one.  This relies on Makefiles depending on the sidecars rather
+than on the images, whose dates do move; a direct [[latexmk]] run compares the
+images and may rerun.  The one case it misses is narrow: an image repaired at the
+same address leaves the sidecar's date alone, so [[make]] does not rebuild a PDF
+made from the broken image, though the server still says to recompile.  Here a
+sidecar that cannot be read counts as different and gets overwritten, as it always
+did in [[make_qr]]; a server start still fails on one earlier, when
+[[sidecar_include_path]] reads it.
 
 <<constants>>=
 QR_TEX_SUFFIX = ".pdf_tex"

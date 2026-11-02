@@ -3563,25 +3563,33 @@ def test_regenerating_for_another_address_rewrites_the_sidecar(
 The sidecar's text cannot vouch for the images.  Every format of a question in one
 directory shares one sidecar, so the first format written makes it match while the
 next format still holds the old address, which would put one address's code above
-another's caption.  PNG and SVG files are the same bytes for the same URL, so the
-test compares them with a fresh code for the new address.
+another's caption.  The test compares each file with a fresh code for the new
+address.  They are the same bytes for the same URL, except that a PDF carries the
+time it was made, which the comparison strips.  PDF has to be among the formats, as
+it is the default and the one decks use.
 
 <<test functions>>=
+def _without_the_creation_date(image):
+    return re.sub(rb"/CreationDate\s*\([^)]*\)", b"", image.read_bytes())
+
+
 def test_regenerating_updates_every_format_beside_a_shared_sidecar(
     tmp_path, monkeypatch
 ):
     store, sidecar = _deck_with_a_poll(
-        tmp_path, monkeypatch, "png", "svg"
+        tmp_path, monkeypatch, "pdf", "png", "svg"
     )
     prefix = sidecar.stem.removeprefix("Q-")
     url = f"http://b.example:8080/{prefix}"
 
     regenerate_qrs(store, "http://b.example:8080")
 
-    for fmt in ("png", "svg"):
+    for fmt in ("pdf", "png", "svg"):
         fresh = make_qr(url, tmp_path / f"fresh.{fmt}", fmt=fmt)
         written = sidecar.with_suffix(f".{fmt}")
-        assert written.read_bytes() == fresh.read_bytes(), fmt
+        assert _without_the_creation_date(written) == (
+            _without_the_creation_date(fresh)
+        ), fmt
 
 
 def test_regenerating_repairs_an_image_at_the_same_address(
@@ -4170,6 +4178,7 @@ def test_write_snippet_writes_under_the_base_dir(book, tmp_path):
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import unicodedata
