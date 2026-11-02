@@ -8,6 +8,45 @@ It is meant for lectures where you want Mentimeter-style interaction without a
 cloud service: put polls in the lecture source, compile the slides or handout,
 serve the poll locally, and let students answer by scanning the QR code.
 
+## Installation
+
+Mentipy needs Python 3.11 or newer. Install it with
+[uv](https://docs.astral.sh/uv/getting-started/installation/), which brings
+that Python along even when the system runs an older one:
+
+```sh
+uv tool install --python 3.11 mentipy
+```
+
+uv downloads Python 3.11 if the machine lacks it and keeps it with `mentipy` in
+an environment of their own, so the system Python stays as it is. Keep
+`--python 3.11`: on a system with Python 3.10, uv would otherwise settle for the
+last Mentipy release that runs there. If pipx already has `mentipy`, run
+`pipx uninstall mentipy` first, or uv refuses to replace the executable.
+
+The optional features are extras, and `uv tool upgrade mentipy` later keeps both
+them and the Python. Name all the extras you want, because installing again
+replaces the earlier choice:
+
+```sh
+uv tool install --python 3.11 'mentipy[public,wordcloud]'
+```
+
+PythonTeX imports Mentipy from the document build's own Python, so a deck also
+needs a virtual environment. `mentipy init` creates `./.venv` on the Python that
+Mentipy itself runs on, which is 3.11 after the commands above, whatever
+`python3` is on the system. It reuses an existing `.venv`, so delete one made
+with an older Python first. It installs Mentipy without extras, so run
+`mentipy serve` outside an activated `.venv` when you need them.
+
+To make that environment without installing the tool, use `uv venv`. `--seed`
+adds pip, which `mentipy init` calls to install into it:
+
+```sh
+uv venv --seed --python 3.11 .venv
+uv pip install --python .venv/bin/python mentipy
+```
+
 ## Basic Workflow
 
 1. Render questions from PythonTeX or from the `mentipy render` CLI.

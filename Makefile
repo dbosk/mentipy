@@ -16,7 +16,7 @@ test: compile
 
 .PHONY: install
 install: compile
-	pipx install .
+	uv tool install --force --python 3.11 .
 
 .PHONY: compile
 compile:

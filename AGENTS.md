@@ -70,7 +70,7 @@ A new question type or top-level helper has to land in several places beyond its
 
 ## Packaging and runtime facts
 
-- Python requirement is `>=3.10,<4.0` (`pyproject.toml`).
+- Python requirement is `>=3.11,<4.0` (`pyproject.toml`); Pillow 13, the first release with the fixes behind the Dependabot alerts, needs 3.11. Installation goes through `uv tool install --python 3.11 mentipy` (README, the manual's "Installing mentipy", `make install`, the UPnP error in `public.nw`), which brings that Python along on an older system; raising the requirement means updating that `--python` everywhere. `mentipy init` builds on the Python that runs it (`venv.EnvBuilder`), so the tool's Python reaches the deck venvs.
 - The console entrypoint is `mentipy = "mentipy.cli:main"`.
 - Defaults and config keys live in `src/mentipy/store.nw`; both CLI and LaTeX helpers read settings from there.
 - Optional public exposure support is packaged as `mentipy[public]`, which installs `miniupnpc` for the UPnP mode; SSH mode stays stdlib-only.

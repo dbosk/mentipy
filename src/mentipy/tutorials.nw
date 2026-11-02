@@ -27,7 +27,7 @@ setup steps.
   recognise that activation is temporary unless a shell tool repeats it.
 
   \textbf{Critical aspects}: The difference between installing a CLI with
-  [[pipx]] and making [[python3]] plus PythonTeX import [[mentipy]] from the
+  [[uv tool]] and making [[python3]] plus PythonTeX import [[mentipy]] from the
   same interpreter.
 
   \textbf{Variation pattern}: Contrast followed by generalization.  The
@@ -57,7 +57,7 @@ summary: Create and activate a project-local virtual environment so both
 @
 
 We begin with the help text because the workflow only makes sense once the
-learner sees the distinction between system Python, [[pipx]], and PythonTeX.
+learner sees the distinction between system Python, [[uv tool]], and PythonTeX.
 
 <<preparing your environment steps>>=
 # Learn why the virtual environment matters
@@ -66,7 +66,7 @@ learner sees the distinction between system Python, [[pipx]], and PythonTeX.
 required_patterns:
   - mentipy init --help
   - PEP 668
-  - pipx
+  - uv tool
   - PythonTeX
 hint: "Read the built-in help first so the motivation for the later shell
   commands is concrete."
@@ -78,7 +78,7 @@ Inspect the setup command's help text:
 mentipy init --help
 ```
 
-The key idea is that `pipx` is good for the standalone CLI, but PythonTeX still
+The key idea is that `uv tool` is good for the standalone CLI, but PythonTeX still
 imports from the `python3` running your document build.
 @
 
