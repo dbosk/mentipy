@@ -3684,8 +3684,8 @@ def test_regenerate_qrs_never_resurrects_a_removed_worktree(
 
 The probes look into other people's paths, and a directory we may not
 enter must make a target unreachable, not crash the server.  (Python
-3.12 and later answer [[False]] from [[pathlib]] too, so on those
-versions this test cannot tell the two probes apart; on 3.11
+3.14 answers [[False]] from [[pathlib]] too, so on that version this
+test cannot tell the two probes apart; on older versions
 [[Path.is_dir]] raises.)
 
 <<test functions>>=

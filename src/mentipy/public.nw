@@ -91,8 +91,8 @@ def _upnp_mapping(port: int) -> tuple[str, Callable[[], None]]:
         import miniupnpc
     except ImportError as err:
         raise PublicExposureError(
-            "UPnP support is optional; install with: "
-            "uv tool install --python 3.11 'mentipy[public]'"
+            "UPnP support is optional; it needs the mentipy[public] extra "
+            "in the Python environment that runs this mentipy"
         ) from err
 
     upnp = miniupnpc.UPnP()
