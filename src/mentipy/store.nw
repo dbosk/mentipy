@@ -1,13 +1,14 @@
 \chapter{Store}
 
 The store is where the design stops being a pure document generator and becomes
-a persistent polling system.  It has three jobs:
+a persistent polling system.  It has four jobs:
 \begin{description}
 \item[Configuration] locate the shared configuration file in a way that works
   both from the CLI and from PythonTeX,
 \item[Placement] resolve the files a slide deck names relative to the
   deck's own directory, even when the deck is bound into a larger document,
-\item[Registration] assign stable URL prefixes to questions, and
+\item[Registration] assign stable URL prefixes to questions and mark which
+  of them the deck held in its last build, and
 \item[Persistence] append answers with an atomic rewrite so a half-written file
   never replaces a valid one.
 \end{description}
@@ -112,10 +113,8 @@ DEFAULT_SETTINGS = {
     PIN_HEAT_CONFIG: DEFAULT_PIN_HEAT,
 }
 
-STORE_TEMPLATE = {"questions": {}, "answers": {}, "registration_counter": 0}
+STORE_TEMPLATE = {"questions": {}, "answers": {}}
 QR_TARGETS_KEY = "qr_targets"
-REGISTRATION_COUNTER_KEY = "registration_counter"
-REGISTRATION_SERIAL_KEY = "registration_serial"
 SERVER_STARTED_KEY = "server_started"
 @
 
@@ -560,7 +559,6 @@ def _blank_store() -> dict[str, Any]:
     return {
         "questions": dict(STORE_TEMPLATE["questions"]),
         "answers": dict(STORE_TEMPLATE["answers"]),
-        REGISTRATION_COUNTER_KEY: STORE_TEMPLATE[REGISTRATION_COUNTER_KEY],
     }
 
 
@@ -576,32 +574,6 @@ def _store_lock(path: Path) -> threading.Lock:
             lock = threading.Lock()
             _STORE_LOCKS[resolved] = lock
     return lock
-def _live_hashes(data: dict[str, Any]) -> list[str]:
-    items = list(data["questions"].items())
-    if not items:
-        return []
-
-    live = [items[-1][0]]
-    expected = int(items[-1][1][REGISTRATION_SERIAL_KEY])
-
-    for full_hash, meta in reversed(items[:-1]):
-        serial = int(meta[REGISTRATION_SERIAL_KEY])
-        if serial + 1 != expected:
-            break
-        live.append(full_hash)
-        expected = serial
-
-    live.reverse()
-    return live
-
-
-def _ensure_registration_serials(data: dict[str, Any]):
-    counter = int(data.get(REGISTRATION_COUNTER_KEY, 0))
-    for fallback, meta in enumerate(data["questions"].values(), start=1):
-        if REGISTRATION_SERIAL_KEY not in meta:
-            meta[REGISTRATION_SERIAL_KEY] = fallback
-        counter = max(counter, int(meta[REGISTRATION_SERIAL_KEY]))
-    data[REGISTRATION_COUNTER_KEY] = counter
 @
 
 Answer timestamps are stored as UTC ISO strings with a [[Z]] suffix.  That is a
@@ -686,7 +658,8 @@ class Store:
 
         self.path = resolve_path(chosen_path)
         self.min_prefix = int(chosen_prefix)
-        self._lock = _store_lock(self.path)
+        self._resolved_path = self.path.resolve()
+        self._lock = _store_lock(self._resolved_path)
 
     <<store methods>>
 @
@@ -696,7 +669,10 @@ A deck builds its [[Store]] in its own PythonTeX code while the book
 has the deck's base directory in force, and the object must keep
 pointing at the deck's store after the book moves on to the next
 chapter.  The image directory derives from [[self.path]], so it follows
-without further work.
+without further work.  The lock is keyed by the fully resolved path, so
+that two [[Store]] objects for one file share it, and so is the
+registration run of \cref{sec:live-deck}; resolving once, here, keeps the
+two keys equal even if the working directory changes later.
 
 <<test functions>>=
 def test_store_resolves_its_path_against_the_base_dir(
@@ -731,7 +707,6 @@ def _data(self) -> dict[str, Any]:
 
     data.setdefault("questions", {})
     data.setdefault("answers", {})
-    _ensure_registration_serials(data)
     return data
 @
 
@@ -929,22 +904,22 @@ evolve its presentation fields without losing answers, so that a lecturer who
 edits a word-cloud's render mode and recompiles sees the new visualisation on
 the very next results request; it must produce the same prefix every time the
 same content is registered, so old QR codes keep resolving; and it must
-preserve the document order of the source slides in the on-disk dict, so the
-server can build the \enquote{Next $\rightarrow$} chain from PythonTeX's
-natural execution order.
+tell the questions of the deck's last build, in the deck's order, from those
+the lecturer has dropped, so the server can build the
+\enquote{Next $\rightarrow$} chain from PythonTeX's natural execution order
+without letting a dropped slide back into it.
 
 The first three properties came together once we treated issued prefixes as
 exact reservations, extended only the newer question on collision, and merged
-the freshly serialised question over the existing entry.  The fourth property
-needs one extra bit of operational metadata too, but not an explicit build
-session marker.  We still piggyback on Python's guaranteed dict insertion
-order: every [[register]] call pops the entry (if any) before re-inserting it,
-so the question lands at the end of [[data["questions"]]] regardless of where
-it sat before.  Alongside that order, we persist a monotonically increasing
-registration serial.  The current live lecture sequence is then the newest
-contiguous registration run at the end of the dict.  A full rebuild rewrites
-exactly that suffix in document order, so dropped slides stay behind as orphans
-while the server's book-style navigation can ignore them.
+the freshly serialised question over the existing entry.  The fourth is the
+subject of \cref{sec:live-deck}, and [[register]] contributes two things to
+it.  It pops the entry (if any) before re-inserting it, so the question lands
+at the end of [[data["questions"]]] wherever it sat before, and Python's
+guaranteed dict insertion order makes the store's order the order of last
+registration: the server's pacing walks that order, and the store's last
+entry is the question registered last.  And it records which question was
+registered just before this one in the same PythonTeX run, which is what
+marks the last build among everything the store has seen.
 
 The split between identity and presentation still matters here.  The hash ---
 the key into [[data["questions"]]] --- only sees identity fields, so a
@@ -954,6 +929,10 @@ payload from scratch and only carries forward keys that do not belong to the
 question contract at all.  That is what lets a lecturer revert a presentation
 field back to its default without a stale stored value surviving by omission,
 while store-owned metadata such as remembered QR targets still carries over.
+The run's bookkeeping is store-owned too, but it is the one piece that must
+not carry over: a link left from the previous build would tie the question to
+its old neighbour, so [[register]] sets it afresh after the merge, for a new
+question and a known one alike.
 
 <<store methods>>=
 def register(self, question: Question) -> str:
@@ -962,8 +941,7 @@ def register(self, question: Question) -> str:
     with self._lock:
         data = self._data()
         full_hash = question_hash(question)
-        serial = int(data[REGISTRATION_COUNTER_KEY]) + 1
-        data[REGISTRATION_COUNTER_KEY] = serial
+        <<choose the link and serial for [[full_hash]]>>
 
         if full_hash in data["questions"]:
             existing = data["questions"].pop(full_hash)
@@ -973,22 +951,26 @@ def register(self, question: Question) -> str:
                 for key, value in existing.items()
                 if key not in existing_question
             }
-            refreshed = question.to_dict()
-            refreshed.update(metadata)
-            refreshed[REGISTRATION_SERIAL_KEY] = serial
-            data["questions"][full_hash] = refreshed
-            self._write(data)
-            return existing["url_prefix"]
+            entry = question.to_dict()
+            entry.update(metadata)
+            prefix = existing["url_prefix"]
+        else:
+            prefix = self._allocate_prefix(full_hash, data["questions"])
+            entry = question.to_dict()
+            entry["url_prefix"] = prefix
+            data["answers"].setdefault(full_hash, [])
 
-        prefix = self._allocate_prefix(full_hash, data["questions"])
-        entry = question.to_dict()
-        entry["url_prefix"] = prefix
         entry[REGISTRATION_SERIAL_KEY] = serial
+        entry[REGISTERED_AFTER_KEY] = previous
         data["questions"][full_hash] = entry
-        data["answers"].setdefault(full_hash, [])
         self._write(data)
+        _LAST_REGISTERED[self._resolved_path] = full_hash
         return prefix
 @
+
+The last registration of the run is remembered only after the write
+succeeded, so a failed write cannot leave the next question linked to a
+question the file never received.
 
 Prefix allocation looks for the shortest readable prefix that does not collide
 with a full hash and has not already been issued as an exact reservation.  The
@@ -1101,10 +1083,11 @@ def test_register_extends_only_the_newer_prefix(tmp_path, monkeypatch):
 
 The pop-then-reinsert protocol shows up most clearly when the lecturer
 re-registers a middle question during a fresh build: it should land at the end
-of the iteration order, not stay in place.  Without this rule, inserting a new
-slide between two existing questions and rebuilding would leave the
-\enquote{Next $\rightarrow$} link skipping over the new slide on the next
-results page.
+of the iteration order, not stay in place.  Without this rule the store's last
+entry would not be the question registered last, which is where the walk for
+the live deck starts (\cref{sec:live-deck}), and the lecturer's pacing, which
+follows this order, would open the questions in their first build's order
+rather than the deck's.
 
 <<test functions>>=
 
@@ -1130,12 +1113,11 @@ def test_register_reinserts_questions_in_document_order(tmp_path):
 
 When a lecturer drops a question from the slide deck and rebuilds, the dropped
 question is the only one whose [[register]] is no longer called.  Every other
-question gets popped and re-appended in source order with fresh registration
-serials, leaving the orphan pinned at the front of the dict for historical
-listings while the rebuilt suffix becomes the live lecture chain.  The
-navigation helpers then walk only that newest contiguous suffix, so old QR
-codes still resolve for past-answer forensics without polluting the current
-lecture sequence.
+question gets popped and re-appended in source order, leaving the orphan
+pinned at the front of the dict for historical listings and for old QR codes;
+\cref{sec:live-deck} explains how the navigation keeps it out of the current
+lecture sequence.  Only the order is checked here, so the test needs no
+boundary between the two builds.
 
 <<test functions>>=
 
@@ -1260,6 +1242,971 @@ def test_register_refresh_clears_a_stale_results_override(tmp_path):
     assert reloaded.results(full_hash)["answers"][0]["value"] == "More examples"
 @
 
+\subsection{The live deck}
+\label{sec:live-deck}
+
+The store keeps every question it has ever registered, because old QR
+codes and old answers must keep working after a slide is dropped.  The
+navigation row must nevertheless follow the deck as it is now, so
+something in the store must mark which questions the last build
+registered, and in which order.
+
+A build is one or more PythonTeX runs, and each run is a fresh Python
+process that executes the deck's code in document order, registering each
+question as it goes.  The run is therefore the natural unit, and the
+process is its boundary: a process that has registered nothing in a store
+yet is at the start of a run there.  Each registration records, under
+[[registered_after]], the hash of the question registered just before it
+in this process, or an explicit [[null]] for the run's first question.
+The live sequence is the chain of those links followed back from the
+store's last entry to the [[null]].  A dropped question is no longer
+registered, so nothing in the new chain points to it; and since
+[[register]] never touches an entry it is not registering, the orphan's
+keys and answers stay exactly as they were.
+
+The links replace a registration serial drawn from an ever-growing counter
+in the store, whose live sequence was the run of consecutive serials at
+the end of the dict.  That design had two flaws, both visible in a course
+repository that commits a deck's store because the store holds the
+lecture's answers.  First, the store was input and output of the build and
+never reached a fixed point: every clean build of an unchanged deck
+rewrote every live question's serial and the counter, so the committed
+file changed on every book build and in every fresh worktree.  A link
+depends only on the order of the deck, so an unchanged rebuild writes the
+same values and leaves the file byte-identical.  Second, consecutive
+serials cannot tell a new run from the tail of the previous one.  With one
+PythonTeX run per build, a deck that drops its last question re-registers
+the others with serials that continue straight from the dropped one,
+which therefore stays live; a whole new deck registered into an old store
+continues the old deck's serials in the same way.  A second run per build
+hid both cases, because its serials continue from the first run instead.
+The [[null]] at the head of each run is the boundary that the serials
+lacked.
+
+The key is [[registered_after]] rather than a bare [[previous]] because
+questions already carry a [[next]] field, the lecturer's opt-out from the
+\enquote{Next $\rightarrow$} link, and a [[previous]] beside it would read
+as its counterpart.  [[registered_after]] says what it records, and
+[[null]] reads as \enquote{after nothing}: the head of a run.  The
+[[null]] is written explicitly so that \enquote{first in its run} differs
+from a missing key, which marks an entry written before the links
+existed.
+
+<<constants>>=
+REGISTRATION_SERIAL_KEY = "registration_serial"
+REGISTERED_AFTER_KEY = "registered_after"
+@
+
+\paragraph{One run per store.}
+The process's memory of its runs maps a store's path, resolved at
+construction as for the store's lock, to the hash last registered there,
+and it is empty at import.  It is keyed by store because one process can
+write several stores: a book binds several decks into one document, and
+its single PythonTeX process registers each deck's questions in the deck's
+own store.  A single process-wide \enquote{last question} would link the
+first question of one deck to the last question of the deck before it, a
+hash from another store, and two decks registering alternately, or sharing
+a question, would tangle their chains.  [[register]] reads and writes the
+map under the store's lock, so the link it writes and the run's memory
+change together.
+
+<<functions>>=
+_LAST_REGISTERED: dict[Path, str] = {}
+@
+
+A process can also say where its run starts, which matters for the one
+writer whose process is not a run: a [[mentipy render]] registers a single
+question, and a deck built one render per question must still form one
+chain (\cref{sec:what-counts-as-a-run}).  Starting a run forgets the
+process's last registration in the store.  Continuing one takes the
+store's last entry as that last registration, so the next question links
+to it with its serial plus one, as if this process had registered both.
+In a process that has registered in the store already, the last entry is
+that registration anyway, unless another process wrote in between, and
+then following what the store holds last is the better choice.  Both are
+methods of the store, not flags of [[register]], because they are about
+the process rather than about one question: the CLI says once, before it
+renders, what kind of run its single registration belongs to.
+
+<<store methods>>=
+def start_registration_run(self):
+    """Make the next registration in this process start a new run."""
+
+    with self._lock:
+        _LAST_REGISTERED.pop(self._resolved_path, None)
+
+
+def continue_registration_run(self):
+    """Make the next registration continue the store's latest run.
+
+    The next question follows the store's last question, as if this
+    process had registered that one too.
+    """
+
+    with self._lock:
+        questions = self._data()["questions"]
+        if questions:
+            _LAST_REGISTERED[self._resolved_path] = next(reversed(questions))
+@
+
+Tests also start new runs, because they model several builds in one
+pytest process; one that models a fresh process forgets the runs of
+every store.
+
+<<functions>>=
+def _start_registration_run(store: Store | None = None):
+    """Start a new registration run in `store`, or in every store."""
+
+    if store is None:
+        _LAST_REGISTERED.clear()
+        return
+    store.start_registration_run()
+@
+
+\paragraph{Choosing the link.}
+Usually the link is the run's last registration and the serial is one
+more than that question's serial.  Two cases differ.  A question
+registered twice in a row in one run would link to itself, and the walk
+would stop at it at once, leaving it the only live question; it keeps the
+link and serial it has.  And the run's last registration may have left the
+store since, when the file was replaced between two code blocks; a link to
+it would end the walk anyway, but writing [[null]] keeps the link and the
+serial consistent: the question starts a run.
+
+<<choose the link and serial for [[full_hash]]>>=
+questions = data["questions"]
+previous = _LAST_REGISTERED.get(self._resolved_path)
+if previous == full_hash and full_hash in questions:
+    previous = questions[full_hash].get(REGISTERED_AFTER_KEY)
+    serial = int(questions[full_hash].get(REGISTRATION_SERIAL_KEY, 1))
+elif previous in questions:
+    serial = int(questions[previous].get(REGISTRATION_SERIAL_KEY, 0)) + 1
+else:
+    previous = None
+    serial = 1
+@
+
+\paragraph{Serials for older readers.}
+A [[mentipy serve]] from before the links, on another machine or pinned in
+a course repository, reads the same file and still finds its live
+sequence from the serials.  We keep writing serials for it, but
+deterministic ones: a question's position in its run, one more than its
+predecessor's and 1 for the head.  The old rule walks back from the last
+question while each serial is one less than the one after it.  When the
+chain of links ends at a [[null]], its head has serial~1 and no question
+has serial~0, so the old rule stops exactly where the chain does; the
+tests check that for every way of editing a deck below.  The exception
+is a chain that ends at a repeat (see below), whose head has a serial
+above one: the old rule walks on past that head as long as the serials
+keep falling by one.  Two things end a chain at a repeat.  A deck that
+asks the same question twice does: building [Dropped?] and then
+[A?, B?, A?] leaves Dropped?, B? and A? with serials 1, 2 and 3 in that
+order, and an old reader shows all three where the links show B? and
+A?.  And so does a continued [[mentipy render]] of a question already in
+the deck (\cref{sec:what-counts-as-a-run}): after a build of
+[Old?, Q1?, Q2?, Q3?] and a rebuild without Old?, a render of Q1? links
+it to Q3? with serial~4, and an old reader shows Old?, Q2?, Q3? and Q1?
+where the links show the last three.  The counter that used to feed the serials is no
+longer written.  Older readers recompute it on every read as the largest
+serial, so new stores leave it out, and an old store's counter stays in
+the file untouched.
+
+\paragraph{Checking the links against the serials.}
+The other direction needs a guard.  An older Mentipy that builds into a
+store with links copies each question's [[registered_after]] unchanged,
+as store-owned metadata, and gives the question the next value of its
+counter.  Followed blindly, those stale links lead through the questions
+of the last current build, so a question that the older build dropped
+would stay live.  The walk therefore trusts a link only where the
+serials agree with it, and reads the store by the serial rule as soon as
+they do not.  Two checks suffice.  Every step to a predecessor that the
+walk follows needs the predecessor's serial to be one less than the
+successor's.  And a chain that ends at a [[null]], or at an entry
+without the key, needs its head to have serial~1.
+
+The current writer passes both by construction: it writes the serial as
+the predecessor's plus one and as 1 at a [[null]].  An older writer
+fails one of them once the walk reaches what it wrote, because its
+serials continue above every serial in the store.  A stale link from one
+of its questions to a question the current writer left points to a
+question whose serial is one less than the linking question's serial
+was, which was at most the store's largest serial; the older writer's
+new serial is above that, so the step fails.  A chain made only of its
+own questions ends at a link it copied: at a stale [[null]], whose head
+has a serial above one, or at one of the current writer's questions,
+which is the first case.  The one end the checks cannot catch is a
+repeat: a cycle among the copied links, which a deck that repeats a
+question or a render that continued a run left behind, followed by an
+older build that registered the cycle's questions in the order of its
+links.  A simulation of random histories found such a store after 3 of
+about 1900 older builds, each time after a continued render.  When a
+check fails, the serial rule is exactly what the older version shows
+itself.  The next PythonTeX build, or a render-built deck that starts
+with [[--new-run]], writes links that agree again, because its chain
+starts at a [[null]] of its own.  A continued render does not: it links
+to the store's last question and leaves the stale links behind it in
+place, and where their serials happen to agree the walk follows them.
+After a render-built deck A, B, F, E, C, a 0.16 build of A, C, B and
+continued renders of D and A, the walk shows B, D and A, where 0.16
+shows C, B, D and A.
+
+The head check is limited to a chain that ends at a [[null]] on
+purpose.  A chain that ends at a repeat has a head that is not its run's
+first registration, from a deck that asks a question twice or from a
+render that continued an earlier run (\cref{sec:what-counts-as-a-run}),
+so its serial is above one although the chain is right; demanding
+serial~1 there would discard every such deck.
+
+\paragraph{Following the links.}
+The walk starts at the store's last entry, which is always live: whatever
+registered last ran last.  It ends at a [[null]], at a hash the store does
+not hold, at anything that is not a hash, and at a hash it has already
+visited.  Cycles are not only hand edits.  A deck that asks the same
+question twice, A, B, A, moves A to the end with a link to B, while B still
+links to A; and a process that registers a deck twice without a run
+boundary links the second run's head to the first run's tail.  Stopping at
+the first repeat leaves a repeated question live at its last position
+only and drops whatever came before its first occurrence: one entry per
+hash cannot hold two positions, and the serials lost the same questions.
+
+<<functions>>=
+def _live_hashes(data: dict[str, Any]) -> list[str]:
+    questions = data["questions"]
+    if not questions:
+        return []
+
+    last = next(reversed(questions))
+    if REGISTERED_AFTER_KEY not in questions[last]:
+        return _live_hashes_by_serials(questions)
+
+    live = [last]
+    previous = questions[last][REGISTERED_AFTER_KEY]
+    while (
+        isinstance(previous, str)
+        and previous in questions
+        and previous not in live
+    ):
+        if not _serial_follows(questions[previous], questions[live[-1]]):
+            return _live_hashes_by_serials(questions)
+        live.append(previous)
+        previous = questions[previous].get(REGISTERED_AFTER_KEY)
+
+    if previous is None and questions[live[-1]].get(REGISTRATION_SERIAL_KEY) != 1:
+        return _live_hashes_by_serials(questions)
+
+    live.reverse()
+    return live
+
+
+def _serial_follows(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    first = before.get(REGISTRATION_SERIAL_KEY)
+    second = after.get(REGISTRATION_SERIAL_KEY)
+    return isinstance(first, int) and isinstance(second, int) and (
+        first + 1 == second
+    )
+@
+
+The membership test on the list is linear, which is fine for a lecture's
+worth of questions and keeps the walk's state to the one list it returns.
+A serial that is missing or not a number fails the check, so a
+hand-edited chain is read by the serial rule rather than trusted.
+
+A last entry without the key at all was written before the links existed,
+so the store is read by the serial rule it was written for, and an old
+store navigates exactly as before until its first build writes links.  The
+rule is kept as it was, including its reading of a question without a
+serial, from before the serials, as having its position in the store as
+its serial, which makes such a store a single run.  That position is
+computed on read and never written back: writing it would rewrite every
+orphan of such a store on its next write.
+
+<<functions>>=
+def _live_hashes_by_serials(questions: dict[str, Any]) -> list[str]:
+    serials = [
+        (full_hash, int(meta.get(REGISTRATION_SERIAL_KEY, position)))
+        for position, (full_hash, meta) in enumerate(questions.items(), start=1)
+    ]
+    if not serials:
+        return []
+
+    live = [serials[-1][0]]
+    expected = serials[-1][1]
+
+    for full_hash, serial in reversed(serials[:-1]):
+        if serial + 1 != expected:
+            break
+        live.append(full_hash)
+        expected = serial
+
+    live.reverse()
+    return live
+@
+
+\paragraph{What counts as a run.}
+\label{sec:what-counts-as-a-run}
+The process boundary is right for PythonTeX, whose run registers a whole
+deck.  A [[mentipy render]] is a process too, but it registers one
+question, and a deck built one render per question, from a Makefile
+say, would make every question a run of its own and leave only the last
+one live, where the serials kept such a deck whole.  The CLI therefore
+continues the store's latest run before it registers
+([[continue_registration_run]] above): the rendered question follows the
+store's last question with the next serial, which is what the serials
+did.  A render-built deck thus forms one chain, and a single render of
+an existing question from a terminal shows what it showed under the
+serials: the question moves to the end and links to the old last
+question, and the walk back from it stops where it meets the question's
+old successor, whose link points to the moved question.
+
+Continuing also keeps the serials' weaknesses.  A render-built deck that
+is rendered again appends to its own old chain: the store changes on
+every build, the walk ends at the repeat of the deck's first question
+rather than at a [[null]], and a question dropped from the end of the
+deck stays live.  [[mentipy render --new-run]] starts a run instead
+([[start_registration_run]]).  A Makefile passes it to the deck's first
+question, whose [[null]] then cuts the chain from the old build, so a
+render-built deck settles as one built by PythonTeX does.  The
+[[mentipy.latex]] helpers do neither, because their process is the run.
+So a deck that mixes the two, rendering some questions from a Makefile
+before PythonTeX registers the rest, keeps only the PythonTeX questions
+in its chain, since that run starts with a [[null]]; under the serials
+all of them were live.  Renders after the PythonTeX run continue it.
+
+Renders that run in parallel, as [[make -j]] starts them, race between
+continuing the run and registering, so their chain depends on timing,
+as the serials did.  A render-built deck should be built serially.
+
+Finally, a deck that registers its questions from several named
+PythonTeX sessions gets one process per session, so only the session
+that ran last is live; [[mentipy.sty]] already assumes the default
+session (\cref{chap:sty}).
+
+\subsubsection{Testing the live deck}
+
+The tests model a build the way it happens: one or two PythonTeX runs,
+each a fresh process registering the deck's questions in document order.
+Inside one pytest process a fresh process is [[_start_registration_run]],
+and the tests call it explicitly at every run boundary, because which
+registrations share a run is exactly what they are about.  They read the
+live sequence back through the public navigation helpers rather than
+through [[_live_hashes]], walking from the last registered question back
+to the head and then forward again, so a disagreement between
+[[prev_question]] and [[next_question]] shows up too.
+
+<<test functions>>=
+def _build(store_path, deck, *, runs=1):
+    """Register `deck` as one build does: `runs` fresh PythonTeX runs."""
+
+    store = Store(store_path, min_prefix=4)
+    for _ in range(runs):
+        _start_registration_run(store)
+        for question in deck:
+            store.register(question)
+    return store
+
+
+def _live_sequence(store):
+    rows = store.all_questions()
+    if not rows:
+        return []
+    head = rows[-1]["hash"]
+    while (before := store.prev_question(head)) is not None:
+        head = before
+    live = [head]
+    while (after := store.next_question(live[-1])) is not None:
+        live.append(after)
+    return live
+
+
+def _hashes(deck):
+    return [question_hash(question) for question in deck]
+
+
+def _deck(*texts):
+    return [OpenQuestion(text) for text in texts]
+@
+
+The property the issue was about comes first: a store that holds a
+lecture's answers is committed next to the deck, and a clean rebuild of
+the unchanged deck must leave it alone.  The comparison is on the file's
+bytes, not on parsed dicts, because dict equality ignores the order of
+the questions, which is the one thing the navigation depends on.
+
+<<test functions>>=
+@pytest.mark.parametrize("runs", [1, 2])
+def test_an_unchanged_rebuild_leaves_the_store_byte_identical(tmp_path, runs):
+    path = tmp_path / "mentipy.json"
+    deck = _deck("Q1", "Q2", "Q3", "Q4", "Q5")
+    store = _build(path, deck, runs=runs)
+    store.record(question_hash(deck[1]), "an answer")
+    built = path.read_bytes()
+
+    _build(path, deck, runs=runs)
+
+    assert path.read_bytes() == built
+    assert _live_sequence(store) == _hashes(deck)
+@
+
+Every way of editing a deck must leave exactly the new deck live, in its
+order, with or without a second PythonTeX run.  The dropped questions
+must not be touched at all: their entries keep their keys in their order
+(compared as serialised JSON, which preserves order) and their answers,
+nothing live links to them, and they have no neighbours.  Finally the
+store must settle: one more unchanged build is byte-identical.  The
+serials of the previous design failed the last check in every scenario,
+and with one run per build they also kept a dropped last question, and a
+whole old deck, live.
+
+<<test functions>>=
+DECK_CHANGES = {
+    "drop the first": ("Q2", "Q3", "Q4", "Q5"),
+    "drop a middle one": ("Q1", "Q2", "Q4", "Q5"),
+    "drop the last": ("Q1", "Q2", "Q3", "Q4"),
+    "add one in the middle": ("Q1", "Q2", "New", "Q3", "Q4", "Q5"),
+    "swap two": ("Q1", "Q2", "Q4", "Q3", "Q5"),
+    "a whole new deck": ("N1", "N2", "N3"),
+}
+
+
+@pytest.mark.parametrize("runs", [1, 2])
+@pytest.mark.parametrize("change", list(DECK_CHANGES))
+def test_a_changed_deck_becomes_the_live_sequence(tmp_path, change, runs):
+    path = tmp_path / "mentipy.json"
+    old_deck = _deck("Q1", "Q2", "Q3", "Q4", "Q5")
+    store = _build(path, old_deck, runs=runs)
+    for full_hash in _hashes(old_deck):
+        store.record(full_hash, f"answer to {full_hash[:4]}")
+    before = json.loads(path.read_text())
+
+    new_deck = _deck(*DECK_CHANGES[change])
+    _build(path, new_deck, runs=runs)
+    rebuilt = path.read_bytes()
+    after = json.loads(rebuilt)
+
+    live = _hashes(new_deck)
+    dropped = set(before["questions"]) - set(live)
+    assert _live_sequence(store) == live
+    for full_hash in live:
+        assert after["questions"][full_hash][REGISTERED_AFTER_KEY] not in dropped
+    for full_hash in dropped:
+        assert json.dumps(after["questions"][full_hash]) == json.dumps(
+            before["questions"][full_hash]
+        )
+        assert after["answers"][full_hash] == before["answers"][full_hash]
+        assert store.next_question(full_hash) is None
+        assert store.prev_question(full_hash) is None
+
+    _build(path, new_deck, runs=runs)
+    assert path.read_bytes() == rebuilt
+@
+
+The book is one PythonTeX process that registers questions in several
+decks' stores.  Registering them alternately is the sharpest form of that:
+a single process-wide \enquote{last question} would link each question to
+one in the other store, which the walk cannot follow, and leave only one
+question live per store.
+
+<<test functions>>=
+def test_stores_registered_in_one_process_do_not_link_to_each_other(tmp_path):
+    first = Store(tmp_path / "helloworld" / "mentipy.json", min_prefix=4)
+    second = Store(tmp_path / "recap" / "mentipy.json", min_prefix=4)
+    first_deck = _deck("Hello?", "World?", "Again?")
+    second_deck = _deck("Recap one?", "Recap two?", "Recap three?")
+
+    _start_registration_run()
+    for one, other in zip(first_deck, second_deck):
+        first.register(one)
+        second.register(other)
+
+    assert _live_sequence(first) == _hashes(first_deck)
+    assert _live_sequence(second) == _hashes(second_deck)
+@
+
+A store written before the links existed must navigate exactly as it did,
+until the first build gives it links; and that build must leave its
+orphans and its old top-level counter alone.  The legacy store here is
+the file Mentipy~0.16 wrote for a deck of four questions built once and
+then rebuilt without its third question: the orphan keeps serial 3, the
+rebuild's run has serials 5 to 7, and the counter stands at 7.  We make
+it by building with the current code and rewriting the file into that
+shape, rather than by hand-writing the JSON, so every other key is what a
+real registration writes.
+
+<<test functions>>=
+def _as_written_before_links(path, serials, counter):
+    data = json.loads(path.read_text())
+    for full_hash, meta in data["questions"].items():
+        del meta[REGISTERED_AFTER_KEY]
+        meta[REGISTRATION_SERIAL_KEY] = serials[full_hash]
+    data["registration_counter"] = counter
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
+def test_a_store_without_links_navigates_by_serials_until_rebuilt(tmp_path):
+    path = tmp_path / "mentipy.json"
+    q1, q2, q3, q4 = deck = _deck("Q1", "Q2", "Q3", "Q4")
+    store = _build(path, deck)
+    _build(path, [q1, q2, q4])
+    h1, h2, h3, h4 = _hashes(deck)
+    _as_written_before_links(path, {h3: 3, h1: 5, h2: 6, h4: 7}, counter=7)
+    legacy = json.loads(path.read_text())
+
+    assert _live_sequence(store) == [h1, h2, h4]
+
+    _build(path, [q1, q2, q4])
+    rebuilt = path.read_bytes()
+    after = json.loads(rebuilt)
+
+    assert _live_sequence(store) == [h1, h2, h4]
+    assert after["questions"][h1][REGISTERED_AFTER_KEY] is None
+    assert json.dumps(after["questions"][h3]) == json.dumps(
+        legacy["questions"][h3]
+    )
+    assert after["registration_counter"] == 7
+    _build(path, [q1, q2, q4])
+    assert path.read_bytes() == rebuilt
+@
+
+Older stores still, from before the serials, have neither key on any
+question.  Mentipy~0.16 gave each such question its position as a serial,
+which makes the whole store one run; the fallback keeps that reading
+without writing those serials into the file.
+
+<<test functions>>=
+def test_a_store_without_serials_is_one_live_run(tmp_path):
+    path = tmp_path / "mentipy.json"
+    deck = _deck("Q1", "Q2", "Q3")
+    store = _build(path, deck)
+    data = json.loads(path.read_text())
+    for meta in data["questions"].values():
+        del meta[REGISTERED_AFTER_KEY]
+        del meta[REGISTRATION_SERIAL_KEY]
+    path.write_text(json.dumps(data, indent=2) + "\n")
+
+    assert _live_sequence(store) == _hashes(deck)
+    assert REGISTRATION_SERIAL_KEY not in store._data()["questions"][
+        question_hash(deck[0])
+    ]
+@
+
+An older [[mentipy serve]], on another machine or in a course repository
+that has not upgraded, still reads the serials: it walks back from the
+last question while each serial is one less than the next.  The serials
+the current code writes are the positions in the run, so the run's head
+has serial~1, nothing can have serial~0, and the old rule stops exactly
+where the link chain does.  The test applies that rule, kept as the
+legacy fallback, to the stores of all the scenarios above.
+
+<<test functions>>=
+@pytest.mark.parametrize("runs", [1, 2])
+@pytest.mark.parametrize("change", list(DECK_CHANGES))
+def test_old_readers_find_the_same_live_sequence(tmp_path, change, runs):
+    path = tmp_path / "mentipy.json"
+    store = _build(path, _deck("Q1", "Q2", "Q3", "Q4", "Q5"), runs=runs)
+    assert _live_hashes_by_serials(store._data()["questions"]) == (
+        _live_sequence(store)
+    )
+
+    _build(path, _deck(*DECK_CHANGES[change]), runs=runs)
+
+    data = json.loads(path.read_text())
+    assert _live_hashes_by_serials(data["questions"]) == _live_sequence(store)
+    assert "registration_counter" not in data
+@
+
+The two chains that end at a repeat are where the readers part, and the
+test pins what each of them shows: a deck that asks a question twice
+after an orphan, and a continued render of a question of a rebuilt
+deck whose dropped first question has serial~1.
+
+<<test functions>>=
+def _repeat_in_the_deck(path):
+    _build(path, _deck("Dropped?"))
+    _build(path, _deck("A?", "B?", "A?"))
+    return _deck("B?", "A?"), _deck("Dropped?", "B?", "A?")
+
+
+def _render_of_a_deck_question(path):
+    old, q1, q2, q3 = _deck("Old?", "Q1?", "Q2?", "Q3?")
+    _build(path, [old, q1, q2, q3])
+    _build(path, [q1, q2, q3])
+    _render(path, q1)
+    return [q2, q3, q1], [old, q2, q3, q1]
+
+
+@pytest.mark.parametrize(
+    "history", [_repeat_in_the_deck, _render_of_a_deck_question]
+)
+def test_old_readers_also_show_older_questions_after_a_repeat(
+    tmp_path, history
+):
+    path = tmp_path / "mentipy.json"
+    links, serials = history(path)
+
+    assert _live_sequence(Store(path)) == _hashes(links)
+    questions = json.loads(path.read_text())["questions"]
+    assert _live_hashes_by_serials(questions) == _hashes(serials)
+@
+
+A question registered twice in a row, in one run, must keep its link: a
+link to itself would make it the only live question.
+
+<<test functions>>=
+def test_a_consecutive_duplicate_registration_keeps_its_link(tmp_path):
+    path = tmp_path / "mentipy.json"
+    q1, q2 = deck = _deck("Q1", "Q2")
+    store = Store(path, min_prefix=4)
+    _start_registration_run(store)
+    store.register(q1)
+    store.register(q2)
+    built = path.read_bytes()
+
+    store.register(q2)
+
+    assert _live_sequence(store) == _hashes(deck)
+    assert path.read_bytes() == built
+@
+
+A run's previous question can also be gone, when the store file is
+replaced between two code blocks.  The next question then starts a run,
+so that every link in a store points into that store and agrees with its
+serial.
+
+<<test functions>>=
+def test_a_predecessor_gone_from_the_store_starts_a_new_run(tmp_path):
+    path = tmp_path / "mentipy.json"
+    store = Store(path, min_prefix=4)
+    _start_registration_run(store)
+    store.register(OpenQuestion("Q1"))
+    path.unlink()
+
+    store.register(OpenQuestion("Q2"))
+
+    entry = json.loads(path.read_text())["questions"][
+        question_hash(OpenQuestion("Q2"))
+    ]
+    assert entry[REGISTERED_AFTER_KEY] is None
+    assert entry[REGISTRATION_SERIAL_KEY] == 1
+@
+
+Links are data in a file people edit, and cycles also arise without
+editing: a deck that asks the same question twice links its first
+occurrence's successor back to it.  The walk must end on a cycle, a link
+to a question the store does not hold, and a link that is not a hash at
+all.  A serial that is missing from a linked question cannot be checked,
+so the store is read by the serial rule, which takes the question's
+position instead.  A repeated question is live at its last position only; its
+earlier neighbours fall out of the sequence, which is the price of one
+entry per hash and was the same under the serials.
+
+<<test functions>>=
+def _edit_link(path, full_hash, target):
+    data = json.loads(path.read_text())
+    data["questions"][full_hash][REGISTERED_AFTER_KEY] = target
+    path.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def test_the_walk_ends_on_cycles_and_dangling_links(tmp_path):
+    path = tmp_path / "mentipy.json"
+    store = _build(path, _deck("Q1", "Q2", "Q3"))
+    h1, h2, h3 = _hashes(_deck("Q1", "Q2", "Q3"))
+
+    _edit_link(path, h1, h3)
+    assert _live_sequence(store) == [h1, h2, h3]
+
+    _edit_link(path, h2, "f" * 64)
+    assert _live_sequence(store) == [h2, h3]
+
+    _edit_link(path, h2, ["not", "a", "hash"])
+    assert _live_sequence(store) == [h2, h3]
+
+
+def test_a_chain_with_a_missing_serial_is_read_by_the_serials(tmp_path):
+    path = tmp_path / "mentipy.json"
+    deck = _deck("Q1", "Q2", "Q3")
+    store = _build(path, deck)
+    data = json.loads(path.read_text())
+    del data["questions"][question_hash(deck[1])][REGISTRATION_SERIAL_KEY]
+    path.write_text(json.dumps(data, indent=2) + "\n")
+
+    assert _live_sequence(store) == _hashes(deck)
+
+
+def test_a_repeated_question_is_live_at_its_last_position(tmp_path):
+    store = _build(tmp_path / "mentipy.json", _deck("A", "B", "C", "B"))
+    a, b, c, _ = _hashes(_deck("A", "B", "C", "B"))
+
+    assert _live_sequence(store) == [c, b]
+@
+
+A fresh run that registers one existing question, a PythonTeX run of a
+deck cut down to that question or a [[mentipy render --new-run]], makes it
+the whole live sequence.  The deck's other questions lose their
+neighbours, though they keep their answers and prefixes, and the
+lecturer's pacing, which uses the full registration order, is
+unaffected.
+
+<<test functions>>=
+def test_a_single_registration_in_a_fresh_run_is_the_live_sequence(tmp_path):
+    path = tmp_path / "mentipy.json"
+    deck = _deck("Q1", "Q2", "Q3")
+    store = _build(path, deck)
+    h1, h2, h3 = _hashes(deck)
+
+    _build(path, [deck[1]])
+
+    assert _live_sequence(store) == [h2]
+    assert store.next_question(h1) is None
+    assert store.prev_question(h3) is None
+@
+
+The link and the serial are the store's bookkeeping, not part of the
+question, so neither leaks through [[metadata]] or [[all_questions]].
+
+<<test functions>>=
+def test_the_registration_bookkeeping_stays_out_of_the_public_views(tmp_path):
+    store = _build(tmp_path / "mentipy.json", _deck("Q1", "Q2"))
+    full_hash = question_hash(OpenQuestion("Q2"))
+
+    for row in [store.metadata(full_hash), *store.all_questions()]:
+        assert REGISTERED_AFTER_KEY not in row
+        assert REGISTRATION_SERIAL_KEY not in row
+@
+
+The tests so far reuse one [[Store]] per build, but the helpers make a
+new one per question (\cref{sec:public-helper-api}), and a run must not
+care: the process's memory is keyed by the store's path.  A mutant that
+keyed it by the object instead passed every test above.  The same goes
+for two spellings of one path, relative and absolute, which must resolve
+to one run.  The test keeps every object alive until the end: Python
+reuses the identity of an object that has been freed, so short-lived
+objects in a loop could share one and hide a key per object.
+
+<<test functions>>=
+def test_one_run_spans_a_new_store_object_per_question(tmp_path):
+    path = tmp_path / "mentipy.json"
+    deck = _deck("Q1", "Q2", "Q3")
+
+    stores = [Store(path, min_prefix=4) for _ in deck]
+
+    _start_registration_run()
+    for store, question in zip(stores, deck):
+        store.register(question)
+
+    assert _live_sequence(Store(path)) == _hashes(deck)
+
+
+def test_two_spellings_of_one_store_path_are_one_run(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    deck = _deck("Q1", "Q2", "Q3", "Q4")
+
+    _start_registration_run()
+    for index, question in enumerate(deck):
+        spelling = "mentipy.json" if index % 2 else tmp_path / "mentipy.json"
+        Store(spelling, min_prefix=4).register(question)
+
+    assert _live_sequence(Store(tmp_path / "mentipy.json")) == _hashes(deck)
+@
+
+A registration that fails to write must not become the run's last
+question, or the next question would link to a hash the store never
+received and start a run of its own.  A directory where the store's
+temporary file goes makes the write fail for real.
+
+<<test functions>>=
+def test_a_failed_write_does_not_become_the_runs_last_question(tmp_path):
+    path = tmp_path / "mentipy.json"
+    q1, q2, q3 = _deck("Q1", "Q2", "Q3")
+    store = Store(path, min_prefix=4)
+    _start_registration_run(store)
+    store.register(q1)
+    blocker = path.with_name(f"{path.name}.tmp")
+    blocker.mkdir()
+    with pytest.raises(OSError):
+        store.register(q2)
+    blocker.rmdir()
+
+    store.register(q3)
+
+    assert _live_sequence(store) == _hashes([q1, q3])
+@
+
+A deck that asks the same question twice ends its walk at the repeat,
+so its head is not the run's first registration and has a serial above
+one.  The guard must accept that chain rather than fall back to the
+serials, which would pull an orphan with the right serial in front of
+it.
+
+<<test functions>>=
+def test_a_deck_that_repeats_a_question_keeps_out_an_earlier_orphan(
+    tmp_path,
+):
+    path = tmp_path / "mentipy.json"
+    _build(path, _deck("Dropped?"))
+
+    store = _build(path, _deck("A?", "B?", "A?"))
+
+    assert _live_sequence(store) == _hashes(_deck("B?", "A?"))
+@
+
+An older Mentipy that builds into a store with links copies every link
+unchanged and gives each question it registers the next value of its
+counter.  The helper below does to the file exactly that, as 0.16's
+[[register]] did: pop each question, give it a serial one above the
+largest in the store, re-append it with its other keys, the stale link
+included, and add a question it has not seen without a link.  The live
+sequence must then be what that older version shows itself, never a
+question its build dropped.  Each check is needed on its own.  Adding a
+question in front leaves a chain whose steps all agree but whose head,
+re-registered by the older build, has a serial above one; reordering
+leaves a head with serial~1 that the older build did not touch and a
+stale step to it.
+
+<<test functions>>=
+def _as_rebuilt_by_0_16(path, texts):
+    data = json.loads(path.read_text())
+    questions = data["questions"]
+    serial = max(meta[REGISTRATION_SERIAL_KEY] for meta in questions.values())
+    for text in texts:
+        question = OpenQuestion(text)
+        full_hash = question_hash(question)
+        entry = questions.pop(full_hash, None)
+        if entry is None:
+            entry = {**question.to_dict(), "url_prefix": full_hash[:8]}
+            data["answers"][full_hash] = []
+        serial += 1
+        entry[REGISTRATION_SERIAL_KEY] = serial
+        questions[full_hash] = entry
+    data["registration_counter"] = serial
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
+OLD_WRITER_BUILDS = {
+    "drops a question": (
+        ("Pick?", "How much?", "Why?"),
+        ("Pick?", "Why?"),
+    ),
+    "adds a question": (("A?", "B?", "C?"), ("A?", "B?", "New?", "C?")),
+    "adds one in front": (("A?", "B?", "C?"), ("New?", "A?", "B?", "C?")),
+    "reorders the deck": (("A?", "B?", "C?"), ("C?", "B?")),
+    "rebuilds the deck": (("A?", "B?", "C?"), ("A?", "B?", "C?")),
+}
+
+
+@pytest.mark.parametrize("change", list(OLD_WRITER_BUILDS))
+def test_links_an_older_writer_left_stale_are_not_followed(tmp_path, change):
+    path = tmp_path / "mentipy.json"
+    current, old = OLD_WRITER_BUILDS[change]
+    store = _build(path, _deck(*current))
+
+    _as_rebuilt_by_0_16(path, old)
+
+    assert _live_sequence(store) == _hashes(_deck(*old))
+@
+
+A deck built with [[mentipy render]] is one process per question.  Each
+render below is a fresh process for the store, prepared as the command
+prepares it: it continues the store's latest run unless told to start a
+new one.  Rendered one question at a time, the deck must keep its whole
+navigation, on its first build and when it is rendered again.
+
+<<test functions>>=
+def _render(store_path, question, *, new_run=False):
+    """Register `question` as one `mentipy render` process does."""
+
+    _start_registration_run()
+    store = Store(store_path, min_prefix=4)
+    if new_run:
+        store.start_registration_run()
+    else:
+        store.continue_registration_run()
+    store.register(question)
+    return store
+
+
+def test_a_deck_rendered_one_question_per_process_keeps_its_navigation(
+    tmp_path,
+):
+    path = tmp_path / "mentipy.json"
+    deck = _deck("Q1", "Q2", "Q3", "Q4")
+
+    for question in deck:
+        _render(path, question)
+    assert _live_sequence(Store(path)) == _hashes(deck)
+
+    for question in deck:
+        _render(path, question)
+    assert _live_sequence(Store(path)) == _hashes(deck)
+@
+
+Continuing appends the rebuilt deck to its own old chain, so the store
+changes on every build.  Starting a new run with the deck's first
+question makes a render-built deck behave like one built by PythonTeX:
+an unchanged rebuild is byte-identical, and a dropped question leaves
+the chain.
+
+<<test functions>>=
+def test_a_new_run_on_the_first_render_settles_the_store(tmp_path):
+    path = tmp_path / "mentipy.json"
+    deck = _deck("Q1", "Q2", "Q3", "Q4")
+
+    def render_deck(deck):
+        for index, question in enumerate(deck):
+            _render(path, question, new_run=index == 0)
+
+    render_deck(deck)
+    built = path.read_bytes()
+    render_deck(deck)
+
+    assert path.read_bytes() == built
+    assert _live_sequence(Store(path)) == _hashes(deck)
+    render_deck(deck[:-1])
+    assert _live_sequence(Store(path)) == _hashes(deck[:-1])
+@
+
+A single [[mentipy render]] of an existing question from a terminal,
+after a build, must show what 0.16 showed: the question moves to the end
+of the store, links to the old last question, and the live sequence is
+the questions from the moved one's old successor onwards, then the moved
+one.  0.16 got there by its consecutive serials; here the walk stops at
+the old successor, whose link points to the moved question.
+
+A render into a store that 0.16 built continues that store's serials,
+and the walk reaches the old last question, which has no link key at
+all.  That is a chain ending without a link, so its head must have
+serial~1; it does not, and the store is read by the serial rule, which
+shows the old deck with the rendered question after it, as 0.16 would.
+
+<<test functions>>=
+def test_a_render_into_a_store_from_before_the_links_extends_its_deck(
+    tmp_path,
+):
+    path = tmp_path / "mentipy.json"
+    q1, q2, q3, new = _deck("Q1", "Q2", "Q3", "New")
+    _build(path, [q1, q2, q3])
+    _as_written_before_links(
+        path, dict(zip(_hashes([q1, q2, q3]), (41, 42, 43))), counter=43
+    )
+
+    store = _render(path, new)
+
+    assert _live_sequence(store) == _hashes([q1, q2, q3, new])
+
+
+def test_rendering_one_question_of_a_built_deck_shows_what_0_16_did(
+    tmp_path,
+):
+    path = tmp_path / "mentipy.json"
+    q1, q2, q3, q4, q5 = deck = _deck("Q1", "Q2", "Q3", "Q4", "Q5")
+    _build(path, deck)
+
+    store = _render(path, q3)
+
+    assert _live_sequence(store) == _hashes([q4, q5, q3])
+@
+
+\subsection{Resolving a prefix}
+
 Resolution prefers an exact issued prefix, because that is what keeps an old QR
 code valid after a newer question collides on the same early hash characters.
 When there is no such exact reservation, we fall back to Git-style unique full
@@ -1331,8 +2278,8 @@ housekeeping.  In particular, remembered QR artifact paths and the
 recorded slide locale are operational
 metadata for later regeneration and would leak document-local filesystem layout
 if they escaped through [[metadata()]] or [[all_questions()]].  The same goes
-for the internal registration serial that the navigation helpers use to recover
-the newest live suffix.
+for the registration link and serial that the navigation helpers use to find
+the live deck (\cref{sec:live-deck}).
 
 <<functions>>=
 def _public_question_metadata(meta: dict[str, Any]) -> dict[str, Any]:
@@ -1341,6 +2288,7 @@ def _public_question_metadata(meta: dict[str, Any]) -> dict[str, Any]:
     visible.pop(QR_TARGETS_KEY, None)
     visible.pop(LOCALE_KEY, None)
     visible.pop(REGISTRATION_SERIAL_KEY, None)
+    visible.pop(REGISTERED_AFTER_KEY, None)
     return visible
 @
 
@@ -1383,8 +2331,8 @@ def all_questions(self) -> list[dict[str, Any]]:
     return rows
 @
 
-The forward sequence-navigation helper walks only the questions marked live in
-the current rebuild.  That keeps an orphaned slide reachable by direct URL
+The forward sequence-navigation helper walks only the live deck of
+\cref{sec:live-deck}.  That keeps an orphaned slide reachable by direct URL
 while still preventing its old classroom neighbours from leaking back into the
 current lecture's \enquote{Next $\rightarrow$} chain.
 
@@ -1449,6 +2397,7 @@ def test_next_question_for_orphan_returns_none(tmp_path):
     for question in questions:
         store.register(question)
 
+    _start_registration_run(store)
     store.register(questions[1])
     store.register(questions[2])
 
@@ -1516,6 +2465,7 @@ def test_prev_question_skips_the_orphan_before_the_new_live_head(tmp_path):
     for question in questions:
         store.register(question)
 
+    _start_registration_run(store)
     store.register(questions[1])
     store.register(questions[2])
 
@@ -3987,6 +4937,7 @@ import time
 
 from mentipy.questions import *
 from mentipy.store import *
+from mentipy.store import _live_hashes_by_serials, _start_registration_run
 
 <<test functions>>
 @

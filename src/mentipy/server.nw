@@ -3270,7 +3270,7 @@ neighbours exist belongs in one place so the two routes cannot drift apart.
 
 Only the right-hand link respects [[question.next]]: lecturers sometimes want
 a terminal slide with no forward path, while the left-hand link should appear
-whenever there is an earlier question in the current registration order.
+whenever the question has a predecessor in the deck's last build.
 
 <<functions>>=
 def _render_prev_link(
@@ -3453,6 +3453,7 @@ def test_render_prev_link_skips_orphaned_questions(tmp_path):
     first_prefix = store.register(OpenQuestion("Q1"))
     second_prefix = store.register(OpenQuestion("Q2"))
     third_prefix = store.register(OpenQuestion("Q3"))
+    _start_registration_run(store)
     store.register(OpenQuestion("Q2"))
     store.register(OpenQuestion("Q3"))
     second_hash = store.resolve(second_prefix)
@@ -4160,13 +4161,15 @@ open.
 
 \enquote{Before it in the deck} means the store's full registration
 order --- the order the index page lists, orphans from earlier builds
-included --- and not the navigation row's live suffix.  The live suffix
-exists to keep dropped slides out of the \enquote{Next $\rightarrow$}
-chain; for pacing it would be a liability.  Re-registering one existing
-question --- a single re-run PythonTeX block, or a [[mentipy render]] in
-a terminal while the server runs --- moves that question to the end of
-the store and pushes everything before it out of the live suffix.
-Pacing on the live suffix would then have to decide what an orphan is,
+included --- and not the navigation row's live sequence.  The live
+sequence exists to keep dropped slides out of the
+\enquote{Next $\rightarrow$} chain; for pacing it would be a liability.
+Re-registering one existing question --- a [[mentipy render]] in a
+terminal while the server runs --- moves that question to the end of the
+store and leaves in the live sequence only the questions from its old
+successor on, then itself; with [[--new-run]] it is the whole live
+sequence.
+Pacing on the live sequence would then have to decide what an orphan is,
 and either answer opens or closes questions the lecturer never touched.
 Pacing on the full order changes at most the predecessor of the moved
 question and of the one after it, so a re-render can never open a
@@ -7020,6 +7023,7 @@ def test_thanks_page_omits_prev_link_to_orphaned_question(tmp_path):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     first_prefix = store.register(OpenQuestion("Q1"))
     second_prefix = store.register(OpenQuestion("Q2"))
+    _start_registration_run(store)
     store.register(OpenQuestion("Q2"))
 
     with _running_server(store) as port:
@@ -8562,6 +8566,7 @@ from mentipy.catalogue import *
 from mentipy.questions import *
 from mentipy.server import *
 from mentipy.store import *
+from mentipy.store import _start_registration_run
 
 <<test functions>>
 @
