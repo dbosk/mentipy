@@ -1308,14 +1308,13 @@ last wins, and PythonTeX runs whenever a block changes.  So a lecturer who
 runs [[mentipy present --public upnp]], edits a prompt and recompiles would
 get codes for an address that nobody serves, in a PDF that looks fine.  The
 build must therefore learn what the server knows, and the server has to
-leave that behind somewhere: a build starts in another process, possibly
-after the server has stopped.
+leave that behind somewhere, since a build starts in another process.
 
 We keep the address in a small file in the QR directory beside the store,
 not in the store itself.  A project may track its store in a public
 repository, and at home this address is the lecturer's public IP, which
 should not end up in a commit.  It is also not worth a diff: it says where
-the deck was last served, not anything about the deck.  The QR directory holds
+the deck is being served, not anything about the deck.  The QR directory holds
 only derived files, and every [[.pdf_tex]] sidecar in it already contains this
 address.  So the record exposes nothing new: a deck that ignores the directory
 keeps both out of git, and a deck that does not ignore it has that problem
@@ -1325,7 +1324,7 @@ next build falls back to the configuration.
 The record lives in the configured QR directory, so two things follow.  A deck
 that passes its own [[qr_dir=]] gets the record in the configured directory, not
 in its own, which that deck may not ignore.  And an absolute [[mentipy.qr_dir]]
-gives all decks the same record, so the last server of any of them decides.
+gives all decks the same record, so the latest server of any of them decides.
 
 A loopback address is never a record.  Offline, the LAN lookup falls back to
 [[127.0.0.1]], and a build with the network back would otherwise print on the
@@ -1374,6 +1373,21 @@ def remember_served_address(store: Store, base_url: str) -> None:
         )
 
 
+def forget_served_address(store: Store, base_url: str) -> None:
+    """Take back the address of a server that stops, if it is still recorded."""
+
+    if _served_address(store) != base_url:
+        return
+    try:
+        _served_address_path(store).unlink(missing_ok=True)
+    except OSError as error:
+        LOGGER.warning(
+            "cannot remove the served address, so later builds of the slides "
+            "will keep using it: %s",
+            error,
+        )
+
+
 def _served_address(store: Store) -> str | None:
     try:
         text = _served_address_path(store).read_text(encoding="utf-8")
@@ -1391,9 +1405,34 @@ The record outranks [[mentipy.base_url]], because it describes what is actually
 being served, whereas the setting describes what a server would use if it had
 no other information: [[--public]] and [[mentipy.public_base_url]] both override
 it.  An explicit [[base_url=]] still wins, since a deck that names an address
-has said that it wants that one.  A record can be out of date when the lecturer
-moves to another network, but only until the next start of the server, which
-overwrites the record and rewrites every QR code.
+has said that it wants that one.
+
+The record lasts as long as its server, because that is all it can vouch for.
+If it outlived the server, a build next week would print last week's address on
+another network, a changed [[mentipy.base_url]] would be ignored, and every
+later PDF of a deck served with [[--public upnp]] would carry the lecturer's
+home IP, which keeping the address out of the store was meant to avoid.  So a
+server that stops takes its record back, and the next build has its usual
+fallbacks.  The next start says to recompile, as it always has.  Removal does not
+touch the QR files.  They keep the served address until PythonTeX next rewrites
+them, so a build that does not rerun PythonTeX still embeds it, and a PDF that is
+to carry another address needs a rerun.
+
+A server takes back only its own record.  [[forget_served_address]] compares the
+address, so a second server on the store, which has replaced the record by the
+time the first one stops, keeps its own.  The caller adds the other half: only a
+run that bound may call it (\cref{sec:server-runners}).  The last server to
+start owns the record, and when it stops an earlier one that still runs is not
+recorded again; a build then falls back until that server restarts.
+
+A server that is killed cannot clean up, so its record stays until the next
+start of a server overwrites it, or the QR directory is removed.  Nothing in
+Mentipy handles [[SIGTERM]] or [[SIGHUP]], so besides [[kill -9]] that also goes
+for a plain [[kill]] and for closing the terminal: only Ctrl-C or an error counts
+as stopping.  We accept that.  A stale record gives the old behaviour of a
+wrong address until the next start, which is no worse than the configuration
+being out of date, and catching those signals would be a decision about how the
+server shuts down that this record does not justify on its own.
 
 <<test functions>>=
 def _addresses_in_sidecars(directory):
@@ -1495,6 +1534,24 @@ def test_an_unreadable_served_address_counts_as_none(configured_deck):
 
     [text] = _addresses_in_sidecars("mentipy-obj")
     assert "config.example" in text
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores directory permissions",
+)
+def test_a_record_that_cannot_be_removed_is_a_warning(configured_deck, caplog):
+    store = Store("mentipy.json")
+    remember_served_address(store, "http://served.example:8080")
+    directory = Path("mentipy-obj")
+    directory.chmod(0o500)
+    try:
+        forget_served_address(store, "http://served.example:8080")
+    finally:
+        directory.chmod(0o755)
+
+    assert "cannot remove the served address" in caplog.text
+    assert (directory / SERVED_ADDRESS_FILE).exists()
 @
 
 \section{Public helper API}
