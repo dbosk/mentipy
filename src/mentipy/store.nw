@@ -569,32 +569,84 @@ class _StoreLock:
         self._threads = threading.Lock()
         self._directory = path.parent
         self._descriptor: int | None = None
+        self._held_elsewhere = False
+        self._reported_refusal = False
 
     def __enter__(self):
         self._threads.acquire()
-        self._descriptor = _lock_directory(self._directory)
+        try:
+            self._descriptor = self._lock_directory()
+        except BaseException:
+            self._threads.release()
+            raise
         return self
 
     def __exit__(self, *_exception):
-        if self._descriptor is not None:
-            os.close(self._descriptor)
-            self._descriptor = None
-        self._threads.release()
+        descriptor, self._descriptor = self._descriptor, None
+        try:
+            if descriptor is not None:
+                os.close(descriptor)
+        finally:
+            self._threads.release()
 
-
-def _lock_directory(directory: Path) -> int | None:
-    if fcntl is None:
-        return None
-    descriptor = None
-    try:
-        directory.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(directory, os.O_RDONLY)
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-    except OSError:
-        if descriptor is not None:
+    def _lock_directory(self) -> int | None:
+        if fcntl is None:
+            return None
+        try:
+            descriptor = os.open(self._directory, os.O_RDONLY)
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            self._report_refusal(error)
+            return None
+        try:
+            if self._take_flock(descriptor):
+                return descriptor
+        except BaseException:
             os.close(descriptor)
+            raise
+        os.close(descriptor)
         return None
-    return descriptor
+
+    def _take_flock(self, descriptor: int) -> bool:
+        wait = 0.0 if self._held_elsewhere else STORE_LOCK_WAIT
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    self._report_held_elsewhere()
+                    return False
+                threading.Event().wait(STORE_LOCK_POLL)
+            except OSError as error:
+                self._report_refusal(error)
+                return False
+            else:
+                self._held_elsewhere = False
+                return True
+
+    def _report_held_elsewhere(self):
+        if not self._held_elsewhere:
+            LOGGER.warning(
+                "another process has held the lock on %s for %g seconds, is a"
+                " build stopped? Writing without the lock until it is free, so"
+                " if that process goes on, what was written meanwhile can get"
+                " lost",
+                self._directory,
+                STORE_LOCK_WAIT,
+            )
+        self._held_elsewhere = True
+
+    def _report_refusal(self, error: OSError):
+        if not self._reported_refusal:
+            LOGGER.warning(
+                "cannot lock %s, so a write by another process, such as a"
+                " build, can overwrite answers: %s",
+                self._directory,
+                error,
+            )
+        self._reported_refusal = True
 
 
 _STORE_LOCKS: dict[Path, _StoreLock] = {}
@@ -602,18 +654,22 @@ _STORE_LOCKS_GUARD = threading.Lock()
 
 
 def _store_lock(path: Path) -> _StoreLock:
-    resolved = path.resolve()
     with _STORE_LOCKS_GUARD:
-        lock = _STORE_LOCKS.get(resolved)
+        lock = _STORE_LOCKS.get(path)
         if lock is None:
-            lock = _StoreLock(resolved)
-            _STORE_LOCKS[resolved] = lock
+            lock = _StoreLock(path)
+            _STORE_LOCKS[path] = lock
     return lock
 <<imports>>=
+import time
+
 try:
     import fcntl
 except ImportError:
     fcntl = None
+<<constants>>=
+STORE_LOCK_WAIT = 5.0
+STORE_LOCK_POLL = 0.01
 @
 
 Every change to the store reads the whole file, changes it and writes it back, so
@@ -629,11 +685,33 @@ on every write, so a lock on it would be a lock on a file that is about to be go
 and a separate lock file would be one more untracked file in every deck.  The system
 releases a [[flock]] when its process dies, so a killed build cannot block a lecture.
 
-A file system without [[flock]] (some network ones) or a platform without it
-(Windows) just goes without: those writers are back to what they always had, and an
-answer that gets lost there is better than a server that cannot record any.  Two
-stores in one directory wait for each other briefly, which costs nothing, since a
-write takes milliseconds and no code holds one store's lock while writing another.
+A writer must not wait for ever, though.  A build stopped with Ctrl-Z while it holds
+the lock would otherwise stall every answer of the lecture, with the pages still
+loading and no message anywhere, and since the lock can be taken by anyone who can
+read the directory, another user on a shared machine could cause the same.  So the
+wait ends after [[STORE_LOCK_WAIT]] seconds with a warning, and the write goes ahead
+without the lock.  This has a price: if the stopped process goes on, it writes back
+what it read before it stopped, and answers recorded meanwhile are lost.  We take
+that over the certainty of a lecture that stops recording, because a stopped build
+usually stays stopped or gets killed, which frees the lock.  One such wait is enough
+to learn that the lock is stuck, so until it is free again each later write tries
+just once; otherwise a class's worth of answers would each wait out the five seconds
+in turn.  The wait polls, since a blocking [[flock]] cannot time out, and through an
+event, as the tests replace [[time.sleep]].
+
+A file system or a directory that refuses [[flock]] (some network ones), or a
+platform without it (Windows), just goes without: an answer that gets lost there is
+better than a server that cannot record any, and one warning says what is at risk.
+A directory that does not exist yet is not locked either.  Only the store's first
+write can meet that, and creating it here would leave a directory behind for a
+store that is only asked about.  Two stores in one directory wait for each other
+briefly, which costs little, since a write takes from milliseconds to a fraction of
+a second for a large store, and no code holds one store's lock while writing another.
+
+The lock is keyed by the store's path with the directory resolved and the file name
+as given, not by the fully resolved path.  The write replaces the file at that name,
+so a store file that is a symbolic link stops being one at the first write, and two
+processes on either side of that moment must still lock the same directory.
 
 Answer timestamps are stored as UTC ISO strings with a [[Z]] suffix.  That is a
 small readability concession for the JSON file while still being unambiguous
@@ -718,7 +796,7 @@ class Store:
         self.path = resolve_path(chosen_path)
         self.min_prefix = int(chosen_prefix)
         self._resolved_path = self.path.resolve()
-        self._lock = _store_lock(self._resolved_path)
+        self._lock = _store_lock(self.path.parent.resolve() / self.path.name)
 
     <<store methods>>
 @
@@ -787,25 +865,68 @@ whose directory has gone.
 def _write(self, data: dict[str, Any]):
     self._tidy_qr_targets(data)
     self.path.parent.mkdir(parents=True, exist_ok=True)
+    self._remove_abandoned_temporary_files()
     temp_path = self.path.with_name(f"{self.path.name}.{os.getpid()}.tmp")
 
-    with temp_path.open("w", encoding="utf-8") as handle:
-        json.dump(data, handle, ensure_ascii=False, indent=2)
-        handle.write("\n")
+    try:
+        with temp_path.open("w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
 
-    os.replace(temp_path, self.path)
+        os.replace(temp_path, self.path)
+    except BaseException:
+        with suppress(OSError):
+            temp_path.unlink()
+        raise
+
+
+def _remove_abandoned_temporary_files(self):
+    prefix = f"{self.path.name}."
+    for candidate in self.path.parent.iterdir():
+        name = candidate.name
+        if not (name.startswith(prefix) and name.endswith(".tmp")):
+            continue
+        pid = name[len(prefix) : -len(".tmp")]
+        with suppress(OSError):
+            if (
+                pid.isdigit()
+                and not _process_is_alive(int(pid))
+                and time.time() - candidate.stat().st_mtime > ABANDONED_AFTER
+            ):
+                candidate.unlink()
+<<functions>>=
+def _process_is_alive(pid: int) -> bool:
+    # On Windows, signal 0 is CTRL_C_EVENT, which would interrupt the process.
+    if sys.platform == "win32":
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (OSError, OverflowError):
+        return True
+    return True
+<<constants>>=
+ABANDONED_AFTER = 60
+<<imports>>=
+from contextlib import suppress
 @
 
 The temporary file has the process in its name.  With one shared name, a writer
 that does not hold the lock, on a file system without [[flock]] or in a deck whose
 environment has an older Mentipy, truncates and writes the very file another writer
 is about to move into place, and the store it publishes is broken for good: every
-later read fails on invalid JSON, with every answer in it.  A loss of one update is
-the worst two writers can do to each other this way.  The thread lock keeps the
-threads of one process from sharing a name.
+later read fails on invalid JSON, with every answer in it.  Two such writers can
+still undo each other's updates, possibly many of them, but the store stays
+readable.  The thread lock keeps the threads of one process from sharing a name.
 
-Let's first pin the configuration helpers, because the CLI tests rely on them
-and they are easiest to validate in isolation.
+A shared name did have one virtue: the next write reused it.  A file per process
+stays behind when its process is killed mid-write, it holds the store's answers, and
+a deck's [[.gitignore]] names only [[mentipy.json]], so [[git add .]] would pick it
+up.  So a failed write removes its own file, and every write removes those of
+processes that are gone.  The age check is for a store on a network file system,
+where a live writer on another machine looks like a dead process here; on Windows
+nothing is removed this way, since it has no harmless way to ask about a process.
 
 <<test functions>>=
 def test_setting_helpers_use_the_mentipy_namespace(tmp_path, monkeypatch):
@@ -3742,7 +3863,7 @@ def save_image(self, data: bytes) -> str:
         return digest
 
     self.image_dir().mkdir(parents=True, exist_ok=True)
-    temp_path = target.with_name(f"{digest}.tmp")
+    temp_path = target.with_name(f"{digest}.{os.getpid()}.tmp")
     temp_path.write_bytes(data)
     os.replace(temp_path, target)
     return digest
@@ -4239,9 +4360,12 @@ def test_record_keeps_answers_from_concurrent_threads(tmp_path):
 
 Separate processes are the case that matters in a lecture, a server recording
 answers while a build registers questions, so this test runs real ones against one
-real store.  They start together on a pipe, and each both reads and rewrites the
-whole file many times.  Without the lock this loses answers nearly every time, and
-with one shared temporary file it can leave invalid JSON behind.
+real store, and each kind of writer takes part.  Each process says when it is ready
+and then waits, so they really start together, since starting Python takes longer
+than the writes do.  Without the lock this loses answers nearly every time, and
+with one shared temporary file it can leave invalid JSON behind.  The wait has a
+limit, so that a lock that is never released fails this test instead of hanging the
+suite.
 
 <<test functions>>=
 _STORE_WRITER = """
@@ -4250,13 +4374,18 @@ from mentipy.questions import OpenQuestion
 from mentipy.store import Store
 
 path, kind, name, count, full_hash = sys.argv[1:6]
-sys.stdin.read()
 store = Store(path, min_prefix=4)
+print("ready", flush=True)
+sys.stdin.read()
 for number in range(int(count)):
     if kind == "answer":
         store.record(full_hash, f"{name}-{number}")
-    else:
+    elif kind == "question":
         store.register(OpenQuestion(f"{name}-{number}?"))
+    elif kind == "start":
+        store.mark_server_start()
+    else:
+        store.remember_locale(full_hash, "sv" if number % 2 else "en")
 """
 
 
@@ -4269,7 +4398,7 @@ def test_writers_in_separate_processes_keep_everything_they_wrote(tmp_path):
             [sys.executable, "-c", _STORE_WRITER, str(path), kind, name, "40",
              full_hash],
             stdin=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.PIPE,
             text=True,
         )
         for kind, name in (
@@ -4277,12 +4406,21 @@ def test_writers_in_separate_processes_keep_everything_they_wrote(tmp_path):
             ("answer", "b"),
             ("answer", "c"),
             ("question", "build"),
+            ("start", "server"),
+            ("locale", "render"),
         )
     ]
-    for writer in writers:
-        writer.stdin.close()
-    errors = [writer.stderr.read() for writer in writers]
-    assert [writer.wait(timeout=120) for writer in writers] == [0, 0, 0, 0], errors
+    try:
+        for writer in writers:
+            assert writer.stdout.readline().strip() == "ready"
+        for writer in writers:
+            writer.stdin.close()
+        assert [writer.wait(timeout=120) for writer in writers] == [0] * 6
+    finally:
+        for writer in writers:
+            if writer.poll() is None:
+                writer.kill()
+            writer.stdout.close()
 
     data = json.loads(path.read_text(encoding="utf-8"))
     answers = {answer["value"] for answer in store.results(full_hash)["answers"]}
@@ -4310,20 +4448,126 @@ def test_a_write_leaves_the_temporary_file_of_another_writer_alone(tmp_path):
 
 A file system without [[flock]] must not stop the store from working, since a server
 that cannot record answers is far worse than one that may lose an update.  The
-failure is injected, because no file system at hand refuses it.
+failure is injected, because no file system at hand refuses it.  The thread lock is
+then all that protects the server's threads, so this test runs several, and it
+checks that the refused attempts leave no descriptors open.  A warning says what is
+at risk, once rather than for every answer.
 
 <<test functions>>=
-def test_a_store_works_where_flock_is_refused(tmp_path, monkeypatch):
+def test_a_store_works_where_flock_is_refused(tmp_path, monkeypatch, caplog):
     def refuse(_descriptor, _operation):
         raise OSError(errno.ENOLCK, "no locks available")
 
     monkeypatch.setattr("mentipy.store.fcntl.flock", refuse)
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(OpenQuestion("Comment?")))
+    descriptors = len(os.listdir("/dev/fd"))
 
-    prefix = store.register(OpenQuestion("Comment?"))
-    store.record(store.resolve(prefix), "works")
+    def record_some(name):
+        for number in range(25):
+            store.record(full_hash, f"{name}-{number}")
 
-    assert store.results(store.resolve(prefix))["answers"][0]["value"] == "works"
+    threads = [
+        threading.Thread(target=record_some, args=(name,)) for name in "abcd"
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    answers = store.results(full_hash)["answers"]
+    assert len(answers) == 100
+    assert len(os.listdir("/dev/fd")) == descriptors
+    assert caplog.text.count("cannot lock") == 1
+@
+
+A process that is stopped while it holds the lock must not stop the lecture.  The
+test holds the lock through a descriptor of its own, which conflicts with the store's
+just as another process's would, and shortens the wait.  The first write waits it
+out and warns, later writes do not wait again, since a class's answers would each
+wait in turn, and the lock works again once it is free.
+
+<<test functions>>=
+def _holding_the_lock_on(directory):
+    holder = os.open(directory, os.O_RDONLY)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    return holder
+
+
+def test_a_held_lock_delays_a_write_only_once(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr("mentipy.store.STORE_LOCK_WAIT", 0.3)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(OpenQuestion("Comment?")))
+    holder = _holding_the_lock_on(tmp_path)
+    try:
+        started = time.monotonic()
+        store.record(full_hash, "first")
+        first_took = time.monotonic() - started
+
+        started = time.monotonic()
+        store.record(full_hash, "second")
+        second_took = time.monotonic() - started
+    finally:
+        os.close(holder)
+
+    assert first_took >= 0.3
+    assert second_took < 0.3
+    assert caplog.text.count("has held the lock") == 1
+    assert len(store.results(full_hash)["answers"]) == 2
+
+
+def test_a_lock_that_comes_free_protects_writes_again(
+    tmp_path, monkeypatch, caplog
+):
+    monkeypatch.setattr("mentipy.store.STORE_LOCK_WAIT", 0.0)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(OpenQuestion("Comment?")))
+    holder = _holding_the_lock_on(tmp_path)
+    store.record(full_hash, "without the lock")
+    os.close(holder)
+
+    with store._lock:
+        with pytest.raises(BlockingIOError):
+            other = os.open(tmp_path, os.O_RDONLY)
+            try:
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(other)
+
+    holder = _holding_the_lock_on(tmp_path)
+    store.record(full_hash, "held again")
+    os.close(holder)
+
+    assert caplog.text.count("has held the lock") == 2
+
+
+def test_a_store_file_that_is_a_link_is_locked_where_it_is_written(
+    tmp_path, monkeypatch, caplog
+):
+    monkeypatch.setattr("mentipy.store.STORE_LOCK_WAIT", 0.0)
+    deck = tmp_path / "deck"
+    central = tmp_path / "central"
+    deck.mkdir()
+    central.mkdir()
+    (deck / "mentipy.json").symlink_to(central / "mentipy.json")
+    store = Store(deck / "mentipy.json", min_prefix=4)
+    holder = _holding_the_lock_on(deck)
+    try:
+        store.register(OpenQuestion("Comment?"))
+    finally:
+        os.close(holder)
+
+    assert "has held the lock" in caplog.text
+
+
+def test_a_store_that_is_only_asked_about_leaves_no_directory(tmp_path):
+    missing = tmp_path / "not" / "yet"
+    store = Store(missing / "mentipy.json", min_prefix=4)
+
+    with store._lock:
+        pass
+
+    assert not missing.parent.exists()
 
 
 def test_the_store_lock_can_be_taken_again_after_a_failure(tmp_path):
@@ -4335,6 +4579,96 @@ def test_the_store_lock_can_be_taken_again_after_a_failure(tmp_path):
 
     store.register(OpenQuestion("Comment?"))
     assert store.all_questions()
+
+
+def test_an_interrupted_wait_for_the_lock_leaves_it_free(tmp_path, monkeypatch):
+    def interrupted(_descriptor, _operation):
+        raise KeyboardInterrupt
+
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    store.register(OpenQuestion("One?"))
+    with monkeypatch.context() as patch:
+        patch.setattr("mentipy.store.fcntl.flock", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            store.register(OpenQuestion("Two?"))
+
+    done = []
+    writer = threading.Thread(
+        target=lambda: done.append(store.register(OpenQuestion("Three?"))),
+        daemon=True,
+    )
+    writer.start()
+    writer.join(timeout=10)
+    assert done
+@
+
+A temporary file holds the store's answers, so none may stay behind where
+[[git add .]] would find it.  A failed write removes its own.  A write removes those
+of a process that is gone, and only when they are old enough not to belong to a live
+writer on another machine; the test gets the number of a process that is really gone
+by starting one.
+
+<<test functions>>=
+def _a_pid_that_is_gone():
+    process = subprocess.Popen([sys.executable, "-c", ""])
+    process.wait()
+    return process.pid
+
+
+def _temporary_file(path, name, *, age=0):
+    temporary = path.with_name(f"{path.name}.{name}.tmp")
+    temporary.write_text("answers")
+    if age:
+        then = time.time() - age
+        os.utime(temporary, (then, then))
+    return temporary
+
+
+def test_a_write_removes_only_the_temporary_files_of_processes_that_are_gone(
+    tmp_path,
+):
+    path = tmp_path / "mentipy.json"
+    abandoned = _temporary_file(path, _a_pid_that_is_gone(), age=120)
+    recent = _temporary_file(path, _a_pid_that_is_gone())
+    alive = _temporary_file(path, os.getppid(), age=120)
+    unrelated = _temporary_file(path, "notes", age=120)
+
+    Store(path, min_prefix=4).register(OpenQuestion("Comment?"))
+
+    assert not abandoned.exists()
+    assert recent.exists()
+    assert alive.exists()
+    assert unrelated.exists()
+
+
+def test_a_failed_write_removes_its_temporary_file(tmp_path, monkeypatch):
+    path = tmp_path / "mentipy.json"
+    store = Store(path, min_prefix=4)
+    store.register(OpenQuestion("One?"))
+
+    def fail(*_args, **_kwargs):
+        raise OSError(errno.ENOSPC, "disk full")
+
+    monkeypatch.setattr("mentipy.store.json.dump", fail)
+    with pytest.raises(OSError):
+        store.register(OpenQuestion("Two?"))
+
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_saving_an_image_leaves_the_temporary_file_of_another_writer_alone(
+    tmp_path,
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    digest = hashlib.sha256(b"an image").hexdigest()
+    store.image_dir().mkdir()
+    other = store.image_dir() / f"{digest}.tmp"
+    other.write_text("another writer is half way through")
+
+    store.save_image(b"an image")
+
+    assert other.read_text() == "another writer is half way through"
+    assert (store.image_dir() / digest).read_bytes() == b"an image"
 @
 
 The same-path lock must also work across distinct [[Store]] objects, because the
@@ -5096,12 +5430,15 @@ def test_results_empty_window_collapses_stats_to_none(tmp_path):
 
 <<test [[store.py]]>>=
 import errno
+import fcntl
+import hashlib
 import json
 import os
 import pytest
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 from mentipy.questions import *
