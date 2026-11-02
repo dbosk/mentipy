@@ -40,7 +40,7 @@ from mentipy.catalogue import (
     normalize_locale,
 )
 from mentipy.network import resolve_base_url
-from mentipy.qr import make_qr, sidecar_include_path
+from mentipy.qr import make_qr, qr_is_current, sidecar_include_path
 from mentipy.questions import (
     ContextDownload,
     ContextSnippet,
@@ -1250,6 +1250,13 @@ which QR artifacts belong to which canonical question.  Each rewrite recomputes
 the public URL from the current base URL and the stable prefix, then asks the QR
 module to refresh both the image and its sidecar.
 
+A code that already holds this address is left alone.  Deck Makefiles depend on
+the sidecars, so rewriting one gives it a new date and [[make]] rebuilds the
+slides, every start of the server, even in the same network with nothing to
+change.  It still counts, though.  The count feeds the warning to recompile, and
+an earlier start may have rewritten the files for a PDF that was never rebuilt;
+asking once too often is harmless when [[make]] then finds nothing to do.
+
 <<functions>>=
 def regenerate_qrs(
     store: Store,
@@ -1278,15 +1285,11 @@ def regenerate_qrs(
                 skipped.append(target)
                 continue
             fmt = target.suffix.lstrip(".") or DEFAULT_QR_FORMAT
-            make_qr(
-                url,
-                target,
-                fmt=fmt,
-                include_path=(
-                    sidecar_include_path(target)
-                    or _latex_include_path(target)
-                ),
+            include_path = (
+                sidecar_include_path(target) or _latex_include_path(target)
             )
+            if not qr_is_current(url, target, include_path=include_path):
+                make_qr(url, target, fmt=fmt, include_path=include_path)
             count += 1
 
     if skipped:
@@ -3497,6 +3500,64 @@ def test_regenerate_qrs_rewrites_every_registered_question(tmp_path, monkeypatch
             tmp_path / f"Q-{second}.pdf",
         ),
     ]
+@
+
+A restart at the same address must leave the files alone, or [[make]] rebuilds
+slides that are already right.  The tests date the files back, since two writes
+within one test can share a timestamp, and ask whether the old date survives.
+The returned count stays the number of QR codes for this address, so the warning
+to recompile still appears: the last start may have rewritten the files for a PDF
+that was never rebuilt.
+
+<<test functions>>=
+def _dated_back(paths):
+    for path in paths:
+        os.utime(path, (1_000_000_000, 1_000_000_000))
+    return [path.stat().st_mtime_ns for path in paths]
+
+
+def _generated_qr(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    store.register(OpenQuestion("One thing to change?"))
+    regenerate_qrs(store, "http://public.example:9000", qr_dir=tmp_path)
+    return store, sorted(tmp_path.glob("Q-*"))
+
+
+def test_regenerating_for_the_same_address_leaves_the_files_alone(tmp_path):
+    store, files = _generated_qr(tmp_path)
+    assert {path.suffix for path in files} == {".pdf", ".pdf_tex"}
+    dated = _dated_back(files)
+
+    count = regenerate_qrs(store, "http://public.example:9000", qr_dir=tmp_path)
+
+    assert [path.stat().st_mtime_ns for path in files] == dated
+    assert count == 1
+
+
+def test_regenerating_for_another_address_rewrites_the_files(tmp_path):
+    store, files = _generated_qr(tmp_path)
+    dated = _dated_back(files)
+
+    regenerate_qrs(store, "http://other.example:9000", qr_dir=tmp_path)
+
+    assert all(
+        path.stat().st_mtime_ns != old for path, old in zip(files, dated)
+    )
+    [sidecar] = [path for path in files if path.suffix == ".pdf_tex"]
+    assert "other.example" in sidecar.read_text()
+
+
+@pytest.mark.parametrize("missing", [".pdf", ".pdf_tex"])
+def test_regenerating_restores_a_missing_file_at_the_same_address(
+    tmp_path, missing
+):
+    store, files = _generated_qr(tmp_path)
+    [gone] = [path for path in files if path.suffix == missing]
+    gone.unlink()
+
+    regenerate_qrs(store, "http://public.example:9000", qr_dir=tmp_path)
+
+    assert gone.exists()
 @
 
 Remembered QR paths matter when the same question has been rendered into more
