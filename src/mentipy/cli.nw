@@ -2275,9 +2275,10 @@ add_typer_subcommand(
 
 \section{Environment commands}
 
-The environment commands make the Python interpreter choice explicit.  [[pipx]]
-remains a fine way to install the standalone CLI, but PythonTeX imports through
-the document build's [[python3]].  These commands therefore prepare and expose a
+The environment commands make the Python interpreter choice explicit.
+[[uv tool install]] is the way to install the standalone CLI, since it brings a
+supported Python along, but PythonTeX imports through the document build's
+[[python3]].  These commands therefore prepare and expose a
 project-local virtual environment that both workflows can share.
 
 <<cli setup>>=
@@ -2288,9 +2289,10 @@ def init(
     """Create or refresh Mentipy's local virtual environment.
 
     Recent Python distributions follow PEP 668 and discourage installing into
-    the system interpreter. `pipx` solves the CLI side, but PythonTeX still
+    the system interpreter. `uv tool` solves the CLI side, but PythonTeX still
     imports Mentipy from the `python3` that builds your document. This command
-    creates a project-local virtualenv and upgrades `mentipy` inside it.
+    creates a project-local virtualenv on the Python Mentipy itself runs on and
+    upgrades `mentipy` inside it.
     """
 
     venv_path = _configured_venv(venv)
@@ -5955,7 +5957,7 @@ def test_environment_command_help_mentions_the_virtualenv_workflow():
 
     assert result.exit_code == 0
     assert "PEP 668" in result.output
-    assert "pipx" in result.output
+    assert "uv tool" in result.output
     assert "PythonTeX" in result.output
     assert VENV_CONFIG in result.output
 

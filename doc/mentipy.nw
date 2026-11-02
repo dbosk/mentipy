@@ -210,6 +210,36 @@ os.makedirs("mentipy-obj", exist_ok=True)
 write_pin_example_png("mentipy-obj/pin-example.png")
 \end{pycode}
 
+\section{Installing mentipy}
+
+Mentipy needs Python 3.11 or newer, and a lecturer's machine need not have it:
+\href{https://docs.astral.sh/uv/}{uv} downloads that Python if necessary and
+keeps it with Mentipy in an environment of their own, so the system Python stays
+as it is.
+
+\begin{minted}{text}
+uv tool install --python 3.11 'mentipy[public,wordcloud]'
+\end{minted}
+
+The [[--python 3.11]] matters on an older system: without it, uv resolves for
+the Python it finds there and settles for the last Mentipy release that runs on
+it.  The two extras are optional: [[public]] adds the UPnP mode of
+[[mentipy serve --public]] and [[wordcloud]] a denser word-cloud layout.
+
+PythonTeX imports Mentipy from the document build's own Python, not from the
+tool's environment, so a deck also needs a virtual environment.
+[[mentipy init]] creates it on the Python that Mentipy itself runs on, which
+makes the choice above reach the deck whatever [[python3]] is on the system.
+It reuses an existing environment, so one made with an older Python must be
+deleted first.
+Without the tool, [[uv venv]] does the same; [[--seed]] adds the pip that
+[[mentipy init]] and a deck's Makefile call:
+
+\begin{minted}{text}
+uv venv --seed --python 3.11 .venv
+uv pip install --python .venv/bin/python mentipy
+\end{minted}
+
 \section{Choosing an Authoring Path}
 
 \subsection{A Single-Choice Poll}

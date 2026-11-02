@@ -48,6 +48,12 @@ The creation test uses a real virtual environment because the contract is about
 filesystem side effects and idempotence, not just about calling into
 [[venv.EnvBuilder]].
 
+The builder uses the interpreter that runs it, not the [[python3]] on the
+[[PATH]].  That is what lets [[uv tool install --python 3.11]] carry a supported
+Python into every deck on a machine whose system Python is too old, so the
+second test pins it.  An existing environment is deliberately left alone, which
+also means that one made with an older Python has to be deleted by hand.
+
 <<test functions>>=
 def test_create_venv_creates_once_and_then_stays_idempotent(tmp_path):
     path = tmp_path / ".venv"
@@ -55,6 +61,20 @@ def test_create_venv_creates_once_and_then_stays_idempotent(tmp_path):
     assert create_venv(path) is True
     assert (path / "bin" / "python").exists()
     assert create_venv(path) is False
+
+
+def test_create_venv_builds_on_the_python_that_runs_mentipy(tmp_path):
+    path = tmp_path / ".venv"
+    create_venv(path)
+
+    version = subprocess.run(
+        [path / "bin" / "python", "-c", "import sys; print(sys.version_info[:2])"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    assert version == str(sys.version_info[:2])
 @
 
 \section{Installing mentipy into the environment}
@@ -167,6 +187,9 @@ def test_activation_script_uses_an_absolute_single_quoted_path(tmp_path):
 @
 
 <<test [[venv.py]]>>=
+import subprocess
+import sys
+
 import pytest
 
 from mentipy.venv import *
