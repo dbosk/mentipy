@@ -201,6 +201,16 @@ def test_default_open_command_follows_the_platform(
     assert default_open_command() == command
 @
 
+[[mentipy.slides_command]] is the shell command [[present]] runs to build and
+open the slides.  It has no built-in value, unlike the browser command: every
+machine can open a URL, but no build and no viewer can be assumed, and a tool
+that ran [[make]] by itself would be a surprise.
+
+<<constants>>=
+SLIDES_COMMAND_CONFIG = "mentipy.slides_command"
+DEFAULT_SETTINGS[SLIDES_COMMAND_CONFIG] = None
+@
+
 The environment override makes tests cheap and also gives power users a simple
 escape hatch when they want a project-local config file.
 

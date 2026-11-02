@@ -186,6 +186,25 @@ mentipy config mentipy.open_command --set "firefox --new-window"
 mentipy present --store ./mentipy.json --no-open
 ```
 
+The QR codes carry the server's address, so the slides are best built once the
+server is up. `--slides-command CMD`, or the setting `mentipy.slides_command`,
+runs a shell command after the server has started, in the directory you started
+`present` in. Nothing runs if neither is set. `present` doesn't wait for it, and
+Ctrl-C leaves it running. Its output goes to `slides-command.log` in the QR
+directory beside the store, and a non-zero exit status shows in the status line,
+under an open question only at the next question. Join the steps with `&&`, since
+`make x; pdfpc x` or a trailing `&` hides the status. When you restart `present`
+during a lecture, add `--no-slides`, or it opens a second viewer:
+
+```sh
+mentipy config mentipy.slides_command --set "make slides.pdf && pdfpc -w both slides.pdf"
+mentipy present --slides-command "make slides-intro.pdf && pdfpc -w both slides-intro.pdf"
+```
+
+For this to pick up a new address, `make` must know the PDF depends on the QR
+codes, or it finds the PDF up to date and the viewer shows the old ones. A deck's
+Makefile says so with `slides.pdf: $(wildcard mentipy-obj/Q-*.pdf_tex)`.
+
 Use `--results` when respondents should land on the live results page after
 submitting an answer:
 

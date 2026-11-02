@@ -1699,6 +1699,39 @@ mentipy present --store ./mentipy.json --open-with "chromium --app={url}"
 mentipy present --store ./mentipy.json --no-open
 \end{minted}
 
+The QR codes carry the server's address, so the slides are best built once the
+server is up.  [[--slides-command]] makes that part of the same command: a shell
+command that [[present]] runs after the server has started, typically one that
+builds the slides and then opens them.  The setting [[mentipy.slides_command]]
+gives a default for your machine, and nothing runs if neither is set.
+
+\begin{minted}{text}
+mentipy config mentipy.slides_command \
+    --set "make slides.pdf && pdfpc -w both slides.pdf"
+mentipy present --slides-command \
+    "make slides-intro.pdf && pdfpc -w both slides-intro.pdf"
+\end{minted}
+
+For this to pick up a new address, [[make]] must know that the PDF depends on the
+QR codes, because a rule that only looks at the sources finds the PDF up to date
+and the viewer shows the old codes.  A deck's Makefile says so with a line such as
+\begin{minted}{make}
+slides.pdf: $(wildcard mentipy-obj/Q-*.pdf_tex)
+\end{minted}
+
+The command runs in the directory you started [[present]] in, and [[present]]
+goes straight on to the watch without waiting for it.  Ctrl-C in [[present]] does
+not reach it, so quitting leaves the slides showing.  Its output goes to
+[[slides-command.log]] in the QR directory beside the store, and the status line
+names the file.  If the command exits with a non-zero status, say because the build
+failed, the status line says so; under an open question it only shows at the next
+question.  Join the steps with [[&&]] and let the command stay in the foreground of
+its own shell, since [[make x; pdfpc x]] or a trailing [[&]] hides the status.  It
+cannot read the terminal, so a LaTeX error ends the build instead of waiting at a
+prompt.  When you restart [[present]] during a lecture, add [[--no-slides]]:
+[[present]] cannot tell that the slides are already showing, and it would open a
+second viewer.
+
 Some slides carry several questions and one QR code.  Respondents reach
 the second and third question through the navigation row, so those must
 open together with the first rather than wait for their own results
