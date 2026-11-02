@@ -1088,10 +1088,11 @@ def _render_question(
 \label{sec:qr-regeneration}
 
 The generic factory performs the side effects once, and the public wrappers only
-need to construct the appropriate question object.  When no base URL is pinned,
-the helper still has to bake some URL into the QR image, so it resolves the
-current LAN address using the configured port.  That compile-time URL is only a
-placeholder: [[mentipy serve]] may later regenerate every QR image so the files
+need to construct the appropriate question object.  When no base URL is pinned
+and no server has left its address (see below), the helper still has to bake
+some URL into the QR image, so it resolves the current LAN address using the
+configured port.  That compile-time URL is only a placeholder: [[mentipy serve]]
+may later regenerate every QR image so the files
 match the address respondents should actually use.  Because [[make_qr]] writes
 the QR PDF and its [[.pdf_tex]] sidecar in the same call, regeneration keeps
 the matrix and the printed URL caption tied together: any subsequent slide
@@ -1300,6 +1301,157 @@ def regenerate_qrs(
     return count
 @
 
+\paragraph{Keeping the served address through a rebuild.}
+Two writers share the QR files: the server, which knows the address it
+serves, and the build, which knows only the configuration.  Whichever runs
+last wins, and PythonTeX runs whenever a block changes.  So a lecturer who
+runs [[mentipy present --public upnp]], edits a prompt and recompiles would
+get codes for an address that nobody serves, in a PDF that looks fine.  The
+build must therefore learn what the server knows, and the server has to
+leave that behind somewhere: a build starts in another process, possibly
+after the server has stopped.
+
+We keep the address in a small file in the QR directory beside the store,
+not in the store itself.  A project may track its store in a public
+repository, and at home this address is the lecturer's public IP, which
+should not end up in a commit.  It is also not worth a diff: it says where
+the deck was last served, not anything about the deck.  The QR directory has
+the right properties already.  Every deck ignores it, since it holds only
+derived files, so the address stays out of git; a clone or a worktree starts
+without it; and a [[make clean]] that removes the QR codes removes the record
+with them, so a clean build falls back to the configuration.
+
+<<constants>>=
+SERVED_ADDRESS_FILE = ".served-base-url"
+<<functions>>=
+def _served_address_path(store: Store) -> Path:
+    directory = store.path.parent.resolve() / get_setting(
+        QR_DIR_CONFIG, DEFAULT_QR_DIR
+    )
+    return directory / SERVED_ADDRESS_FILE
+
+
+def remember_served_address(store: Store, base_url: str) -> None:
+    """Leave the address a server serves for later builds of this deck."""
+
+    path = _served_address_path(store)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{base_url}\n", encoding="utf-8")
+    except OSError as error:
+        LOGGER.warning(
+            "cannot remember the served address, so rebuilding the slides "
+            "will not keep it: %s",
+            error,
+        )
+
+
+def _served_address(store: Store) -> str | None:
+    try:
+        text = _served_address_path(store).read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    return text.strip() or None
+@
+
+A failure to write the record is a warning and not an error.  The lecture can
+still go ahead: the server runs and the regenerated QR codes are right; only a
+later rebuild would lose the address.  A record that cannot be read counts as
+no record, since the build then has its usual fallbacks.
+
+The record outranks [[mentipy.base_url]], because it describes what is actually
+being served, whereas the setting describes what a server would use if it had
+no other information: [[--public]] and [[mentipy.public_base_url]] both override
+it.  An explicit [[base_url=]] still wins, since a deck that names an address
+has said that it wants that one.  A record can be out of date when the lecturer
+moves to another network, but only until the next start of the server, which
+overwrites the record and rewrites every QR code.
+
+<<test functions>>=
+def _addresses_in_sidecars(directory):
+    return [
+        sidecar.read_text() for sidecar in Path(directory).glob("*.pdf_tex")
+    ]
+
+
+def _build_one_poll(**kwargs):
+    # A new Store object, as each build is a new PythonTeX process.
+    return mc("One?", ["Yes", "No"], store=Store("mentipy.json"), **kwargs)
+
+
+@pytest.fixture
+def configured_deck(tmp_path, monkeypatch):
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps({"mentipy": {"base_url": "http://config.example:8080"}})
+    )
+    monkeypatch.setenv("MENTIPY_CONFIG", str(config))
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+def test_a_build_without_a_served_address_uses_the_configuration(
+    configured_deck,
+):
+    _build_one_poll()
+
+    [text] = _addresses_in_sidecars("mentipy-obj")
+    assert "config.example" in text
+
+
+def test_a_build_prefers_the_served_address_to_the_configuration(
+    configured_deck,
+):
+    remember_served_address(Store("mentipy.json"), "http://served.example:8080")
+
+    _build_one_poll()
+
+    [text] = _addresses_in_sidecars("mentipy-obj")
+    assert "served.example" in text
+    assert "config.example" not in text
+
+
+def test_an_explicit_base_url_outranks_the_served_address(configured_deck):
+    remember_served_address(Store("mentipy.json"), "http://served.example:8080")
+
+    _build_one_poll(base_url="http://explicit.example:8080")
+
+    [text] = _addresses_in_sidecars("mentipy-obj")
+    assert "explicit.example" in text
+
+
+def test_the_served_address_belongs_to_one_deck(configured_deck):
+    remember_served_address(Store("mentipy.json"), "http://served.example:8080")
+    other = configured_deck / "other"
+    other.mkdir()
+    os.chdir(other)
+
+    _build_one_poll()
+
+    [text] = _addresses_in_sidecars("mentipy-obj")
+    assert "config.example" in text
+
+
+def test_cleaning_the_qr_directory_forgets_the_served_address(configured_deck):
+    remember_served_address(Store("mentipy.json"), "http://served.example:8080")
+    shutil.rmtree("mentipy-obj")
+
+    _build_one_poll()
+
+    [text] = _addresses_in_sidecars("mentipy-obj")
+    assert "config.example" in text
+
+
+def test_an_unreadable_served_address_counts_as_none(configured_deck):
+    Path("mentipy-obj").mkdir()
+    (Path("mentipy-obj") / SERVED_ADDRESS_FILE).write_bytes(b"\xff\xfe")
+
+    _build_one_poll()
+
+    [text] = _addresses_in_sidecars("mentipy-obj")
+    assert "config.example" in text
+@
+
 \section{Public helper API}
 \label{sec:public-helper-api}
 
@@ -1345,7 +1497,9 @@ def question(
         raise ValueError(f"unknown layout: {layout!r}")
 
     active_store = store or Store()
-    raw_base = base_url if base_url is not None else get_setting(BASE_URL_CONFIG)
+    raw_base = base_url
+    if raw_base is None:
+        raw_base = _served_address(active_store) or get_setting(BASE_URL_CONFIG)
     chosen_base = resolve_base_url(
         raw_base,
         int(get_setting(PORT_CONFIG, DEFAULT_PORT)),

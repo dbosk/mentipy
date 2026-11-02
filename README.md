@@ -228,6 +228,9 @@ If no base URL is configured, `mentipy` resolves the current LAN address from
 the serving port. Because QR codes are generated when the document compiles,
 `mentipy serve` may regenerate remembered QR images and ask you to recompile the
 slides so the PDF embeds the updated codes.
+Later builds keep the address the server used, so you can start the server and
+then compile, even after editing a question, without changing the configuration.
+An explicit `base_url=` in the deck still wins.
 
 For public access, `mentipy serve` can expose the local server in two modes:
 

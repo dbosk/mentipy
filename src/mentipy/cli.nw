@@ -58,6 +58,7 @@ from mentipy.latex import (
     pin_text as render_pin_text_question,
     ranking as render_ranking_question,
     regenerate_qrs,
+    remember_served_address,
     scale as render_scale_question,
     word_cloud as render_word_cloud_question,
 )
@@ -637,9 +638,10 @@ def _latex_reference() -> str:
 
         Shared keyword arguments
           store: defaults to config key {STORE_CONFIG}
-          base_url: defaults to {BASE_URL_CONFIG}; if omitted, Mentipy
-            first reads that setting and only resolves the current LAN
-            address using {PORT_CONFIG} when it is unset, empty, or auto
+          base_url: if omitted, Mentipy uses the address the last server
+            of this store served, kept in {QR_DIR_CONFIG} beside the store,
+            then {BASE_URL_CONFIG}, and resolves the current LAN address
+            using {PORT_CONFIG} only when it is unset, empty, or auto
           qr_dir: defaults to {QR_DIR_CONFIG}
           qr_format: defaults to {QR_FORMAT_CONFIG}
           environment: defaults to {QUESTION_ENVIRONMENT_CONFIG};
@@ -2366,7 +2368,8 @@ def serve(
     """Run the local polling server.
 
     Respondent URLs use config setting ``mentipy.base_url`` unless it is
-    unset, empty, or ``auto``.
+    unset, empty, or ``auto``.  Later builds of the slides keep the address
+    the server used, so they can be recompiled while it runs.
     """
 
     chosen_host = host or get_setting(HOST_CONFIG, DEFAULT_HOST)
@@ -2566,7 +2569,128 @@ def _regenerated(store: Store, base_url: str) -> tuple[int, list[str]]:
     collector = _WarningLines()
     with _logging_into(collector):
         count = regenerate_qrs(store, base_url)
+        remember_served_address(store, base_url)
     return count, collector.lines
+@
+
+The tests below follow the lecturer's order through the real start-up lines
+and the real render helper, since what matters is what a rebuild writes after
+a server has started, and each build gets a new [[Store]], as a PythonTeX
+process does.  Only the LAN lookup is replaced, because the result of the real
+one depends on the network of the machine running the tests.
+
+<<test functions>>=
+def _served_deck(tmp_path, monkeypatch, base_url):
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"mentipy": {"base_url": base_url}}))
+    monkeypatch.setenv("MENTIPY_CONFIG", str(config))
+    monkeypatch.setattr(mentipy.network, "local_ip", lambda: "192.0.2.10")
+    monkeypatch.chdir(tmp_path)
+
+
+def _rebuild():
+    mentipy.latex.mc("One?", ["Yes", "No"], store=Store("mentipy.json"))
+
+
+def _sidecar_text():
+    [sidecar] = Path("mentipy-obj").glob("*.pdf_tex")
+    return sidecar.read_text()
+
+
+def _start_public(url):
+    return mentipy.cli._public_start_lines(
+        Store("mentipy.json"), "0.0.0.0", 8080, url,
+        results=True, lock=False, admin_token=None,
+    )
+
+
+def test_a_rebuild_keeps_the_public_address_of_the_server(
+    tmp_path, monkeypatch
+):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    _rebuild()
+
+    _start_public("http://203.0.113.7:8080")
+    _rebuild()
+
+    assert "203.0.113.7" in _sidecar_text()
+
+
+def test_a_rebuild_keeps_the_local_address_of_the_server(
+    tmp_path, monkeypatch
+):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    _rebuild()
+    monkeypatch.setattr(mentipy.network, "local_ip", lambda: "192.0.2.99")
+
+    mentipy.cli._local_start_lines(
+        Store("mentipy.json"), "0.0.0.0", 8080, results=True, lock=False
+    )
+    monkeypatch.setattr(mentipy.network, "local_ip", lambda: "192.0.2.11")
+    _rebuild()
+
+    assert "192.0.2.99" in _sidecar_text()
+
+
+def test_a_public_server_outranks_a_pinned_base_url_in_a_rebuild(
+    tmp_path, monkeypatch
+):
+    _served_deck(tmp_path, monkeypatch, "http://pinned.example:8080")
+    _rebuild()
+
+    _start_public("http://203.0.113.7:8080")
+    _rebuild()
+
+    assert "203.0.113.7" in _sidecar_text()
+    assert "pinned.example" not in _sidecar_text()
+
+
+def test_a_first_build_after_the_server_gets_its_address(
+    tmp_path, monkeypatch
+):
+    _served_deck(tmp_path, monkeypatch, "auto")
+
+    _start_public("http://203.0.113.7:8080")
+    _rebuild()
+
+    assert "203.0.113.7" in _sidecar_text()
+
+
+def test_restarting_the_server_replaces_the_address(tmp_path, monkeypatch):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    _rebuild()
+
+    _start_public("http://203.0.113.7:8080")
+    _start_public("http://198.51.100.5:8080")
+    _rebuild()
+
+    assert "198.51.100.5" in _sidecar_text()
+
+
+def test_the_served_address_stays_out_of_the_tracked_store(
+    tmp_path, monkeypatch
+):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    _rebuild()
+
+    _start_public("http://203.0.113.7:8080")
+    _rebuild()
+
+    assert "203.0.113.7" not in Path("mentipy.json").read_text()
+
+
+def test_a_server_warns_when_it_cannot_leave_its_address(
+    tmp_path, monkeypatch
+):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    Path("mentipy-obj").write_text("a file where the directory should be")
+
+    lines = _start_public("http://203.0.113.7:8080")
+
+    assert any(
+        line.startswith("Warning: cannot remember the served address")
+        for line in lines
+    )
 @
 
 \subsection{Presenting: serving and following in one terminal}
@@ -8592,6 +8716,7 @@ from typer.testing import CliRunner
 from mentipy.cli import *
 from mentipy.questions import *
 import ipaddress
+import mentipy.latex
 import mentipy.network
 import mentipy.server
 from mentipy.server import create_server
