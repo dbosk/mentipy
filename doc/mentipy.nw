@@ -1769,17 +1769,24 @@ make slides.pdf
 \end{verbatim}
 The file is not part of the store, because a project may track its store in a
 public repository and the address may be the lecturer's home IP.  A server
-removes it on stopping, and later builds fall back to the configuration, though
-the QR files keep the served address until PythonTeX next rewrites them.  Stopping
-means Ctrl-C, a plain [[kill]], closing the terminal (on Windows, only Ctrl-C) or
-an error.
+removes it on stopping, and later builds fall back to the configuration,
+though the QR files keep the served address until PythonTeX next rewrites
+them.  Stopping means Ctrl-C, a plain [[kill]], closing the terminal (on
+Windows, only Ctrl-C) or an error.  A server started with [[nohup]] ignores
+the closing of its terminal, as [[nohup]] asks, and keeps running; a plain
+[[kill]] still stops it cleanly.
 
-A server stopped by [[kill -9]] or a power cut cannot clean up.  Later builds then
-put its dead address in the QR codes, without a warning, until the next start of a
-server replaces the file or you remove it.  If it ran with [[--public]], the
-[[ssh]] process may keep running, and a new tunnel fails on the taken port until
-you stop it; a UPnP mapping stays on the router until a new server on that port
-stops, or you remove it there.
+While a server stops, further signals are ignored, so that they cannot cut the
+cleanup short.  The cleanup has 30 seconds.  A router that does not answer can
+use them up, and the mapping may then stay on the router; the file is gone by
+then.
+
+A server stopped by [[kill -9]], Ctrl-\textbackslash{} or a power cut cannot
+clean up.  Later builds then put its dead address in the QR codes, without a
+warning, until the next start of a server replaces the file or you remove it.
+If it ran with [[--public]], the [[ssh]] process may keep running, and a new
+tunnel fails on the taken port until you stop it; a UPnP mapping stays on the
+router until a new server on that port stops, or you remove it there.
 
 The store remembers which QR files each question wrote, so that
 [[mentipy serve]] knows what to rewrite.  A QR file in the store's checkout,

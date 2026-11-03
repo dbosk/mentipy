@@ -2482,13 +2482,13 @@ code is repaired by the next rerun of PythonTeX, but a false record would keep
 putting the wrong address back.
 
 The same run removes the record when the runner ends, whether by Ctrl-C, by a
-signal (\cref{sec:stop-signals}), by an error or by returning, so [[serve]] and
-[[present]] need no code of their own for it.  That is why it sits here, around the runner, and inside the exposure context:
-the record is gone before the public address closes, also when closing it fails.
-Only a run that reached [[on_bound]] may remove anything.  A start that failed on
-a taken port usually carries the very address of the server holding that port,
-so the comparison in [[forget_served_address]] would not protect that server's
-record.
+signal (\cref{sec:stop-signals}), by an error or by returning, so [[serve]]
+and [[present]] need no code of their own for it.  That is why it sits here,
+around the runner, and inside the exposure context: the record is gone before
+the public address closes, also when closing it fails.  Only a run that reached
+[[on_bound]] may remove anything.  A start that failed on a taken port usually
+carries the very address of the server holding that port, so the comparison in
+[[forget_served_address]] would not protect that server's record.
 
 <<functions>>=
 @contextmanager
@@ -2757,10 +2757,10 @@ def test_the_served_address_stays_out_of_the_tracked_store(
 
 The record says what a running server serves, so it ends with that server: a
 build afterwards must not keep putting the lecturer's home address into a PDF.
-That holds however the server stops short of [[SIGKILL]].  The tests here stop it
-with Ctrl-C and with an error while it serves; real signals need real processes,
-in \cref{sec:stop-signals}.  The rebuild shows where the address comes from, as
-the sidecar is rewritten from the configuration.
+That holds however the server stops short of [[SIGKILL]].  The tests here stop
+it with Ctrl-C and with an error while it serves; real signals need real
+processes, in \cref{sec:stop-signals}.  The rebuild shows where the address
+comes from, as the sidecar is rewritten from the configuration.
 
 <<test functions>>=
 def test_a_stopped_server_takes_its_address_back(tmp_path, monkeypatch):
@@ -2982,15 +2982,16 @@ def test_present_keeps_the_warning_in_its_banner(
 \subsection{Stopping on a signal}
 \label{sec:stop-signals}
 
-A run leaves things behind that outlast the process unless it removes them: the
-record of the served address, an [[ssh]] child, a port mapping on the router.
-All of them are removed on the way out, in [[finally]] blocks and context
-managers, and that way out exists only if Python unwinds.  Ctrl-C unwinds it,
-because Python turns [[SIGINT]] into [[KeyboardInterrupt]].  A plain [[kill]]
-sends [[SIGTERM]] and closing the terminal sends [[SIGHUP]], and the default
-action of both ends the process on the spot, so the record stays and later builds
-put a dead address in the QR codes.  To the lecturer these are all the same act:
-the lecture is over.  So while a server runs, [[_run_server]] treats them alike.
+A run leaves things behind that outlast the process unless it removes them:
+the record of the served address, an [[ssh]] child, a port mapping on the
+router.  All of them are removed on the way out, in [[finally]] blocks and
+context managers, and that way out exists only if Python unwinds.  Ctrl-C
+unwinds it, because Python turns [[SIGINT]] into [[KeyboardInterrupt]].  A
+plain [[kill]] sends [[SIGTERM]] and closing the terminal sends [[SIGHUP]],
+and the default action of both ends the process on the spot, so the record
+stays and later builds put a dead address in the QR codes.  To the lecturer
+these are all the same act: the lecture is over.  So while a server runs,
+[[_run_server]] treats them alike.
 
 The handler raises [[KeyboardInterrupt]], not an exception of its own, because
 that is the path every cleanup already takes, wherever the interruption lands.
@@ -3000,58 +3001,67 @@ design is about what surrounds that one line.
 
 \begin{description}
 \item[The first signal decides, later ones are ignored.]
-  A second one raising in the middle of a [[finally]] would leave the rest of the
-  cleanup undone: during the wait for [[ssh]] to go, say, it would leave [[ssh]]
-  running.  That is why [[SIGINT]] gets the same handler although Python already
-  raises for it, since an impatient second Ctrl-C, or a Ctrl-C after a [[kill]],
-  would do just that, and so would a closed terminal after a Ctrl-C.
+  A second one raising in the middle of a [[finally]] would leave the rest of
+  the cleanup undone: during the wait for [[ssh]] to go, say, it would leave
+  [[ssh]] running.  That is why [[SIGINT]] gets the same handler although
+  Python already raises for it, since an impatient second Ctrl-C, or a Ctrl-C
+  after a [[kill]], would do just that, and so would a closed terminal after a
+  Ctrl-C.
 \item[A cleanup has a deadline.]
-  Ignoring signals means nobody can interrupt a cleanup that hangs, and after a
-  closed terminal nobody is there to try.  The first signal therefore also arms
-  [[signal.alarm]].  [[SIGALRM]] keeps its default action, which ends the process
-  even inside a C call, where a router that does not answer would hold it and no
-  Python handler could run.  The deadline allows for the five seconds that [[ssh]]
-  gets and for a slow router; what it cuts off is at most the exposure, as the
-  record is removed first.  Such an end has the status of [[SIGALRM]], since the
-  cleanup did not finish.
+  Ignoring signals means nobody can interrupt a cleanup that hangs, and after
+  a closed terminal nobody is there to try.  The first signal therefore also
+  arms [[signal.alarm]], with [[SIGALRM]] set to its default action, as a
+  process can inherit it ignored.  That action ends the process even inside a
+  C call, where a router that does not answer would hold it and no Python
+  handler could run.  The deadline allows for the five seconds that [[ssh]]
+  gets and for a slow router.  Stopping the server waits for no network and the
+  record goes next, so what a deadline cuts off is the exposure, and a mapping
+  may then stay on the router.  Such an end has the status of [[SIGALRM]],
+  since the cleanup did not finish.  [[SIGQUIT]] keeps its default action too,
+  so Ctrl-\textbackslash{} remains the way to leave at once, without any
+  cleanup.
 \item[The process ends by the signal it received.]
   When the cleanup is over, the handler from before is back and the signal is
-  raised again, so with the default handler the process dies from it, as it always
-  has.  A shell shows 143 or 129, a [[subprocess]] caller sees the negative signal
-  number, and a supervisor such as [[systemd]] counts it as a clean stop, none of
-  which changes for anyone.  Exiting with status 143 would look the same in a shell
-  but would count as a failure to such a supervisor, and status 0 would hide that
-  the process was stopped from outside.  A caller with a handler of its own keeps
-  its say, as that handler runs instead and the block simply ends.  Dying this way
-  skips the interpreter's exit, which nothing needs: everything we print is flushed
-  as it is printed, and no [[atexit]] function is registered.  Ctrl-C keeps its
-  statuses, because it is raised on unchanged: Typer turns it into 130 for
-  [[serve]], and [[present]] returns normally.
+  raised again, so with the default handler the process dies from it, as it
+  always has.  A shell shows 143 or 129, a [[subprocess]] caller sees the
+  negative signal number, and a supervisor such as [[systemd]] counts it as a
+  clean stop, none of which changes for anyone.  Exiting with status 143 would
+  look the same in a shell but would count as a failure to such a supervisor,
+  and status 0 would hide that the process was stopped from outside.  A caller
+  with a handler of its own keeps its say, as that handler runs instead and
+  the block simply ends.  Dying this way skips the interpreter's exit, which
+  nothing needs: everything we print is flushed as it is printed, and no
+  [[atexit]] function is registered.  Ctrl-C keeps its statuses by the same
+  rule, needing no case of its own: with Python's handler back, raising
+  [[SIGINT]] again is simply [[KeyboardInterrupt]], which Typer turns into 130
+  for [[serve]], and which [[present]] catches to return normally.
 \item[A signal that was ignored at the start stays ignored.]
-  That is what [[nohup]] leaves behind, and a lecturer who used it wants the server
-  to survive the terminal; a background job of a script has [[SIGINT]] ignored in
-  the same way.  [[getsignal]] gives [[None]] for a handler not set from Python,
-  which could not be put back, so that one is left in place as well.
+  That is what [[nohup]] leaves behind, and a lecturer who used it wants the
+  server to survive the terminal; a background job of a script has [[SIGINT]]
+  ignored in the same way.  [[getsignal]] gives [[None]] for a handler not set
+  from Python, which could not be put back, so that one is left in place as
+  well.
 \item[Only the main thread, and only where it means something.]
-  [[signal.signal]] raises on any other thread, where a test or a caller may run a
-  server; such a run simply has no handlers.  Windows has no [[SIGHUP]], no
-  [[signal.alarm]] for the deadline, and a [[SIGTERM]] from outside ends the
-  process without running a handler at all, so there is nothing to gain, and a
-  Windows server stays as it was: only Ctrl-C stops it cleanly.
+  [[signal.signal]] raises on any other thread, where a test or a caller may
+  run a server; such a run simply has no handlers.  Windows has no [[SIGHUP]],
+  no [[signal.alarm]] for the deadline, and a [[SIGTERM]] from outside ends
+  the process without running a handler at all, so there is nothing to gain,
+  and a Windows server stays as it was: only Ctrl-C stops it cleanly.
 \end{description}
 
-After a hang-up the terminal is gone, and every write to it fails with [[EIO]].
-The cleanup itself writes nothing, except warnings through [[logging]], which
-drops the failure of its stream.  [[present]]'s follow loop may hit the error
-first, in the moment before the signal comes; that is an [[Exception]] in a tick,
-which goes to the banner like any other, and the next thing to happen is the
-signal.  A hang-up reaches the session of the terminal, so it stops an [[ssh]]
-child by itself, but a plain [[kill]] reaches Mentipy alone.  The browser that
-[[present]] opened has a session of its own, and a Python handler does not survive
-[[exec]], so it runs on either way.
+After a hang-up the terminal is gone, and every write to it fails with
+[[EIO]].  The cleanup itself writes nothing, except warnings through
+[[logging]], which drops the failure of its stream.  [[present]]'s follow loop
+may hit the error first, in the moment before the signal comes; that is an
+[[Exception]] in a tick, which goes to the banner like any other, and the next
+thing to happen is the signal.  A hang-up reaches the session of the terminal,
+so it stops an [[ssh]] child by itself, but a plain [[kill]] reaches Mentipy
+alone.  The browser that [[present]] opened has a session of its own, and a
+Python handler does not survive [[exec]], so it runs on either way.
 
-What no handler can catch is [[SIGKILL]] or the power going off.
-\Cref{sec:keep-served-address} says what that leaves behind.
+What no handler can catch is [[SIGKILL]] or the power going off, and
+[[SIGQUIT]] is left alone as said.  \Cref{sec:keep-served-address} says what
+that leaves behind.
 
 <<imports>>=
 import signal
@@ -3073,6 +3083,7 @@ def _stopping_on_signals():
         if received:
             return
         received.append(signum)
+        earlier[signal.SIGALRM] = signal.signal(signal.SIGALRM, signal.SIG_DFL)
         signal.alarm(STOP_DEADLINE)
         raise KeyboardInterrupt
 
@@ -3085,7 +3096,7 @@ def _stopping_on_signals():
     try:
         yield
     except KeyboardInterrupt:
-        if not received or received[0] == signal.SIGINT:
+        if not received:
             raise
     finally:
         if received:
@@ -3107,6 +3118,12 @@ started under, so that [[nohup make test]] tests the same thing.  A
 address is pinned, so no test depends on the network, and it is not a loopback
 address, so a record is written; its content tells the test the socket is bound.
 
+Whatever a test starts ends by itself: the command by an alarm, the programs
+below after a bounded loop.  A test run that is killed runs no teardown, and a
+program with a session of its own is not stopped along with it, so an endless
+one would stay behind.  One did, for 41 minutes.  The limits are far above
+what a test needs on a loaded machine.
+
 <<test functions>>=
 _SERVED = "http://203.0.113.7:8080"
 _CLI_PROCESS = '''\
@@ -3114,11 +3131,16 @@ import signal
 signal.signal(signal.SIGINT, signal.default_int_handler)
 signal.signal(signal.SIGTERM, signal.SIG_DFL)
 signal.signal(signal.SIGHUP, signal.SIG_DFL)
+signal.alarm({limit})
 {setup}
 import mentipy.cli
 mentipy.cli.main()
 '''
 _QUIETLY = {"serve": ("serve",), "present": ("present", "--no-open")}
+_LECTURE_LIMIT = 600
+_RUN_FOR_A_WHILE = (
+    'i=0; while [ "$i" -lt 6000 ]; do sleep 0.05; i=$((i + 1)); done\n'
+)
 
 
 def _wait_until(condition, *, timeout=60):
@@ -3139,7 +3161,8 @@ def _lecture(tmp_path, command, *options, setup="", settings=None, **popen):
     port = _free_port()
     with open(tmp_path / "output.log", "wb") as log:
         process = _REAL_POPEN(
-            [sys.executable, "-c", _CLI_PROCESS.format(setup=setup), command,
+            [sys.executable, "-c",
+             _CLI_PROCESS.format(setup=setup, limit=_LECTURE_LIMIT), command,
              "--host", "127.0.0.1", "--port", str(port),
              "--store", str(tmp_path / "mentipy.json"), *options],
             cwd=tmp_path,
@@ -3190,8 +3213,8 @@ the process ends, by that signal, with the record gone and the port free.
 @pytest.mark.parametrize("command", ["serve", "present"])
 @pytest.mark.parametrize("name", ["SIGTERM", "SIGHUP"])
 def test_a_signal_stops_the_server_as_ctrl_c_does(tmp_path, command, name):
-    signum = getattr(signal, name)
     with _lecture(tmp_path, *_QUIETLY[command]) as lecture:
+        signum = getattr(signal, name)
         _await_the_bind(tmp_path, lecture)
 
         lecture.process.send_signal(signum)
@@ -3211,13 +3234,14 @@ def test_ctrl_c_keeps_its_exit_status(tmp_path, command, status):
         _assert_clean_stop(tmp_path, lecture, status)
 @
 
-Closing the terminal is what the lecturer does, and nothing replaces it here: the
-test gives the process a real terminal, as its controlling terminal, waits until
-the command has written to it, and closes the other end.  The hang-up then comes
-from the kernel, not from the test.  A terminal that has been closed also fails
-every later write, and [[present]] keeps writing if a hang-up is ignored, so a
-further test lets a lecture move on after the terminal has gone.  The display
-fails, which the log shows, and a later [[kill]] still stops everything cleanly.
+Closing the terminal is what the lecturer does, and nothing replaces it here:
+the test gives the process a real terminal, as its controlling terminal, waits
+until the command has written to it, and closes the other end.  The hang-up
+then comes from the kernel, not from the test.  A terminal that has been
+closed also fails every later write, and [[present]] keeps writing if a
+hang-up is ignored, so a further test lets a lecture move on after the
+terminal has gone.  The display fails, which the log shows, and a later
+[[kill]] still stops everything cleanly.
 
 <<test functions>>=
 def _a_terminal():
@@ -3293,10 +3317,10 @@ def test_present_can_be_stopped_after_its_terminal_has_gone(tmp_path):
         _assert_clean_stop(tmp_path, lecture, -signal.SIGTERM)
 @
 
-[[present]] leaves a browser running when the lecture ends, and the terminal going
-away must not change that: the opener has a session of its own, so the hang-up
-never reaches it.  The opener here is a script that notes a hang-up and otherwise
-stays, as a browser would.
+[[present]] leaves a browser running when the lecture ends, and the terminal
+going away must not change that: the opener has a session of its own, so the
+hang-up never reaches it.  The opener here is a script that notes a hang-up
+and otherwise stays, as a browser would.
 
 <<test functions>>=
 def test_closing_the_terminal_leaves_the_browser_running(tmp_path):
@@ -3307,29 +3331,28 @@ def test_closing_the_terminal_leaves_the_browser_running(tmp_path):
         "#!/bin/sh\n"
         f"trap 'echo hup > {hung_up}; exit' HUP\n"
         f"echo $$ > {pid_file}\n"
-        "while :; do sleep 0.05; done\n"
+        f"{_RUN_FOR_A_WHILE}"
     )
     opener.chmod(0o755)
     master, terminal = _a_terminal()
-    with _lecture(
-        tmp_path, "present", "--open-with", str(opener), **terminal
-    ) as lecture:
-        os.close(terminal["stdout"])
-        _await_the_bind(tmp_path, lecture)
-        _read_until(master, b"No question is open")
-        _wait_until(lambda: pid_file.exists() and pid_file.read_text())
-        pid = int(pid_file.read_text())
+    try:
+        with _lecture(
+            tmp_path, "present", "--open-with", str(opener), **terminal
+        ) as lecture:
+            os.close(terminal["stdout"])
+            _await_the_bind(tmp_path, lecture)
+            _read_until(master, b"No question is open")
+            _wait_until(lambda: pid_file.exists() and pid_file.read_text())
 
-        try:
             os.close(master)
 
             _assert_clean_stop(tmp_path, lecture, -signal.SIGHUP)
             threading.Event().wait(0.3)
             assert not hung_up.exists()
-            assert _running(pid)
-        finally:
-            if _running(pid):
-                os.kill(pid, signal.SIGKILL)
+            assert _running(int(pid_file.read_text()))
+    finally:
+        if pid_file.exists() and _running(int(pid_file.read_text())):
+            os.kill(int(pid_file.read_text()), signal.SIGKILL)
 
 
 def _running(pid):
@@ -3341,15 +3364,16 @@ def _running(pid):
 @
 
 The tunnel and the port mapping stop on the same path.  A real tunnel needs an
-[[sshd]], and a real mapping needs a router, so these two are the only things not
-real here: an [[ssh]] program on the [[PATH]], which runs until it is stopped, and
-a [[miniupnpc]] module in the process's working directory, which notes what it is
-asked to do.  The address the command reports is replaced too, since the real one
-comes from the network.  Everything between them and the signal is the real code.
-With a signal sent only to Mentipy, as a plain [[kill]] does, nothing else would
-stop that [[ssh]].  The signal may also come while the tunnel or the mapping is
-being set up, before the exposure context has anything to clean up, so the set-up
-has to clean up after itself.
+[[sshd]], and a real mapping needs a router, so these two are the only things
+not real here: an [[ssh]] program on the [[PATH]], which runs until it is
+stopped, and a [[miniupnpc]] module in the process's working directory, which
+notes what it is asked to do.  The address the command reports is replaced
+too, since the real one comes from the network.  Everything between them and
+the signal is the real code.  With a signal sent only to Mentipy, as a plain
+[[kill]] does, nothing else would stop that [[ssh]].  The signal may also come
+while the tunnel or the mapping is being set up, even while the router is
+adding the mapping, before the exposure context has anything to clean up, so
+the set-up has to clean up after itself.
 
 <<test functions>>=
 _QUICK_SSH = (
@@ -3371,7 +3395,7 @@ def fake_ssh(tmp_path):
         program.write_text(
             f"#!/bin/sh\n{trap}echo $$ > {pid_file}.new\n"
             f"mv {pid_file}.new {pid_file}\n"
-            "while :; do sleep 0.05; done\n"
+            f"{_RUN_FOR_A_WHILE}"
         )
         program.chmod(0o755)
 
@@ -3445,7 +3469,12 @@ def test_a_signal_while_the_tunnel_starts_stops_it(tmp_path, fake_ssh):
         fake_ssh.assert_stopped()
 
 
-def _fake_router(tmp_path, *, removing="open('mapping-removed', 'w').close()"):
+def _fake_router(
+    tmp_path,
+    *,
+    adding="return True",
+    removing="open('mapping-removed', 'w').close()",
+):
     (tmp_path / "miniupnpc.py").write_text(
         "class UPnP:\n"
         "    lanaddr = '192.0.2.10'\n"
@@ -3454,7 +3483,7 @@ def _fake_router(tmp_path, *, removing="open('mapping-removed', 'w').close()"):
         "    def selectigd(self):\n"
         "        return None\n"
         "    def addportmapping(self, *_arguments):\n"
-        "        return True\n"
+        f"        {adding}\n"
         "    def deleteportmapping(self, *_arguments):\n"
         f"        {removing}\n"
     )
@@ -3505,6 +3534,25 @@ def test_closing_the_terminal_removes_the_port_mapping(tmp_path):
         assert (tmp_path / "mapping-removed").exists()
 
 
+def test_a_signal_while_the_router_adds_the_mapping_removes_it(tmp_path):
+    _fake_router(
+        tmp_path,
+        adding=(
+            "open('adding-the-mapping', 'w').close(); "
+            "__import__('time').sleep(300)"
+        ),
+    )
+    with _lecture(
+        tmp_path, "serve", "--public", "upnp", setup=_KNOWN_PUBLIC_ADDRESS
+    ) as lecture:
+        _wait_until((tmp_path / "adding-the-mapping").exists)
+
+        lecture.process.terminate()
+
+        assert lecture.process.wait(timeout=60) == -signal.SIGTERM
+        assert (tmp_path / "mapping-removed").exists()
+
+
 def test_a_signal_while_the_mapping_starts_removes_it(tmp_path):
     _fake_router(tmp_path)
     with _lecture(
@@ -3520,15 +3568,21 @@ def test_a_signal_while_the_mapping_starts_removes_it(tmp_path):
 @
 
 A second signal must not cut the cleanup short, whichever comes first, and
-that includes a Ctrl-C after a [[kill]] or the reverse.  The tunnel gives the test
-a cleanup that takes its time: this [[ssh]] notes the [[SIGTERM]] and stays, so
-Mentipy waits for it and then kills it, and the second signal comes during that
-wait.  If it broke the wait, the [[ssh]] would be left running.  The status is
-that of the first signal, which is the one that decided how the process stops.
+that includes a Ctrl-C after a [[kill]] or the reverse.  The tunnel gives the
+test a cleanup that takes its time: this [[ssh]] notes the [[SIGTERM]] and
+stays, so Mentipy waits for it and then kills it, and the second signal comes
+during that wait.  If it broke the wait, the [[ssh]] would be left running.
+The status is that of the first signal, which is the one that decided how the
+process stops.
 
-A cleanup that hangs must not keep the process forever.  With a router that never
-answers and a shorter deadline, the process ends by the alarm, and the record is
-gone by then, as it comes first on the way out.
+A cleanup that hangs must not keep the process forever.  With a router that
+never answers and a shorter deadline, the process ends by the alarm, and the
+record is gone by then, as it goes before the exposure.  That also holds for a
+process that was started with [[SIGALRM]] ignored, which it would inherit like
+any other.
+
+With later signals ignored, [[SIGQUIT]] stays the way to leave at once.  It
+runs no cleanup, so it leaves the record, as the manual says.
 
 <<test functions>>=
 @pytest.mark.parametrize(
@@ -3558,11 +3612,28 @@ def test_a_second_signal_cannot_cut_the_cleanup_short(
         fake_ssh.assert_stopped()
 
 
-def test_a_cleanup_that_hangs_still_ends_the_process(tmp_path):
+def test_ctrl_backslash_leaves_at_once_without_a_cleanup(tmp_path):
+    with _lecture(
+        tmp_path, "serve", setup="import resource\n"
+        "resource.setrlimit(resource.RLIMIT_CORE, (0, 0))"
+    ) as lecture:
+        _await_the_bind(tmp_path, lecture)
+
+        lecture.process.send_signal(signal.SIGQUIT)
+
+        assert lecture.process.wait(timeout=60) == -signal.SIGQUIT
+        assert _the_record(tmp_path).exists()
+
+
+@pytest.mark.parametrize(
+    "alarm", ["", "signal.signal(signal.SIGALRM, signal.SIG_IGN)"]
+)
+def test_a_cleanup_that_hangs_still_ends_the_process(tmp_path, alarm):
     _fake_router(tmp_path, removing="__import__('time').sleep(300)")
     with _lecture(
         tmp_path, "serve", "--public", "upnp",
         setup=(
+            f"{alarm}\n"
             f"{_KNOWN_PUBLIC_ADDRESS}\n"
             "import mentipy.cli\n"
             "mentipy.cli.STOP_DEADLINE = 1"
@@ -3645,13 +3716,22 @@ def test_a_signal_goes_on_to_the_handler_from_before(tmp_path, monkeypatch):
         threading.Event().wait(30)
         pytest.fail("the signal did not stop the server")
 
+    def own_alarm(_signum, _frame):
+        pytest.fail("the deadline should have been cancelled")
+
     _while_serving(monkeypatch, killed_while_serving)
-    with _own_handlers(lambda signum, _frame: calls.append(signum)):
-        _start_public(monkeypatch, _SERVED)
+    alarm_before = signal.signal(signal.SIGALRM, own_alarm)
+    try:
+        with _own_handlers(lambda signum, _frame: calls.append(signum)):
+            _start_public(monkeypatch, _SERVED)
+        alarm_after = signal.getsignal(signal.SIGALRM)
+    finally:
+        signal.signal(signal.SIGALRM, alarm_before)
 
     assert calls == [signal.SIGTERM]
     assert _record_of_the_deck() is None
     assert signal.alarm(0) == 0
+    assert alarm_after is own_alarm
 
 
 @pytest.mark.parametrize("ending", [None, KeyboardInterrupt, RuntimeError])
@@ -3687,10 +3767,11 @@ def test_a_run_without_a_signal_leaves_an_alarm_alone(tmp_path, monkeypatch):
 @
 
 A server may run on a thread, as these tests' own servers do, and
-[[signal.signal]] raises there.  A platform without [[SIGHUP]] keeps its handlers
-as well, for the reason given above.  So does a handler not set from Python, which
-[[signal.signal]] could not put back.  Only [[getsignal]] is replaced for that
-one, since a real handler of that kind would need a C library of its own.
+[[signal.signal]] raises there.  A platform without [[SIGHUP]] keeps its
+handlers as well, for the reason given above.  So does a handler not set from
+Python, which [[signal.signal]] could not put back.  Only [[getsignal]] is
+replaced for that one, since a real handler of that kind would need a C
+library of its own.
 
 <<test functions>>=
 def test_a_handler_not_set_from_python_is_left_in_place(tmp_path, monkeypatch):
@@ -3719,6 +3800,7 @@ def test_a_handler_not_set_from_python_is_left_in_place(tmp_path, monkeypatch):
 
 
 def test_a_server_on_a_thread_leaves_the_handlers_alone(tmp_path, monkeypatch):
+    pytest.importorskip("fcntl")
     _served_deck(tmp_path, monkeypatch, "auto")
     before = _handlers()
     during, failures = [], []
@@ -3851,9 +3933,9 @@ Ctrl-C.  The [[finally]] stops and closes the server however the loop
 ends; Ctrl-C then unwinds through [[_run_server]], whose exposure
 context closes the tunnel or port mapping, and [[present]] returns
 quietly.  A [[kill]] or a closed terminal takes the same path, except
-that it ends by its signal instead (\cref{sec:stop-signals}).  The daemon flag is only a backstop for an exit that skips
-the [[finally]].  The server logs no requests, so nothing writes over
-the display.
+that it ends by its signal instead (\cref{sec:stop-signals}).  The
+daemon flag is only a backstop for an exit that skips the [[finally]].
+The server logs no requests, so nothing writes over the display.
 
 The watch asks the server's own address: the loopback address of a
 wildcard bind, or the bound address itself, in the shared form of
@@ -3963,17 +4045,15 @@ backslashes of a path as escapes and turn [[C:\Users\me]] into
 one pair of quotes around a token is then removed: a path with spaces
 is written in quotes, one without may stand bare.
 
-The process is started and left alone: its input and output go to the
-null device, so it cannot write over the display, and it is detached
-from the terminal, so neither the terminal's Ctrl-C nor its closing
-reaches it.  On
-POSIX systems it runs in a session of its own; on Windows, where there
-are no sessions, it gets a process group of its own, which Ctrl-C
-does not reach, and no console.  [[present]] never waits for it in its
-own thread, so a browser that stays running cannot hold it up; a
-daemon thread waits for it instead, so that an opener that exits at
-once, as [[xdg-open]] does once it has handed the URL on, is reaped
-rather than left as a zombie for the rest of the lecture.
+The process is started and left alone: its input and output go to the null
+device, so it cannot write over the display, and it is detached from the
+terminal, so neither the terminal's Ctrl-C nor its closing reaches it.  On
+POSIX systems it runs in a session of its own; on Windows, where there are no
+sessions, it gets a process group of its own, which Ctrl-C does not reach, and
+no console.  [[present]] never waits for it in its own thread, so a browser
+that stays running cannot hold it up; a daemon thread waits for it instead, so
+that an opener that exits at once, as [[xdg-open]] does once it has handed the
+URL on, is reaped rather than left as a zombie for the rest of the lecture.
 
 A command that cannot be started, one that does not exist or does not
 parse, is no reason to stop the lecture.  It is logged as a warning,

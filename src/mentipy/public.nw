@@ -16,7 +16,7 @@ from __future__ import annotations
 @
 
 <<imports>>=
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from enum import Enum
 import logging
 import socket
@@ -83,9 +83,13 @@ def resolve_public_ip() -> str:
 The UPnP dependency stays optional because only one of the public modes needs
 it, and many users will never expose a lecture outside their own machine.  The
 private helper returns both the URL and a teardown callback so the public
-context manager can remove the mapping on shutdown.  The router holds the mapping
-as soon as it has accepted it, so a lookup of the address that fails or is
-interrupted has to remove it here, since no caller has the callback yet.
+context manager can remove the mapping on shutdown.  The router may hold the
+mapping from the moment it is asked for it, and an interruption during that
+call only takes effect when the call returns.  So until a caller has the
+callback, an interruption, or a lookup of the address that fails, has to
+remove the mapping here.  Asking to delete one that never came about fails,
+which [[cleanup]] ignores, and if the router has another program's mapping on
+this port, that one was about to be replaced anyway.
 
 <<functions>>=
 def _upnp_mapping(port: int) -> tuple[str, Callable[[], None]]:
@@ -99,6 +103,12 @@ def _upnp_mapping(port: int) -> tuple[str, Callable[[], None]]:
 
     upnp = miniupnpc.UPnP()
     upnp.discoverdelay = UPNP_DISCOVER_DELAY_MS
+
+    def cleanup():
+        try:
+            upnp.deleteportmapping(port, UPNP_PROTOCOL)
+        except Exception:
+            return
 
     try:
         if upnp.discover() == 0:
@@ -116,15 +126,12 @@ def _upnp_mapping(port: int) -> tuple[str, Callable[[], None]]:
         raise
     except Exception as err:
         raise PublicExposureError("could not create a UPnP port mapping") from err
+    except BaseException:
+        cleanup()
+        raise
 
     if not mapped:
         raise PublicExposureError("the router rejected the UPnP port mapping")
-
-    def cleanup():
-        try:
-            upnp.deleteportmapping(port, UPNP_PROTOCOL)
-        except Exception:
-            return
 
     try:
         public_ip = resolve_public_ip()
@@ -224,17 +231,14 @@ failure and stderr is the useful diagnostic.  If the process is still running,
 the reverse forward may still be unreachable from outside the server, so the
 preflight probe must succeed before the URL is returned.
 
-From the moment [[Popen]] returns there is a child that nothing else knows about
-until this function returns it.  So any other way out has to stop it, and that
-includes an interruption during the wait or the probe.  A Ctrl-C reaches [[ssh]]
-through the terminal anyway, but a signal sent to Mentipy alone does not, hence
-[[BaseException]].
-
-From the moment [[Popen]] returns there is a child that nothing else knows about
-until this function returns it.  So any other way out has to stop it, and that
-includes an interruption during the wait or the probe.  A Ctrl-C reaches [[ssh]]
-through the terminal anyway, but a signal sent to Mentipy alone does not, hence
-[[BaseException]].
+From the moment [[Popen]] returns there is a running child that nothing else
+knows about until this function returns it.  So one [[try]] covers everything up
+to that return, the wait, the probe and the start of the reader thread, and any
+way out of it stops the child.  A Ctrl-C reaches [[ssh]] through the terminal
+anyway, but a signal sent to Mentipy alone does not, hence [[BaseException]].  A
+child that has exited during the wait needs no stopping, so reading its stderr
+stays outside.  What is left is the few instructions between this return and the
+[[try]] in [[expose]], too short to have shown up in testing.
 
 <<functions>>=
 def expose_ssh(
@@ -266,20 +270,17 @@ def expose_ssh(
         raise PublicExposureError("could not start the SSH reverse tunnel") from err
 
     try:
-        returncode = process.wait(timeout=SSH_STARTUP_TIMEOUT)
-    except subprocess.TimeoutExpired:
         try:
+            returncode = process.wait(timeout=SSH_STARTUP_TIMEOUT)
+        except subprocess.TimeoutExpired:
             _preflight_ssh_tunnel(host, remote_port)
-        except BaseException:
-            _stop_ssh_process(process)
-            raise
-        threading.Thread(
-            target=_drain_ssh_stderr,
-            args=(process,),
-            daemon=True,
-            name="mentipy-ssh-stderr",
-        ).start()
-        return process, f"http://{host}:{remote_port}"
+            threading.Thread(
+                target=_drain_ssh_stderr,
+                args=(process,),
+                daemon=True,
+                name="mentipy-ssh-stderr",
+            ).start()
+            return process, f"http://{host}:{remote_port}"
     except BaseException:
         _stop_ssh_process(process)
         raise
@@ -325,7 +326,11 @@ def _drain_ssh_stderr(process: subprocess.Popen[str]) -> None:
 
 Stopping the child process is intentionally conservative.  A polite terminate
 keeps normal SSH shutdown quiet, but a stuck process must not outlive the
-lecture command that created it.
+lecture command that created it.  Even the wait after the kill has a limit.
+[[Popen]] takes a lock around its own waiting, and an interruption that lands
+just after it took that lock never releases it, so a wait without a limit would
+then block until the deadline on a stop (\cref{sec:stop-signals}).  The child
+has its [[SIGKILL]] by then, and it is reaped when this process ends.
 
 <<functions>>=
 def _stop_ssh_process(process: subprocess.Popen[str]):
@@ -337,16 +342,17 @@ def _stop_ssh_process(process: subprocess.Popen[str]):
         process.wait(timeout=SSH_SHUTDOWN_TIMEOUT)
     except subprocess.TimeoutExpired:
         process.kill()
-        process.wait()
+        with suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=SSH_SHUTDOWN_TIMEOUT)
 @
 
 \section{Unified exposure context}
 
 The CLI wants one uniform [[with]]-block no matter which strategy it picked.
-The context manager keeps that interface small and guarantees that teardown runs
-on Ctrl-C as well as on a normal return.  The CLI raises the same interruption for
-a plain [[kill]] and a closed terminal; only a process that is killed outright
-leaves the tunnel or the mapping behind.
+The context manager keeps that interface small and guarantees that teardown
+runs on Ctrl-C as well as on a normal return.  The CLI raises the same
+interruption for a plain [[kill]] and a closed terminal; only a process that
+is killed outright leaves the tunnel or the mapping behind.
 
 <<functions>>=
 @contextmanager
@@ -683,6 +689,8 @@ def test_expose_ssh_raises_when_preflight_times_out(monkeypatch):
 
 An interruption during that wait or that probe has no tunnel to report, but the
 child process is running, and nothing above this function knows about it yet.
+The last test here holds a private lock of [[Popen]], since that is the state an
+interruption leaves it in and nothing else can bring it about on demand.
 
 <<test functions>>=
 class _StartingSsh:
@@ -718,6 +726,54 @@ def test_expose_ssh_stops_the_child_when_interrupted_during_the_wait(
         expose_ssh(8080, "alice@example.test:9000")
 
     assert process.terminated
+
+
+def test_expose_ssh_stops_the_child_when_interrupted_starting_the_reader(
+    monkeypatch,
+):
+    process = _StartingSsh(
+        wait_failure=public_module.subprocess.TimeoutExpired(["ssh"], 1)
+    )
+
+    class InterruptedThread:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        public_module.subprocess, "Popen", lambda *_args, **_kwargs: process
+    )
+    monkeypatch.setattr(
+        public_module.socket,
+        "create_connection",
+        lambda _address, timeout: io.StringIO(""),
+    )
+    monkeypatch.setattr(public_module.threading, "Thread", InterruptedThread)
+
+    with pytest.raises(KeyboardInterrupt):
+        expose_ssh(8080, "alice@example.test:9000")
+
+    assert process.terminated
+
+
+def test_stopping_ssh_cannot_hang_on_a_lock_an_interruption_left(monkeypatch):
+    monkeypatch.setattr(public_module, "SSH_SHUTDOWN_TIMEOUT", 0.1)
+    process = public_module.subprocess.Popen(["sleep", "60"])
+    process._waitpid_lock.acquire()
+    stopping = threading.Thread(
+        target=public_module._stop_ssh_process, args=(process,), daemon=True
+    )
+    try:
+        stopping.start()
+        stopping.join(30)
+
+        assert not stopping.is_alive()
+    finally:
+        process._waitpid_lock.release()
+        process.kill()
+        process.wait()
 
 
 def test_expose_ssh_stops_the_child_when_interrupted_during_the_probe(
@@ -984,6 +1040,7 @@ def test_an_interrupted_address_lookup_removes_the_mapping(monkeypatch):
 import io
 import logging
 import sys
+import threading
 import types
 
 import mentipy.public as public_module

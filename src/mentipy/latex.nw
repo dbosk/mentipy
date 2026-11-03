@@ -1431,14 +1431,16 @@ start owns the record, and when it stops an earlier one that still runs is not
 recorded again; a build then falls back until that server restarts.
 
 Ctrl-C, a plain [[kill]], a closed terminal and an error all count as stopping
-(\cref{sec:stop-signals}).  Only a server that cannot run any code on its way out
-leaves its record behind: [[kill -9]], a power cut, or a cleanup that reaches the
-deadline before it gets this far.  The record then stays until the next start of a
-server overwrites it, or the file or the QR directory is removed, and builds
+(\cref{sec:stop-signals}).  Only a server that runs no code on its way out
+leaves its record behind: [[kill -9]], Ctrl-\textbackslash{} or a power cut.
+The deadline on a stop does not, as the record goes before the exposure, where
+a stop can hang.  The record then stays until the next start of a server
+overwrites it, or the file or the QR directory is removed, and builds
 meanwhile print the dead address without a word about it.  We accept that.  It
-gives the old behaviour of a wrong address until the next start, which is no worse
-than the configuration being out of date, and a build that had to ask whether the
-server is alive would depend on a network that may be down for other reasons.
+gives the old behaviour of a wrong address until the next start, which is no
+worse than the configuration being out of date, and a build that had to ask
+whether the server is alive would depend on a network that may be down for
+other reasons.
 
 <<test functions>>=
 def _addresses_in_sidecars(directory):
