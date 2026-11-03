@@ -7477,9 +7477,27 @@ may it reach a handler on the root logger, here pytest's capture,
 which a user's logging configuration could have put there.  Afterwards
 the [[mentipy]] logger is as it was.
 
+Each dropped request runs on in its own thread, rendering the page before
+its write fails, and the server's shutdown does not wait for such daemon
+threads.  The logger is global, so a thread that outlives the test logs into
+whatever handler is there by then.  This used to be a real failure: the test
+waited half a second, and under load the threads were still rendering when
+the next test started, so their warnings raised that test's exact warning
+count in its banner.  Waiting a longer time would only move the failure to a
+slower machine, so [[_drop_connections]] waits for the threads themselves.
+The server accepts connections in order and starts each thread as it accepts,
+so once a complete request made after the dropped ones has been answered,
+every dropped request that will ever get a thread has one.  We can then join
+those threads, by comparing with the threads running at the start.  The time
+limit only keeps a bug from hanging the suite.
+
 <<test functions>>=
+REQUEST_THREADS_LIMIT = 300
+
+
 def _drop_connections(server, path, *, attempts=40):
     parts = urllib.parse.urlsplit(server)
+    running_before = set(threading.enumerate())
     for _ in range(attempts):
         connection = socket.create_connection(
             (parts.hostname, parts.port), timeout=5
@@ -7491,6 +7509,15 @@ def _drop_connections(server, path, *, attempts=40):
             socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
         )
         connection.close()
+    last = http.client.HTTPConnection(
+        parts.hostname, parts.port, timeout=REQUEST_THREADS_LIMIT
+    )
+    last.request("GET", "/")
+    last.getresponse().read()
+    last.close()
+    for thread in set(threading.enumerate()) - running_before:
+        thread.join(REQUEST_THREADS_LIMIT)
+        assert not thread.is_alive()
 
 
 def test_present_keeps_server_warnings_in_the_banner(
@@ -7510,15 +7537,10 @@ def test_present_keeps_server_warnings_in_the_banner(
     store._write(data)
     short = store.register(MCQuestion("Pick one", ("A", "B")))
     monkeypatch.setattr("mentipy.cli.CLEAR_SCREEN", "[clear]")
-    real_sleep = time.sleep
-
-    def drop_then_wait():
-        _drop_connections(server, f"/{long}/results?window=all")
-        real_sleep(0.5)
 
     _play_the_lecture(
         monkeypatch,
-        drop_then_wait,
+        lambda: _drop_connections(server, f"/{long}/results?window=all"),
         lambda: _open_for_the_room(server, short),
     )
 

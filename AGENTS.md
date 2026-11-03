@@ -39,6 +39,7 @@
 - The manual uses PythonTeX with `poetry run python3` (`doc/Makefile`). If documentation examples depend on runtime code, prefer verifying with `make -C doc mentipy.tex` or `mentipy.pdf` rather than assuming plain LaTeX is enough.
 - PythonTeX caches per-block stdout in `doc/pythontex-files-*/`. Adding or removing `pycode`/`pyblock` blocks shifts block numbering and can leave stale cached outputs bound to the wrong `\saveprintpythontex{...}` names, which usually surfaces as a "Missing $ inserted" error on an underscore identifier in some unrelated block. Run `make -C doc clean` before `make -C doc mentipy.pdf` whenever you insert or delete a Python block in `doc/mentipy.nw`.
 - `make test` depends on `compile`, so root-level tests regenerate package outputs before running `pytest`.
+- `server.shutdown()` doesn't wait for request threads (they are daemon threads), and the `mentipy` logger is global. A test whose request thread logs after the test has ended raises the next test's banner warning count. `_drop_connections` in `cli.nw` shows how to wait for the threads themselves instead of sleeping.
 - Runtime state file `mentipy.json` is ignored at the repo root. Do not commit it.
 
 ## Cross-cutting touchpoints when adding a question type or helper
