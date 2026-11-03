@@ -2583,11 +2583,9 @@ def _local_start_lines(
 def _address_line(address: str, count: int, *, always: bool = False) -> str:
     if count == 0 and not always:
         return address
-    return (
-        f"{address}\n"
-        f"Regenerated {count} QR codes; recompile your slides so "
-        "they embed the new images."
-    )
+    return f"{address}\nRegenerated {count} QR codes; {RECOMPILE_ADVICE}"
+<<constants>>=
+RECOMPILE_ADVICE = "recompile your slides so they embed the new images."
 @
 
 Regeneration may warn that it skipped QR codes of another checkout or
@@ -3122,6 +3120,7 @@ def _present_runner(
         server = create_server(store, host, port, **options)
     banner = _PresentBanner(lines)
     server_url = _server_url_for(host, server.server_address[1])
+    slides = None
     with _logging_into(banner):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -3138,7 +3137,7 @@ def _present_runner(
                     options.get("admin_token"),
                 )
             if slides_command is not None:
-                _start_slides(slides_command, store, banner)
+                slides = _start_slides(slides_command, store, banner)
             typer.echo(str(banner))
             console = _result_console()
             _follow_active_question(
@@ -3160,6 +3159,7 @@ def _present_runner(
             server.shutdown()
             thread.join()
             server.server_close()
+            _say_if_slides_still_run(slides, slides_command)
 @
 
 \paragraph{Opening the browser.}
@@ -3344,18 +3344,31 @@ lecture: the slides are already showing, [[present]] cannot tell, and a second r
 would open a second viewer.
 
 The command is detached like the browser, for the same reasons, so [[present]]
-does not wait for it and a Ctrl-C does not take the slides off the projector.  It
-differs in two ways.  Its output goes to a log in the QR directory beside the
-store instead of the null device, because the build is the kind of command whose
-output somebody will need.  The log is appended to, with a line for each run,
-since a restart may find the previous command still writing to it; if it cannot
-be written, the slides matter more than the log, so the command runs without one.
-And the command is watched for failure.  A working command runs for a long time
-and a failing one may too, since a build takes a while before it fails, so its
+does not wait for it and a Ctrl-C does not take the slides off the projector.
+What that costs comes under \cref{sec:slides-left-running}.  It differs in two
+ways.  Its output goes to a log in the QR directory beside the store instead of
+the null device, because the build is the kind of command whose output somebody
+will need.  The log is appended to, with a line for each run, since a restart
+may find the previous command still writing to it; if it cannot be written, the
+slides matter more than the log, so the command runs without one.  And the
+command is watched for failure.  A working command runs for a long time and a
+failing one may too, since a build takes a while before it fails, so its
 running time says nothing.  Its exit status does, whenever it comes: a failed
 build stops the [[&&]] chain and the shell passes the status on, while quitting
-the viewer gives a zero that nobody needs to hear about.  A command that hides the
-status cannot be helped, such as one ending in [[&]], or [[make x; pdfpc x]].
+the viewer gives a zero that nobody needs to hear about.  A command that hides
+the status cannot be helped, such as one ending in [[&]], or
+[[make x; pdfpc x]].
+
+The status is all [[present]] knows, and with the shared makefiles it says less
+than it seems to.  The rule in [[makefiles/tex.mk]] runs [[latexmk]], then a
+[[;]], then [[test -f]] on the PDF, deliberately, so that a document with a
+small error still gives a PDF.  The status of [[make]] is therefore the status
+of that test.  A LaTeX error or an exception in a [[pycode]] block gives zero
+as long as any PDF is there, and one from an earlier build counts, so even a
+fatal error only fails a first build, and the [[&&]] then opens the old PDF.
+[[present]] could only do better by reading the output of a build it knows
+nothing about, so it promises nothing more, and the manual sends the lecturer
+to the log, where [[latexmk]], LaTeX and PythonTeX all report.
 
 The thread that reaps the process reads the status and changes the banner's slides
 line.  That line is its own, and not one more warning, because the warning line
@@ -3383,6 +3396,9 @@ SLIDES_COMMAND_OPTION = typer.Option(
 )
 SLIDES_LOG_FILE = "slides-command.log"
 SLIDES_THREAD_NAME = "mentipy-slides-command"
+SLIDES_REBUILD_ADVICE = (
+    "the slides command must rebuild the slides so they embed the new images."
+)
 <<functions>>=
 def _chosen_slides_command(flag: str | None) -> str | None:
     command = flag if flag is not None else get_setting(SLIDES_COMMAND_CONFIG)
@@ -3396,7 +3412,7 @@ def _chosen_slides_command(flag: str | None) -> str | None:
 
 def _start_slides(
     command: str, store: Store, banner: _PresentBanner
-) -> None:
+) -> subprocess.Popen | None:
     log_path = _slides_log_path(store)
     log = _open_slides_log(log_path, command)
     output = f"output in {log_path}" if log is not None else "no log"
@@ -3413,17 +3429,19 @@ def _start_slides(
         LOGGER.warning(
             "could not run the slides command %s: %s", command, error
         )
-        return
+        return None
     finally:
         if log is not None:
             log.close()
-    banner.slides = f"Slides: {command} ({output})"
+    banner.slides = f"Slides: {command} (pid {process.pid}, {output})"
+    banner.text = banner.text.replace(RECOMPILE_ADVICE, SLIDES_REBUILD_ADVICE)
     threading.Thread(
         target=_report_slides_exit,
         args=(process, command, output, banner),
         name=SLIDES_THREAD_NAME,
         daemon=True,
     ).start()
+    return process
 
 
 def _slides_log_path(store: Store) -> Path:
@@ -3435,7 +3453,7 @@ def _open_slides_log(log_path: Path, command: str):
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log = log_path.open("ab", buffering=0)
-        log.write(f"--- slides command: {command}\n".encode())
+        log.write(_printable(f"--- slides command: {command}\n").encode())
     except OSError as error:
         LOGGER.warning(
             "running the slides command without a log, as %s cannot be"
@@ -3458,6 +3476,68 @@ def _report_slides_exit(
         banner.slides = (
             f"Slides FAILED with status {status}: {command} ({output})"
         )
+@
+
+\paragraph{A command that outlives the server.}
+\label{sec:slides-left-running}
+Detaching the command has a price.  The record of the address goes when the
+server stops (\cref{sec:qr-regeneration}), so a build that is still going finds
+no record when it reaches a question, and it writes the configured
+[[mentipy.base_url]] into the code.  Killing the command would prevent that,
+but it would take the viewer with it, and [[present]] cannot tell the two
+apart, since all it has is the shell that runs them.  Keeping the record would
+put a dead address into every later build.  So [[present]] tells the lecturer
+instead: the banner names the pid, and on the way out a line says that the
+command is still running.  With the viewer open that is the normal end of a
+lecture, so the line says what to do only if it is still the build.  That is to
+stop the whole process group, as the shell of a [[&&]] chain does not pass a
+[[kill]] on to the [[make]] it waits for, and the command is the leader of a
+session of its own, so its pid names the group.  Then the lecturer starts
+[[present]] again.  [[--no-slides]] is no help here, since it corrects the QR
+files but not the PDF on the screen, and running the command again without
+stopping the old one gives two builds and two viewers.  Windows has no such
+group to name, so the line leaves that part out there.
+
+The line is the last thing the runner does, in its [[finally]], so it comes
+under what the watch left on the screen and every way out that unwinds passes
+it.  It starts with an empty line because the terminal has just echoed the
+[[^C]] with no newline after it.  It may have nowhere to go: a closed terminal
+fails with [[OSError]], and a closed stream or a terminal with too narrow an
+encoding with [[ValueError]].  Then nobody can read it anyway, and an exception
+here would replace the Ctrl-C on its way through and end in a traceback, so such
+a failure is dropped.
+
+A command can hold bytes that are not UTF-8, say a file name in an old
+encoding.  Python turns those into lone surrogates in the argument, and
+[[subprocess]] turns them back, so the shell gets what the lecturer typed.  A
+terminal does not take surrogates, and neither does [[encode]], so everything
+meant for reading goes through [[_printable]] first: the heading in the log,
+the line on the way out and the banner.  The banner applies it to all its text,
+as a path or a warning can carry such bytes as well.
+
+<<functions>>=
+def _say_if_slides_still_run(
+    process: subprocess.Popen | None, command: str | None
+) -> None:
+    if process is None or process.poll() is not None:
+        return
+    stop = "" if sys.platform == "win32" else f" (kill -- -{process.pid})"
+    try:
+        typer.echo(
+            _printable(
+                "\nThe slides command is still running, pid"
+                f" {process.pid}: {command}\n"
+                "If it is still building, its QR codes may get"
+                f" {BASE_URL_CONFIG}, not the address served: stop it{stop}"
+                " and start present again."
+            )
+        )
+    except (OSError, ValueError):
+        pass
+
+
+def _printable(text: str) -> str:
+    return text.encode(errors="backslashreplace").decode()
 @
 
 The watch clears the screen whenever it switches question, and on
@@ -3508,7 +3588,7 @@ class _PresentBanner(logging.Handler):
             parts.append(self.slides)
         if self.warnings:
             parts.append(f"Warnings: {self.warnings}, the last: {self.last}")
-        return "\n".join(parts)
+        return _printable("\n".join(parts))
 
 
 @contextmanager
@@ -8059,6 +8139,7 @@ class _BrowserSpy:
     waiters = []
     waited = threading.Event()
     released = threading.Event()
+    pid = 1234
 
     def __init__(self, argv, **options):
         url = next(
@@ -8077,6 +8158,9 @@ class _BrowserSpy:
         _BrowserSpy.waited.set()
         _BrowserSpy.released.wait(timeout=30)
         return 0
+
+    def poll(self):
+        return None
 
     def communicate(self, *_args, **_kwargs):
         raise AssertionError("present must not talk to the browser")
@@ -8629,6 +8713,9 @@ def _until(condition, timeout=10):
         threading.Event().wait(0.02)
 
 
+TOO_LONG_FOR_EXEC = 3_000_000  # over the limit of Linux and of macOS
+
+
 def _slides_thread_done():
     return not any(
         thread.name == mentipy.cli.SLIDES_THREAD_NAME
@@ -8684,6 +8771,74 @@ def test_slides_command_runs_with_the_server_up_and_its_address_recorded(
     assert result.exit_code == 0, result.output
     assert Path("status").read_text().strip() == "200"
     assert Path("seen").read_text().strip() == f"http://192.0.2.7:{port}"
+@
+
+That shows the order, not the point of it.  The next test goes the whole way:
+[[present]] starts a real process that registers a question through
+[[mentipy.latex]], as PythonTeX does in a build, and the address must end up in
+the QR sidecar.  Only the exposure is a stand-in, as a real one needs a router
+or an [[ssh]] server.  It has to be a public address, because a local server
+serves what the configuration says, and the test could not tell the record from
+the configuration.
+
+The other test is what happens when the lecturer stops [[present]] during the
+build.  The command goes on, as it must for the sake of the viewer, while the
+record goes, as it must for later builds.  So that build finds no record and
+writes the configured address into the codes, which is why [[present]] says the
+command is still running (\cref{sec:slides-left-running}).
+
+<<test functions>>=
+BUILD_ONE_QUESTION = (
+    f"'{sys.executable}' -c \"import mentipy.latex; from mentipy.store import"
+    " Store; mentipy.latex.mc('One?', ['Yes', 'No'],"
+    " store=Store('mentipy.json'))\" && touch done"
+)
+
+
+def _with_a_public_address(monkeypatch, url):
+    @contextmanager
+    def public_url(*_args, **_kwargs):
+        yield url
+
+    monkeypatch.setattr(mentipy.cli, "_public_url_context", public_url)
+
+
+def test_a_build_by_the_slides_command_gets_the_address_being_served(
+    tmp_path, monkeypatch
+):
+    _with_a_public_address(monkeypatch, "http://203.0.113.7:8080")
+
+    result, port = _present_with_slides(
+        tmp_path,
+        monkeypatch,
+        BUILD_ONE_QUESTION,
+        "--public",
+        steps=[lambda: _until(Path("done").exists, timeout=60)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "203.0.113.7" in _sidecar_text()
+    assert f"127.0.0.1:{port}" not in _sidecar_text()
+
+
+def test_a_build_that_outlives_present_gets_the_configured_address(
+    tmp_path, monkeypatch
+):
+    _with_a_public_address(monkeypatch, "http://203.0.113.7:8080")
+
+    result, port = _present_with_slides(
+        tmp_path,
+        monkeypatch,
+        "i=0; while [ ! -e go ] && [ $i -lt 1200 ]; do"
+        f" sleep 0.05; i=$((i+1)); done; {BUILD_ONE_QUESTION}",
+        "--public",
+    )
+    Path("go").touch()
+    _until(Path("done").exists, timeout=60)
+
+    assert result.exit_code == 0, result.output
+    assert f"127.0.0.1:{port}" in _sidecar_text()
+    assert "203.0.113.7" not in _sidecar_text()
 @
 
 Most of the time the command is still running when the lecture starts, because
@@ -8888,6 +9043,64 @@ def test_the_slides_log_is_beside_the_store_and_keeps_earlier_runs(
     assert not (elsewhere / "mentipy-obj").exists()
 @
 
+The line for the run must be in the file before the command can write to it, or
+the output of a quick command lands above its own heading.  That is a race, and
+a test of the finished log would pass nearly every time however the file was
+buffered, so this one looks at the moment of the hand-over, from a wrapper
+around the real [[Popen]].  The same wrapper shows that [[present]] does not
+hold on to the file, as the descriptor is the command's for as long as it runs.
+CPython would close a forgotten file anyway once the function returned, so the
+wrapper keeps a reference to it.
+
+<<test functions>>=
+def test_present_writes_the_log_heading_first_and_keeps_no_copy_of_the_file(
+    tmp_path, monkeypatch
+):
+    log = tmp_path / "mentipy-obj" / mentipy.cli.SLIDES_LOG_FILE
+    handed = []
+
+    def popen(*args, **kwargs):
+        handed.append((kwargs["stdout"], log.read_text()))
+        return _REAL_POPEN(*args, **kwargs)
+
+    monkeypatch.setattr("mentipy.cli.subprocess.Popen", popen)
+    monkeypatch.chdir(tmp_path)
+
+    result, _port = _run_present(
+        tmp_path,
+        monkeypatch,
+        "--no-open",
+        "--slides-command",
+        "true",
+        steps=[lambda: _until(_slides_thread_done)],
+    )
+
+    assert result.exit_code == 0, result.output
+    [(file, written)] = handed
+    assert written == "--- slides command: true\n"
+    assert file.closed
+
+
+def test_present_closes_the_log_when_the_slides_command_cannot_start(
+    tmp_path, monkeypatch
+):
+    handed = []
+
+    def popen(*args, **kwargs):
+        handed.append(kwargs["stdout"])
+        return _REAL_POPEN(*args, **kwargs)
+
+    monkeypatch.setattr("mentipy.cli.subprocess.Popen", popen)
+    monkeypatch.chdir(tmp_path)
+
+    result, _port = _run_present(
+        tmp_path, monkeypatch, "--no-open", "--slides-command", "true\0"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert handed[0].closed
+@
+
 The rule that redraws the waiting screen is limited on two sides.  An open
 question appends its answers, so a redraw would print the whole transcript again
 for every dropped connection; and the message for a server that cannot be reached
@@ -9010,7 +9223,7 @@ def test_present_runs_the_slides_command_without_a_log_if_it_must(
     assert result.exit_code == 0, result.output
     frame = result.stdout.split("[clear]")[-1]
     assert "the last: running the slides command without a log" in frame
-    assert "(no log)" in frame
+    assert re.search(r"^Slides: touch built.*\(pid \d+, no log\)$", frame, re.M)
     assert "No question is open yet" in frame
     assert Path("built").exists()
     written = capfd.readouterr()
@@ -9024,6 +9237,63 @@ def test_present_goes_on_when_the_slides_command_cannot_start(
     monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
     set_setting("slides_command", "true\0")
     monkeypatch.setattr("mentipy.cli.subprocess.Popen", _REAL_POPEN)
+
+    result, _port = _run_present(tmp_path, monkeypatch, "--no-open")
+
+    assert result.exit_code == 0, result.output
+    frame = result.stdout.split("[clear]")[-1]
+    assert "the last: could not run the slides command" in frame
+    assert "No question is open yet" in frame
+
+
+def test_present_goes_on_when_the_system_refuses_the_slides_command(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("mentipy.cli.CLEAR_SCREEN", "[clear]")
+
+    result, _port = _present_with_slides(
+        tmp_path, monkeypatch, "true " + "x" * TOO_LONG_FOR_EXEC
+    )
+
+    assert result.exit_code == 0
+    frame = result.stdout.split("[clear]")[-1]
+    assert "the last: could not run the slides command" in frame
+    assert "Argument list too long" in frame
+    assert "No question is open yet" in frame
+
+
+def test_a_slides_command_may_hold_bytes_that_are_not_utf8(
+    tmp_path, monkeypatch
+):
+    command = f"{RUNS_UNTIL_KILLED} # \udcff"
+
+    result, _port = _present_with_slides(
+        tmp_path,
+        monkeypatch,
+        command,
+        steps=[lambda: _until(Path("pid").exists)],
+    )
+
+    pid = int(Path("pid").read_text()) if Path("pid").exists() else None
+    try:
+        assert result.exit_code == 0, result.output
+        assert re.search(rf"^Slides: echo .*\(pid {pid}, ", result.stdout, re.M)
+        assert "The slides command is still running" in result.stdout
+        log = tmp_path / "mentipy-obj" / mentipy.cli.SLIDES_LOG_FILE
+        assert log.read_bytes().startswith(b"--- slides command: echo")
+    finally:
+        if pid is not None:
+            os.kill(pid, signal.SIGTERM)
+
+
+def test_a_slides_setting_that_no_encoding_can_write_is_reported(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("mentipy.cli.CLEAR_SCREEN", "[clear]")
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("slides_command", "true \ud800")
+    monkeypatch.setattr("mentipy.cli.subprocess.Popen", _REAL_POPEN)
+    monkeypatch.chdir(tmp_path)
 
     result, _port = _run_present(tmp_path, monkeypatch, "--no-open")
 
@@ -9084,11 +9354,196 @@ take a while and the lecturer should know that nothing has gone wrong yet.
 
 <<test functions>>=
 def test_present_names_the_slides_command_in_its_banner(tmp_path, monkeypatch):
-    result, _port = _present_with_slides(tmp_path, monkeypatch, "true")
+    result, _port = _present_with_slides(
+        tmp_path,
+        monkeypatch,
+        "echo $$ > pid",
+        steps=[lambda: _until(_slides_thread_done)],
+    )
 
     assert result.exit_code == 0, result.output
-    assert re.search(r"^Slides: true \(output in .*slides-command\.log\)$",
-                     result.stdout, re.M)
+    pid = int(Path("pid").read_text())
+    assert re.search(
+        rf"^Slides: echo \$\$ > pid \(pid {pid}, output in"
+        r" .*slides-command\.log\)$",
+        result.stdout,
+        re.M,
+    )
+@
+
+Stopping [[present]] leaves the command running.  Mostly that is the viewer,
+which is the point, but it may still be the build, and then its codes get the
+wrong address, so the lecturer must hear about it on the way out.  The message
+comes last, under what the watch showed, and names the process group, since the
+shell of a [[&&]] chain does not pass a [[kill]] on to the [[make]] it is
+waiting for.
+
+<<test functions>>=
+RUNS_UNTIL_KILLED = "echo $$ > pid.tmp; mv pid.tmp pid; exec sleep 20"
+
+
+def test_present_says_on_its_way_out_that_the_slides_command_still_runs(
+    tmp_path, monkeypatch
+):
+    result, _port = _present_with_slides(
+        tmp_path,
+        monkeypatch,
+        RUNS_UNTIL_KILLED,
+        steps=[lambda: _until(Path("pid").exists)],
+    )
+
+    assert result.exit_code == 0, result.output
+    pid = int(Path("pid").read_text())
+    try:
+        message = result.stdout.rindex(
+            f"The slides command is still running, pid {pid}: echo"
+        )
+        assert message > result.stdout.rindex("No question is open yet")
+        assert f"kill -- -{pid}" in result.stdout[message:]
+        assert os.getpgid(pid) == pid
+    finally:
+        os.kill(pid, signal.SIGTERM)
+
+
+def test_present_says_nothing_on_its_way_out_about_a_finished_command(
+    tmp_path, monkeypatch
+):
+    result, _port = _present_with_slides(
+        tmp_path,
+        monkeypatch,
+        "true",
+        steps=[lambda: _until(_slides_thread_done)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "still running" not in result.stdout
+@
+
+A closed terminal or a dead pipe must not turn that message into a crash.  It
+is written during the cleanup, so an exception from it would replace the Ctrl-C
+on its way through, and [[present]] would end in a traceback.  Only a real
+process with a real pipe shows that.  It also shows that the record of the
+address still goes.
+
+<<test functions>>=
+def _read_pipe_until(descriptor, text, timeout=60):
+    deadline = time.monotonic() + timeout
+    seen = b""
+    while text.encode() not in seen:
+        assert time.monotonic() < deadline, f"timed out: {seen!r}"
+        if select.select([descriptor], [], [], 0.1)[0]:
+            seen += os.read(descriptor, 4096)
+
+
+def test_present_ends_cleanly_when_its_output_has_gone(tmp_path, monkeypatch):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    monkeypatch.chdir(tmp_path)
+    port = _free_port()
+    set_setting("base_url", f"http://192.0.2.7:{port}")
+    process = _REAL_POPEN(
+        [
+            sys.executable,
+            "-c",
+            "from mentipy.cli import main; main()",
+            "present",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--store",
+            "mentipy.json",
+            "--no-open",
+            "--slides-command",
+            RUNS_UNTIL_KILLED,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        _read_pipe_until(process.stdout.fileno(), "No question is open yet")
+        process.stdout.close()
+        process.send_signal(signal.SIGINT)
+        process.wait(timeout=60)
+        errors = process.stderr.read().decode()
+    finally:
+        process.kill()
+        process.wait()
+        process.stderr.close()
+        if Path("pid").exists():
+            os.kill(int(Path("pid").read_text()), signal.SIGTERM)
+
+    assert "Traceback" not in errors, errors
+    assert _record_of_the_deck() is None
+@
+
+The other kind of failure needs no real pipe.  The process here is a stand-in,
+since all the function asks of one is whether it still runs, and that is what the
+test wants to fix.  So is the platform in the second test: only Windows can show
+that the line leaves out a [[kill]] that Windows does not have.
+
+<<test functions>>=
+_STILL_RUNNING = types.SimpleNamespace(pid=1234, poll=lambda: None)
+
+
+def test_the_line_on_the_way_out_survives_a_terminal_that_cannot_show_it(
+    monkeypatch,
+):
+    ascii_only = io.TextIOWrapper(io.BytesIO(), encoding="ascii")
+    monkeypatch.setattr(sys, "stdout", ascii_only)
+
+    mentipy.cli._say_if_slides_still_run(_STILL_RUNNING, "pdfpc förel.pdf")
+
+
+def test_the_line_on_the_way_out_names_no_kill_on_windows(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    mentipy.cli._say_if_slides_still_run(_STILL_RUNNING, "pdfpc slides.pdf")
+
+    written = capsys.readouterr().out
+    assert "still running, pid 1234: pdfpc slides.pdf" in written
+    assert "kill" not in written
+@
+
+Once the command runs, the banner should stop asking the lecturer to recompile,
+as that is what the command is for.  It may be a command that only opens a
+viewer, so the line still says that the slides need rebuilding.  A command that
+never started leaves the job with the lecturer.
+
+<<test functions>>=
+def test_the_banner_leaves_the_recompiling_to_the_slides_command(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("mentipy.cli.regenerate_qrs", lambda _store, _url: 2)
+
+    result, _port = _present_with_slides(
+        tmp_path,
+        monkeypatch,
+        "true",
+        steps=[lambda: _until(_slides_thread_done)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Regenerated 2 QR codes" in result.stdout
+    assert "recompile your slides" not in result.stdout
+    assert "the slides command must rebuild the slides" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [["--no-slides"], ["--slides-command", "true\0"], []],
+    ids=["no-slides", "cannot-start", "no-command"],
+)
+def test_the_banner_asks_for_a_recompile_without_a_running_command(
+    tmp_path, monkeypatch, extra
+):
+    monkeypatch.setattr("mentipy.cli.regenerate_qrs", lambda _store, _url: 2)
+    monkeypatch.setattr("mentipy.cli.subprocess.Popen", _REAL_POPEN)
+
+    result, _port = _run_present(tmp_path, monkeypatch, "--no-open", *extra)
+
+    assert result.exit_code == 0, result.output
+    assert "recompile your slides" in result.stdout
+    assert "still running" not in result.stdout
 @
 
 The command comes from [[--slides-command]], else from
@@ -9777,7 +10232,9 @@ import ipaddress
 import mentipy.latex
 import mentipy.network
 import os
+import select
 import signal
+import types
 import mentipy.server
 from mentipy.server import create_server
 from mentipy.store import *

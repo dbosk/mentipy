@@ -190,20 +190,40 @@ The QR codes carry the server's address, so the slides are best built once the
 server is up. `--slides-command CMD`, or the setting `mentipy.slides_command`,
 runs a shell command after the server has started, in the directory you started
 `present` in. Nothing runs if neither is set. `present` doesn't wait for it, and
-Ctrl-C leaves it running. Its output goes to `slides-command.log` in the QR
-directory beside the store, and a non-zero exit status shows in the status line,
-under an open question only at the next question. Join the steps with `&&`, since
-`make x; pdfpc x` or a trailing `&` hides the status. When you restart `present`
-during a lecture, add `--no-slides`, or it opens a second viewer:
+its output goes to `slides-command.log` in the QR directory beside the store.
+When you restart `present` during a lecture, add `--no-slides`, or it opens a
+second viewer:
 
 ```sh
 mentipy config mentipy.slides_command --set "make slides.pdf && pdfpc -w both slides.pdf"
 mentipy present --slides-command "make slides-intro.pdf && pdfpc -w both slides-intro.pdf"
 ```
 
-For this to pick up a new address, `make` must know the PDF depends on the QR
-codes, or it finds the PDF up to date and the viewer shows the old ones. A deck's
-Makefile says so with `slides.pdf: $(wildcard mentipy-obj/Q-*.pdf_tex)`.
+For this to pick up a new address, two things must hold:
+
+- `make` must know the PDF depends on the QR codes, or it finds the PDF up to date
+  and the viewer shows the old ones. A deck's Makefile says so with
+  `slides.pdf: $(wildcard mentipy-obj/Q-*.pdf_tex)`.
+- The Mentipy in the deck's own `.venv` must be 1.0 or newer, because that is the
+  one writing the QR codes in a build. An older one writes `mentipy.base_url`
+  whatever the server serves. `mentipy init` in the deck upgrades it.
+
+`present` knows only the command's exit status. A non-zero status shows in the
+status line, under an open question only at the next question. Join the steps with
+`&&`, since `make x; pdfpc x` or a trailing `&` hides the status. A zero doesn't
+mean the build worked. The rule in the shared `makefiles/tex.mk` succeeds whenever
+a PDF exists, and one from an earlier build counts. So after a LaTeX error or an
+exception in a `pycode` block no failure shows, and the viewer opens that PDF. If
+the slides look out of date, read `slides-command.log`, where the errors are.
+
+Ctrl-C leaves the command running, so the viewer stays open. The status line names
+its pid, and `present` says on its way out if it's still running. That's normal
+with a viewer open. A build that's still running is another matter: the served
+address goes when `present` stops, so that build writes `mentipy.base_url` into
+the QR codes. To recover, stop it with `kill -- -PID`, since a plain `kill` leaves
+`make` running, and start `present` again with the command. `--no-slides` corrects
+the QR files but not the PDF on the screen, and starting the command again without
+stopping the old one gives two builds and two viewers.
 
 Use `--results` when respondents should land on the live results page after
 submitting an answer:
