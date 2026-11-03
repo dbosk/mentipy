@@ -120,9 +120,9 @@ starts with a dot, so that a shell pattern like [[Q-*.pdf]] does not match it.
 A random part keeps writers apart.  The store's process number would not do
 here, since threads of one process write QR files too, and a deck directory can
 be on a file system shared between machines.  The price is that a process killed
-between the two steps leaves its file behind for good, while a process number
-would let a later process recognise it.  That window is short, and the file is
-small and harmless.
+before the move leaves its file behind for good, while a process number would
+let a later process recognise it.  That window is short, and the file is small
+and harmless.
 
 The target's symbolic links are resolved first, as [[os.replace]] would replace
 the link instead of writing through it.  Replacing does need one permission that
@@ -372,8 +372,8 @@ slides and pages use should be stable, whatever the time; otherwise a rebuild
 alone would create needless file churn.  The test moves the clock between the
 two writes instead of waiting for it: two writes in one second would agree even
 with a date in the file.  The clock is the one thing here we cannot make real,
-and it is [[segno]]'s present clock only, so this test cannot see a date from any
-other source.
+and it is [[segno]]'s present clock only, so this test cannot see a date from
+any other source.
 
 <<test functions>>=
 @pytest.mark.parametrize("fmt", ["pdf", "png", "svg"])
@@ -391,8 +391,9 @@ table has to sit where [[startxref]] says, and each entry in it has to point at
 its object, which fails if the blanking ever changes the length of the file.
 Whatever replaces the date has to be white space, as anything else corrupts the
 dictionary, so the test checks that only white space separates the start of the
-dictionary from its [[/Producer]].  And the key must be gone: that is what notices
-a date written in a way the pattern misses, whichever clock it comes from.
+dictionary from its [[/Producer]].  And the key must be gone: that is what
+notices a date written in a way the pattern misses, whichever clock it comes
+from.
 
 <<test functions>>=
 def test_make_qr_keeps_the_pdf_offsets_right(tmp_path):
@@ -406,6 +407,16 @@ def test_make_qr_keeps_the_pdf_offsets_right(tmp_path):
         assert pdf[int(offset):].startswith(b"%d 0 obj" % number)
     assert b"CreationDate" not in pdf
     assert re.search(rb"5 0 obj <<\s+/Producer\(", pdf)
+@
+
+The format comes from the extension whatever its case, so the date goes there
+too.
+
+<<test functions>>=
+def test_make_qr_blanks_the_date_whatever_the_extension_looks_like(tmp_path):
+    pdf = make_qr("http://localhost:8080/abcd", tmp_path / "Q.PDF").read_bytes()
+
+    assert b"CreationDate" not in pdf
 @
 
 \subsection{Writing the image whole}
@@ -602,7 +613,8 @@ def test_make_qr_removes_its_temporary_file_when_the_last_step_fails(tmp_path):
 The temporary file must not change which formats work, so every format
 [[segno]] accepts together with a scale gives what [[segno]] itself would write.
 [[segno]] cannot write all of them to a stream, which is why the temporary file
-is a path and not a buffer.  The clock is fixed because some of them hold a date.
+is a path and not a buffer.  The clock is fixed because some of them hold a
+date.
 
 <<test functions>>=
 @pytest.mark.parametrize(

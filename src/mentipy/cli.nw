@@ -5610,7 +5610,13 @@ does, by a local request for its results page.  The clock is the only
 thing replaced: the sleep stub plays the lecture, one step per tick,
 and interrupts the watcher once the steps run out.
 
+The tests' clients get a long time limit, because it only keeps a bug from
+hanging the suite and says nothing about how fast the server should be.
+
 <<test functions>>=
+CLIENT_LIMIT = 300
+
+
 @contextmanager
 def _serving(store, *, port=0, **options):
     server = create_server(store, host="127.0.0.1", port=port, **options)
@@ -5627,7 +5633,7 @@ def _serving(store, *, port=0, **options):
 def _open_for_the_room(server, prefix, headers=None):
     parts = urllib.parse.urlsplit(server)
     connection = http.client.HTTPConnection(
-        parts.hostname, parts.port, timeout=5
+        parts.hostname, parts.port, timeout=CLIENT_LIMIT
     )
     connection.request("GET", f"/{prefix}/results", headers=headers or {})
     response = connection.getresponse()
@@ -7488,19 +7494,15 @@ slower machine, so [[_drop_connections]] waits for the threads themselves.
 The server accepts connections in order and starts each thread as it accepts,
 so once a complete request made after the dropped ones has been answered,
 every dropped request that will ever get a thread has one.  We can then join
-those threads, by comparing with the threads running at the start.  The time
-limit only keeps a bug from hanging the suite.
+those threads, by comparing with the threads running at the start.
 
 <<test functions>>=
-REQUEST_THREADS_LIMIT = 300
-
-
 def _drop_connections(server, path, *, attempts=40):
     parts = urllib.parse.urlsplit(server)
     running_before = set(threading.enumerate())
     for _ in range(attempts):
         connection = socket.create_connection(
-            (parts.hostname, parts.port), timeout=5
+            (parts.hostname, parts.port), timeout=CLIENT_LIMIT
         )
         connection.sendall(
             f"GET {path} HTTP/1.1\r\nHost: x\r\n\r\n".encode()
@@ -7510,13 +7512,13 @@ def _drop_connections(server, path, *, attempts=40):
         )
         connection.close()
     last = http.client.HTTPConnection(
-        parts.hostname, parts.port, timeout=REQUEST_THREADS_LIMIT
+        parts.hostname, parts.port, timeout=CLIENT_LIMIT
     )
     last.request("GET", "/")
     last.getresponse().read()
     last.close()
     for thread in set(threading.enumerate()) - running_before:
-        thread.join(REQUEST_THREADS_LIMIT)
+        thread.join(CLIENT_LIMIT)
         assert not thread.is_alive()
 
 
@@ -7595,7 +7597,9 @@ def test_present_keeps_unexpected_server_errors_in_the_banner(
     monkeypatch.setattr(mentipy.server, "_render_index", broken_index)
 
     def ask_for_the_index():
-        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", port, timeout=CLIENT_LIMIT
+        )
         connection.request("GET", "/")
         with pytest.raises(http.client.HTTPException):
             connection.getresponse()
@@ -7846,7 +7850,7 @@ since it reads the marker header and never the page's words.
 def _page(server, path):
     parts = urllib.parse.urlsplit(server)
     connection = http.client.HTTPConnection(
-        parts.hostname, parts.port, timeout=5
+        parts.hostname, parts.port, timeout=CLIENT_LIMIT
     )
     connection.request("GET", path)
     body = connection.getresponse().read().decode("utf-8")
@@ -8024,7 +8028,7 @@ def test_present_reaps_the_opener_in_another_thread(
     result, _port = _run_present(tmp_path, monkeypatch)
 
     assert result.exit_code == 0, result.output
-    assert _BrowserSpy.waited.wait(timeout=5)
+    assert _BrowserSpy.waited.wait(timeout=CLIENT_LIMIT)
     assert len(_BrowserSpy.waiters) == 1
     assert _BrowserSpy.waiters[0] is not threading.main_thread()
     assert _BrowserSpy.waiters[0].daemon
@@ -8107,7 +8111,7 @@ def test_present_opens_a_wildcard_or_localhost_bind(
 def _page_status(url):
     parts = urllib.parse.urlsplit(url)
     connection = http.client.HTTPConnection(
-        parts.hostname, parts.port, timeout=5
+        parts.hostname, parts.port, timeout=CLIENT_LIMIT
     )
     connection.request("GET", parts.path or "/")
     response = connection.getresponse()
@@ -8369,7 +8373,7 @@ def test_present_opens_the_tokenised_index_under_ssh(
     def follow_the_link():
         parts = urllib.parse.urlsplit(browser_spy[0]["argv"][-1])
         connection = http.client.HTTPConnection(
-            parts.hostname, parts.port, timeout=5
+            parts.hostname, parts.port, timeout=CLIENT_LIMIT
         )
         connection.request("GET", f"{parts.path}?{parts.query}")
         response = connection.getresponse()
