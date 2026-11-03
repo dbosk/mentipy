@@ -5590,12 +5590,39 @@ def do_POST(self):
         )
         return
 
-    store.record(full_hash, value)
+    <<record the answer or say that it was not saved>>
     prefix = store.metadata(full_hash)["url_prefix"]
     if _results_public(question, public_results):
         self._redirect(f"/{prefix}/results")
         return
     self._redirect(f"/{prefix}/thanks")
+@
+
+An answer can fail to reach its log: the disk is full, or someone changed the file's
+permissions during the lecture.  The respondent must then not be thanked, and must not
+get the closed connection of a failed request either, which looks like a bad network and
+invites nothing but trying again.  The page says what happened and that the lecturer has
+to hear about it, since only the lecturer can do anything.  The file's name and the
+error are for the lecturer's log, which never gets the answer itself.
+
+<<record the answer or say that it was not saved>>=
+try:
+    store.record(full_hash, value)
+except OSError as error:
+    LOGGER.error(
+        "cannot record an answer in %s: %s", store.answer_log(), error
+    )
+    not_saved = self.catalogue("error.not_saved")
+    self._send(
+        HTTPStatus.INTERNAL_SERVER_ERROR,
+        _page(
+            not_saved,
+            not_saved,
+            f"<p>{escape(self.catalogue('error.not_saved_body'))}</p>",
+            catalogue=self.catalogue,
+        ),
+    )
+    return
 @
 
 Once the server has started it has no reason to write the store: answers go to
@@ -5624,6 +5651,7 @@ def test_a_lecture_leaves_the_store_file_alone(tmp_path):
             ("GET", f"/{first}/next"),
             ("GET", f"/{second}/results"),
             ("GET", f"/{second}/results.json"),
+            ("GET", f"/{first}/thanks"),
         ):
             response, _ = _request(port, method, route)
             assert response.status < 400, route
@@ -5636,25 +5664,183 @@ def test_a_lecture_leaves_the_store_file_alone(tmp_path):
     assert store.results(store.resolve(first))["total"] == 1
 @
 
-An answer that could not be written must not look like one that was.  A directory
-in the log's place makes the write fail for real, and the respondent gets the
-closed connection of any failed request, with the reason in the lecturer's log,
-rather than the redirect to the thank-you page.
+An answer that could not be written must not look like one that was.  The log breaks
+for real while the server runs, in the two ways that are easy to come by, and the
+respondent has to get the page instead of a thank-you or a results page, also where
+results are public.  Once the log is mended, sending the answer again counts it once.
+A read-only file means nothing to root, so that case needs another user.
 
 <<test functions>>=
-def test_an_answer_that_cannot_be_written_is_no_success(tmp_path, caplog):
+RUNNING_AS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+def _break_the_log(log, how):
+    if how == "directory":
+        log.mkdir()
+    elif how == "read-only":
+        log.touch()
+        log.chmod(0o444)
+    else:
+        log.parent.chmod(0o500)
+
+
+def _mend_the_log(log, how):
+    if how == "directory":
+        log.rmdir()
+    elif how == "read-only":
+        log.chmod(0o644)
+    else:
+        log.parent.chmod(0o700)
+
+
+@pytest.mark.parametrize("public_results", [False, True])
+@pytest.mark.parametrize(
+    "how",
+    [
+        "directory",
+        pytest.param(
+            "read-only",
+            marks=pytest.mark.skipif(RUNNING_AS_ROOT, reason="root ignores it"),
+        ),
+    ],
+)
+def test_an_answer_that_cannot_be_written_is_no_success(
+    tmp_path, caplog, how, public_results
+):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(OpenQuestion("Comment?"))
-    store.answer_log().mkdir()
+    full_hash = store.resolve(prefix)
     form = {"Content-Type": "application/x-www-form-urlencoded"}
 
-    with _running_server(store, lock=False) as port:
-        with pytest.raises((http.client.HTTPException, ConnectionError)):
-            _request(
-                port, "POST", f"/{prefix}", body="value=An+answer", headers=form
-            )
+    with _running_server(
+        store, lock=False, public_results=public_results
+    ) as port:
+        _break_the_log(store.answer_log(), how)
+        response, page = _request(
+            port, "POST", f"/{prefix}", body="value=Private+text", headers=form
+        )
+        _mend_the_log(store.answer_log(), how)
+        retried, _ = _request(
+            port, "POST", f"/{prefix}", body="value=Private+text", headers=form
+        )
 
-    assert "unexpected error while handling request" in caplog.text
+    assert response.status == HTTPStatus.INTERNAL_SERVER_ERROR
+    assert response.getheader("Location") is None
+    assert "Answer not saved" in page
+    assert "tell your lecturer" in page
+    assert str(tmp_path) not in page
+    assert "cannot record an answer" in caplog.text
+    assert str(store.answer_log()) in caplog.text
+    assert "Private" not in caplog.text
+    assert retried.status == HTTPStatus.SEE_OTHER
+    assert store.results(full_hash)["total"] == 1
+@
+
+The server thanks a respondent only after the answer was sent to the disk.  The sync
+is held back here, with the line already in the file, and no response may arrive until
+it has finished.
+
+<<test functions>>=
+def test_a_respondent_is_answered_only_after_the_sync(tmp_path, monkeypatch):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    syncing = threading.Event()
+    go_on = threading.Event()
+    answered = threading.Event()
+    statuses = []
+
+    def held_back_sync(_descriptor):
+        syncing.set()
+        assert go_on.wait(timeout=60)
+
+    def respond():
+        response, _ = _request(
+            port, "POST", f"/{prefix}", body="value=An+answer",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        statuses.append(response.status)
+        answered.set()
+
+    monkeypatch.setattr("mentipy.store.os.fdatasync", held_back_sync)
+    with _running_server(store, lock=False) as port:
+        client = threading.Thread(target=respond)
+        client.start()
+        try:
+            assert syncing.wait(timeout=60)
+            assert store.answer_log().read_bytes().count(b"\n") == 1
+            assert not answered.wait(timeout=0.3)
+        finally:
+            go_on.set()
+            client.join(timeout=60)
+
+    assert statuses == [HTTPStatus.SEE_OTHER]
+@
+
+A lecture must not start unable to record, since the first to notice would be a
+student.  So a start with a broken log ends with an error that names the file, leaves
+the previous session alone and frees the port.  A start that is fine leaves nothing
+behind: no empty log in a deck that never got an answer, and a log that exists stays
+as it was.
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    "how",
+    [
+        "directory",
+        pytest.param(
+            "read-only",
+            marks=pytest.mark.skipif(RUNNING_AS_ROOT, reason="root ignores it"),
+        ),
+        pytest.param(
+            "read-only directory",
+            marks=pytest.mark.skipif(RUNNING_AS_ROOT, reason="root ignores it"),
+        ),
+    ],
+)
+def test_a_server_does_not_start_unable_to_record(tmp_path, how):
+    store = Store(tmp_path / "deck" / "mentipy.json", min_prefix=4)
+    store.register(OpenQuestion("Comment?"))
+    before = store.path.read_bytes()
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    _break_the_log(store.answer_log(), how)
+
+    try:
+        with pytest.raises(AnswerLogError) as failure:
+            create_server(store, host="127.0.0.1", port=port)
+        assert store.path.read_bytes() == before
+    finally:
+        _mend_the_log(store.answer_log(), how)
+
+    assert str(store.answer_log()) in str(failure.value)
+    server = create_server(store, host="127.0.0.1", port=port)
+    server.server_close()
+
+
+def test_a_server_start_leaves_the_log_as_it_finds_it(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(OpenQuestion("Comment?")))
+
+    create_server(store, host="127.0.0.1", port=0).server_close()
+
+    assert not store.answer_log().exists()
+
+    store.record(full_hash, "an answer")
+    before = store.answer_log().read_bytes()
+
+    create_server(store, host="127.0.0.1", port=0).server_close()
+
+    assert store.answer_log().read_bytes() == before
+
+
+def test_a_start_does_not_mind_a_directory_the_store_will_create(tmp_path):
+    store = Store(tmp_path / "new" / "mentipy.json", min_prefix=4)
+
+    create_server(store, host="127.0.0.1", port=0).server_close()
+
+    assert store.path.exists()
 @
 
 The lecturer's Skip button posts to [[/<prefix>/skip]].  Unlike an
@@ -5746,6 +5932,9 @@ marked, the test servers included, so they exercise the same default.
 The mark comes after the bind, so a server that never got its port
 leaves the previous session alone, and a mark that fails closes the
 socket before the error reaches the caller, so the port is free again.
+The start also tests that the answer log can be written, before the mark
+for the same reason: a lecture must not start unable to record, with the
+first student the first to notice.
 
 <<functions>>=
 
@@ -5765,7 +5954,8 @@ def create_server(
 ) -> ThreadingHTTPServer:
     """Return a configured mentipy HTTP server.
 
-    Records the start of the server session in ``store``.
+    Records the start of the server session in ``store``.  Raises
+    `AnswerLogError` if answers could not be written to its log.
     """
 
     server = ThreadingHTTPServer(
@@ -5783,6 +5973,7 @@ def create_server(
         ),
     )
     try:
+        store.check_answer_log()
         store.mark_server_start()
     except BaseException:
         server.server_close()
@@ -5962,6 +6153,13 @@ def test_a_swedish_server_speaks_swedish_on_every_page(tmp_path, chosen_by):
             ("reopen", "POST", f"{target}/reopen"),
         ]:
             pages[f"refused {name}"] = _request(port, method, path)[1]
+        switch["remote"] = False
+        store.answer_log().unlink()
+        store.answer_log().mkdir()
+        pages["not saved"] = _request(
+            port, "POST", f"/{prefixes[2]}", body="value=svar",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )[1]
 
     for name, page in pages.items():
         assert '<html lang="sv">' in page, name
@@ -6013,6 +6211,8 @@ def test_a_swedish_server_speaks_swedish_on_every_page(tmp_path, chosen_by):
         "Tack, ditt svar är registrerat.",
         "Ogiltigt svar",
         "välj exakt ett alternativ",
+        "Svaret sparades inte",
+        "Säg till din lärare.",
         "Överhoppad: frågan är stängd för deltagarna.",
         "Öppna igen",
         "överhoppad",

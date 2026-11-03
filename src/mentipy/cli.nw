@@ -68,6 +68,7 @@ from mentipy.questions import bin_pins, pin_heat_color, smooth_pin_grid
 from mentipy.public import PublicExposureError, PublicMode, expose
 from mentipy.server import serve as serve_http
 from mentipy.store import (
+    AnswerLogError,
     BASE_URL_CONFIG,
     config_path,
     DEFAULT_HOST,
@@ -2471,7 +2472,7 @@ def _serve_runner(
 ):
     for line in lines:
         typer.echo(line)
-    with _reporting_bind_errors(host, port):
+    with _reporting_bind_errors(host, port), _reporting_unwritable_log():
         serve_http(store, host, port, **options)
 @
 
@@ -2545,6 +2546,20 @@ def _is_bind_error(error: OSError) -> bool:
     if isinstance(error, socket.gaierror):
         return True
     return error.filename is None and error.errno in BIND_ERRNOS
+@
+
+An answer log that cannot be written (\cref{sec:answer-log}) is the other start-up
+failure with a known cause, and the lecturer can fix it in a moment given the file's
+name.  It is an [[OSError]] like the others, so this guard sits inside the one above.
+
+<<functions>>=
+@contextmanager
+def _reporting_unwritable_log():
+    try:
+        yield
+    except AnswerLogError as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(code=1) from error
 @
 
 The local start-up lines keep two behaviours of the old inline code.
@@ -2941,6 +2956,35 @@ def _start_public(monkeypatch, url):
         public=PublicMode.upnp, results=True, lock=False, locale=None,
         runner=mentipy.cli._serve_runner,
     )
+
+
+@
+
+A server writes the store once, at its start, and never again, including when it stops:
+that is what makes a build running during a lecture harmless to it, and the other way
+round.  [[test_a_lecture_leaves_the_store_file_alone]] covers the routes; this test covers
+what surrounds them, up to the moment the runner has ended.
+
+<<test functions>>=
+@pytest.mark.parametrize("public", [False, True], ids=["local", "public"])
+def test_a_server_run_does_not_write_the_store_after_its_start(
+    tmp_path, monkeypatch, public
+):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    _rebuild()
+    while_serving = []
+    _while_serving(
+        monkeypatch,
+        lambda: while_serving.append(Path("mentipy.json").read_bytes()),
+    )
+
+    if public:
+        _start_public(monkeypatch, "http://203.0.113.7:8080")
+    else:
+        _start_local()
+
+    assert len(while_serving) == 1
+    assert Path("mentipy.json").read_bytes() == while_serving[0]
 
 
 def test_a_rebuild_keeps_the_public_address_of_the_server(
@@ -3369,7 +3413,7 @@ def _present_runner(
     on_bound=None,
     **options,
 ):
-    with _reporting_bind_errors(host, port):
+    with _reporting_bind_errors(host, port), _reporting_unwritable_log():
         server = create_server(store, host, port, **options)
     banner = _PresentBanner(lines)
     server_url = _server_url_for(host, server.server_address[1])
@@ -7784,8 +7828,16 @@ def test_present_keeps_server_warnings_in_the_banner(
     set_setting("base_url", server)
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     long = store.register(OpenQuestion("Comment?"))
-    for _ in range(1501):
-        store.record(store.resolve(long), "an answer " * 10)
+    # Straight into the log: 1501 appends that each reach the disk would only
+    # slow the test down, which has to make the page large.
+    line = json.dumps(
+        {
+            "hash": store.resolve(long),
+            "ts": "2026-01-01T10:00:00Z",
+            "value": "an answer " * 10,
+        }
+    )
+    store.answer_log().write_text(f"{line}\n" * 1501, encoding="utf-8")
     short = store.register(MCQuestion("Pick one", ("A", "B")))
     monkeypatch.setattr("mentipy.cli.CLEAR_SCREEN", "[clear]")
     real_sleep = time.sleep
@@ -7979,6 +8031,46 @@ def test_a_taken_port_ends_the_command_with_one_line(
         f"cannot listen on 127.0.0.1:{port}: Address already in use"
         in result.output
     )
+    assert "Traceback" not in result.output
+    assert "No question is open yet" not in result.output
+@
+
+A log that no answer could be written to ends a start the same way, with one line and
+no traceback, naming the file, and [[present]] never starts the watch.
+
+<<test functions>>=
+@pytest.mark.parametrize("command", ["serve", "present"])
+def test_a_start_with_a_log_it_cannot_write_reports_it(
+    tmp_path, monkeypatch, command
+):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("base_url", "http://127.0.0.1:8080")
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    store.register(OpenQuestion("Comment?"))
+    store.answer_log().mkdir()
+    # Neither command may get as far as this; if one does, it must end anyway.
+    _play_the_lecture(monkeypatch)
+    if command == "serve":
+        monkeypatch.setattr(
+            "mentipy.server.ThreadingHTTPServer.serve_forever",
+            lambda _server: None,
+        )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            command,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(_free_port()),
+            "--store",
+            str(store.path),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert f"cannot record answers in {store.answer_log()}" in result.output
     assert "Traceback" not in result.output
     assert "No question is open yet" not in result.output
 @

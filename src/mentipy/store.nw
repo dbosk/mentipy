@@ -692,9 +692,15 @@ message anywhere, and since the lock can be taken by anyone who can read the
 directory, another user on a shared machine could cause the same.  So the wait ends
 after [[STORE_LOCK_WAIT]] seconds with a warning, and the write goes ahead without the
 lock.  This has a price: if the stopped process goes on, it writes back what it read
-before it stopped, and what was registered meanwhile is lost.  We take that over a
-hang, because a stopped build usually stays stopped or gets killed, which frees the
-lock, and because a lost registration comes back with the next build.  One such wait
+before it stopped, and what was registered meanwhile is lost.  A question added
+meanwhile vanishes, so answers to it get a 404 until the next build restores it, when
+its earlier answers come back, as they are in the log.  A server started meanwhile
+loses its mark: [[server_started]] goes back to what the build read, the previous
+server's start or nothing, and until the next server start the session window counts
+from there, which with nothing means all answers.  No build restores that.  No answer
+is lost either way.  We take that over a hang, because a stopped build usually stays
+stopped or gets killed, which frees the lock, and because a lost registration comes
+back with the next build.  One such wait
 is enough to learn that the lock is stuck, so until it is free again each later write
 tries just once; otherwise each question of a build would wait out the five seconds in
 turn.  The wait polls, since a blocking [[flock]] cannot time out, and through an
@@ -4289,8 +4295,8 @@ back, so each could undo the other.  A lock lets them take turns, but only among
 who take it: an older Mentipy in a deck's environment does not, and a stopped build
 holds it past any reasonable wait, after which the writer has to go ahead anyway.  No
 better lock closes those two holes.  Measured at 40 answers a second against an older
-Mentipy building in a loop, 5--13\,\% of the accepted answers were gone.  So answers
-no longer share the file with anything.
+Mentipy building in a loop, roughly 5--13\,\% of the accepted answers were gone, the share
+depending on the size of the store.  So answers no longer share the file with anything.
 
 They go in a log beside the store, named from it as the images directory is:
 [[mentipy.json]] gets [[mentipy-answers.jsonl]], with one JSON object per line holding
@@ -4302,7 +4308,9 @@ things at once.
 \item[No conflict] Nothing rewrites the log, so nothing can undo an answer, and
   nothing about the store's file can delay one.  Once [[mentipy serve]] has started it
   does not write the store at all, so a build cannot undo the server's writes either.
-\item[No growing cost] An answer costs one line, however many came before it.
+\item[No growing cost] An answer costs one line, however many came before it.  The cost
+  of reading stays: results parse every line, and a store with old answers in its
+  [[answers]] key keeps most of the old cost of reading the store until those are gone.
 \item[Diffs] The store's bytes no longer change with the answers, and a repository
   that commits the log sees a lecture as added lines.
 \end{description}
@@ -4345,20 +4353,68 @@ The file is opened anew for each answer, which costs little and means a log that
 moved away is simply started over.  The mode is explicit since [[os.open]] defaults to an
 executable file.
 
+After the write the line is in the system's page cache, safe from anything that happens to
+the server but not from a kernel panic or a dead battery, and the student has not yet been
+thanked.  So we sync before returning, and the server thanks only after [[record]] has
+returned: a thank-you means the answer was sent to the disk.  The sync takes a millisecond
+or a few on ext4 on a solid-state disk where the write takes microseconds, and it stays
+outside the lock, which only has to keep the \emph{writes} in timestamp order.  Under the
+lock a room answering together would queue for the disk one at a time; outside it, syncs
+that overlap can share one journal commit.  With a real server on ext4 on an NVMe disk, 500
+answers sent at once had a 99th percentile of 343\,ms with the sync and 360\,ms without it,
+so the time goes to handling the requests and the sync does not show; a slower disk has not
+been measured.  [[fdatasync]] skips metadata that reading the line back does not need, such
+as the modification time.  It does not exist on every platform (Windows, macOS), where
+[[fsync]] does the same job, except that on macOS it leaves the drive's own cache.
+
+The first answer also creates the file, and syncing a file does not promise that its name
+is on disk, so that answer syncs the directory as well, where the system can open one.  A
+second thread appending at that moment could be thanked before the directory is synced;
+that takes a lost power supply within those milliseconds, on a file system without a
+journal, since the journalled ones commit the name along with the file.
+
+If the sync fails, the line is in the file nevertheless.  Some file systems refuse with
+[[EINVAL]], and reporting a failure would make the student send the answer again and count
+it twice, so the answer stands and the lecturer gets one warning per log.
+
 <<store methods>>=
 def _append_answer(self, full_hash: str, value: Any):
-    with _ANSWER_LOG_LOCK:
-        entry = {"hash": full_hash, "ts": _timestamp(), "value": value}
-        line = json.dumps(entry, ensure_ascii=False).encode("utf-8") + b"\n"
-        descriptor = os.open(self.answer_log(), ANSWER_LOG_FLAGS, 0o666)
-        try:
+    log = self.answer_log()
+    descriptor = os.open(log, ANSWER_LOG_FLAGS, 0o666)
+    try:
+        with _ANSWER_LOG_LOCK:
+            entry = {"hash": full_hash, "ts": _timestamp(), "value": value}
+            line = json.dumps(entry, ensure_ascii=False).encode("utf-8") + b"\n"
+            created = os.fstat(descriptor).st_size == 0
             if _ends_in_a_torn_line(descriptor):
                 line = b"\n" + line
             written = os.write(descriptor, line)
-        finally:
-            os.close(descriptor)
-    if written != len(line):
-        raise OSError(errno.EIO, "short write", str(self.answer_log()))
+        if written != len(line):
+            raise OSError(errno.EIO, "short write", str(log))
+        _sync_answer_log(descriptor, log, created=created)
+    finally:
+        os.close(descriptor)
+<<functions>>=
+def _sync_answer_log(descriptor: int, log: Path, *, created: bool):
+    try:
+        getattr(os, "fdatasync", os.fsync)(descriptor)
+        if created and hasattr(os, "O_DIRECTORY"):
+            directory = os.open(log.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+    except OSError as error:
+        if log not in _UNSYNCED_ANSWER_LOGS:
+            _UNSYNCED_ANSWER_LOGS.add(log)
+            LOGGER.warning(
+                "cannot flush %s to the disk (%s): answers are saved but a"
+                " power cut could lose the latest ones",
+                log,
+                error,
+            )
+<<constants>>=
+_UNSYNCED_ANSWER_LOGS: set[Path] = set()
 <<imports>>=
 import errno
 <<constants>>=
@@ -4448,15 +4504,50 @@ def _report_malformed_answer_line(log: Path, number: int):
 _REPORTED_ANSWER_LOGS: set[Path] = set()
 @
 
+A log that cannot be written is the server's problem at its start rather than the
+first student's, so [[create_server]] asks.  Opening
+the log as an append would, without [[O_CREAT]], catches a file that is read-only and
+a directory in its place, and it creates nothing, so a server that never gets an answer
+leaves no empty log in the deck.  Without a log we can only ask the system about the
+directory.  One that does not exist is no problem: the store's first write creates it,
+and fails with its own error if it cannot.  Nothing here can notice a disk that is about
+to fill up, which only the failing answer reveals.
+
+<<store methods>>=
+def check_answer_log(self):
+    """Raise `AnswerLogError` if an answer could not be appended to the log."""
+
+    log = self.answer_log()
+    try:
+        os.close(os.open(log, ANSWER_LOG_FLAGS & ~os.O_CREAT))
+    except FileNotFoundError:
+        if log.parent.exists() and not os.access(
+            log.parent, os.W_OK | os.X_OK
+        ):
+            raise AnswerLogError(
+                f"cannot record answers in {log}:"
+                f" {os.strerror(errno.EACCES)}"
+            ) from None
+    except OSError as error:
+        raise AnswerLogError(
+            f"cannot record answers in {log}: {error.strerror}"
+        ) from error
+<<classes>>=
+class AnswerLogError(OSError):
+    """The answer log cannot be written, so answers could not be recorded."""
+@
+
 There is no migration.  Answers already in the [[answers]] key of a store stay there for
 good and are read from there, before the log.  Moving them would mean changing two files
 with no way to do it atomically, so that a crash in between loses or doubles them, and it
 would gain nothing, as an older Mentipy may still write there anyway.  New stores do not
 get the key, and [[register]] no longer adds one.  An older Mentipy copes with that, since
 every version since the first adds the key when it is missing.  What it cannot do is read
-the log: an older [[mentipy serve]] on a newer store shows no answers from the log, though
-they are safe, and the answers it records itself go to the key, where a build can undo
-them, as one always could.
+the log.  On a newer store an older [[serve]], [[view]] and [[watch]] show none of its
+answers, so [[Responses: 0]] on a new store, and an older [[export]] writes only a CSV
+header, which overwrites a good export if sent to the same file.  This is alarming rather
+than harmful: nothing reads and rewrites the log, and an older [[serve]] records in the
+key, where a build can undo its answers as one always could, and this version reads both.
 
 Let's first pin the shape of a line and what recording leaves alone.
 
@@ -4737,6 +4828,188 @@ def test_an_answer_that_cannot_be_encoded_leaves_the_log_alone(tmp_path):
         store.record(full_hash, "lone \ud800 surrogate")
 
     assert _answer_log(tmp_path).read_bytes() == before
+@
+
+An answer is acknowledged only after it was sent to the disk.  These tests record the
+system calls on a real file, so they show the order of what we ask for: the line is in
+the file when the sync starts, and [[record]] has not returned.  They cannot show that
+the line would survive a power cut, which takes real power and a real drive, and that
+has not been tried.
+
+<<test functions>>=
+def test_an_answer_is_in_the_file_when_it_is_synced_before_record_returns(
+    tmp_path, monkeypatch
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(OpenQuestion("Comment?")))
+    log = _answer_log(tmp_path)
+    real_sync = os.fdatasync
+    lines_when_synced = []
+
+    def recording_sync(descriptor):
+        assert os.fstat(descriptor).st_ino == log.stat().st_ino
+        lines_when_synced.append(log.read_bytes().count(b"\n"))
+        real_sync(descriptor)
+
+    monkeypatch.setattr("mentipy.store.os.fdatasync", recording_sync)
+
+    store.record(full_hash, "first")
+    assert lines_when_synced == [1]
+
+    store.record(full_hash, "second")
+    assert lines_when_synced == [1, 2]
+@
+
+The first answer creates the file, and a sync of the file does not promise to keep its
+name.  So that answer syncs the directory too, and later ones do not.
+
+<<test functions>>=
+def test_only_the_answer_that_creates_the_log_syncs_the_directory(
+    tmp_path, monkeypatch
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(OpenQuestion("Comment?")))
+    real_sync = os.fsync
+    synced = []
+
+    def recording_sync(descriptor):
+        synced.append(os.fstat(descriptor).st_ino)
+        real_sync(descriptor)
+
+    monkeypatch.setattr("mentipy.store.os.fsync", recording_sync)
+
+    store.record(full_hash, "first")
+    assert synced == [tmp_path.stat().st_ino]
+
+    store.record(full_hash, "second")
+    assert synced == [tmp_path.stat().st_ino]
+@
+
+Some platforms lack [[os.fdatasync]], so there the test removes it for real and expects
+the same sync through [[os.fsync]].
+
+<<test functions>>=
+def test_a_platform_without_fdatasync_syncs_with_fsync(tmp_path, monkeypatch):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(OpenQuestion("Comment?")))
+    store.record(full_hash, "first")
+    log = _answer_log(tmp_path)
+    real_sync = os.fsync
+    lines_when_synced = []
+
+    def recording_sync(descriptor):
+        lines_when_synced.append(log.read_bytes().count(b"\n"))
+        real_sync(descriptor)
+
+    monkeypatch.delattr("mentipy.store.os.fdatasync", raising=False)
+    monkeypatch.setattr("mentipy.store.os.fsync", recording_sync)
+
+    store.record(full_hash, "second")
+
+    assert lines_when_synced == [2]
+@
+
+A sync that fails comes after a write that worked, so the answer counts.  Some file
+systems refuse [[fdatasync]] with [[EINVAL]], and reporting that to the respondent would
+make them send the answer again and count it twice.  The failure is injected, as no file
+system here refuses.  Such a file system refuses every time, hence one warning per log.
+
+<<test functions>>=
+def test_a_sync_that_fails_still_counts_the_answer_with_one_warning(
+    tmp_path, monkeypatch, caplog
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(OpenQuestion("Comment?")))
+
+    def refuse(_descriptor):
+        raise OSError(errno.EINVAL, "Invalid argument")
+
+    monkeypatch.setattr("mentipy.store.os.fdatasync", refuse)
+
+    store.record(full_hash, "first private text")
+    store.record(full_hash, "second private text")
+
+    assert _values(store, full_hash) == [
+        "first private text", "second private text"
+    ]
+    assert caplog.text.count("cannot flush") == 1
+    assert "Invalid argument" in caplog.text
+    assert str(_answer_log(tmp_path)) in caplog.text
+    assert "private" not in caplog.text
+
+
+def test_a_directory_sync_that_fails_still_counts_the_answer(
+    tmp_path, monkeypatch, caplog
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(OpenQuestion("Comment?")))
+
+    def refuse(_descriptor):
+        raise OSError(errno.EINVAL, "Invalid argument")
+
+    monkeypatch.setattr("mentipy.store.os.fsync", refuse)
+
+    store.record(full_hash, "an answer")
+
+    assert _values(store, full_hash) == ["an answer"]
+    assert caplog.text.count("cannot flush") == 1
+@
+
+A write that stops short never reaches the sync, since it raises.  And one student's slow
+disk request must not hold up the others: the sync is by far the slowest step of an
+answer, so if it ran under the lock a room answering together would queue for it one at a
+time.  So the first sync waits here while a second answer is recorded from another thread,
+which gets through the lock and into the file.
+
+<<test functions>>=
+def test_a_short_write_is_not_synced(tmp_path, monkeypatch):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(OpenQuestion("Comment?")))
+    store.record(full_hash, "first")
+    real_write = os.write
+    synced = []
+
+    def half(descriptor, data):
+        return real_write(descriptor, data[: len(data) // 2])
+
+    monkeypatch.setattr("mentipy.store.os.write", half)
+    monkeypatch.setattr("mentipy.store.os.fdatasync", synced.append)
+
+    with pytest.raises(OSError):
+        store.record(full_hash, "cut short")
+
+    assert synced == []
+
+
+def test_a_slow_sync_does_not_hold_up_other_answers(tmp_path, monkeypatch):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(OpenQuestion("Comment?")))
+    store.record(full_hash, "the file exists")
+    syncing = threading.Event()
+    go_on = threading.Event()
+    first_sync = []
+
+    def slow_first_sync(_descriptor):
+        if not first_sync:
+            first_sync.append(True)
+            syncing.set()
+            assert go_on.wait(timeout=60)
+
+    monkeypatch.setattr("mentipy.store.os.fdatasync", slow_first_sync)
+    slow = threading.Thread(target=store.record, args=(full_hash, "slow"))
+    slow.start()
+    try:
+        assert syncing.wait(timeout=60)
+        other = threading.Thread(target=store.record, args=(full_hash, "other"))
+        other.start()
+        other.join(timeout=60)
+        assert not other.is_alive()
+    finally:
+        go_on.set()
+        slow.join(timeout=60)
+
+    assert not slow.is_alive()
+    assert sorted(_values(store, full_hash)[1:]) == ["other", "slow"]
 @
 
 A bare [[mentipy watch]] shows an open question's new answers by timestamp, so an
