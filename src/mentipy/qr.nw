@@ -87,8 +87,40 @@ def make_qr(
     target = path if path.suffix else path.with_suffix(f".{fmt}")
     target.parent.mkdir(parents=True, exist_ok=True)
     segno.make(url, error=QR_ERROR_LEVEL).save(target, scale=QR_SCALE)
+    _blank_pdf_creation_date(target)
     _write_pdf_tex_sidecar(target, url, include_path=include_path)
     return target
+@
+
+The same URL must give the same bytes, and a PDF from [[segno]] does not: it
+carries a [[/CreationDate]] with the time it was written, and [[segno]] has no
+option to leave it out.  That matters because [[latexmk]] decides by content
+whether an input has changed.  We tried it: rewriting a QR PDF for the same URL
+made [[latexmk]] compile the document again, where nothing had changed.  Every
+server start and every PythonTeX run rewrites these files, so the date alone
+would make the next [[latexmk]] run compile again.  Nobody reads the date of a
+QR code, and the file's own timestamp already says when it was written.
+
+We blank the date with spaces rather than cut it out.  The PDF's cross-reference
+table records byte offsets, and the [[startxref]] offset lies after the date, so
+removing the bytes would leave the file pointing at the wrong place.  Spaces
+between two dictionary entries are valid PDF and keep every offset right.  A
+later [[segno]] that writes the date differently would slip past the pattern,
+and the determinism test below would then fail.
+
+<<imports>>=
+import re
+<<constants>>=
+PDF_CREATION_DATE = re.compile(rb"/CreationDate\(D:[^)]*\)")
+<<functions>>=
+def _blank_pdf_creation_date(image: Path):
+    if image.suffix.lower() != ".pdf":
+        return
+    image.write_bytes(
+        PDF_CREATION_DATE.sub(
+            lambda date: b" " * len(date[0]), image.read_bytes()
+        )
+    )
 @
 
 \section{The [[.pdf_tex]] sidecar}
@@ -272,14 +304,37 @@ def test_make_qr_writes_a_pdf(tmp_path):
 
 Regeneration may run several times for the same question as the public address
 changes or the document is rebuilt.  For a fixed URL, however, the artifact
-should be stable; otherwise a rebuild alone would create needless file churn.
+should be stable, whatever the time; otherwise a rebuild alone would create
+needless file churn.  The test moves the clock between the two writes instead of
+waiting for it: two writes in one second would agree even with a date in the
+file.  The clock is the one thing here we cannot make real.
 
 <<test functions>>=
-def test_make_qr_is_deterministic_for_the_same_url(tmp_path):
-    first = make_qr("http://localhost:8080/abcd", tmp_path / "first.pdf")
-    second = make_qr("http://localhost:8080/abcd", tmp_path / "second.pdf")
+@pytest.mark.parametrize("fmt", ["pdf", "png", "svg"])
+def test_make_qr_is_deterministic_for_the_same_url(tmp_path, monkeypatch, fmt):
+    url = "http://localhost:8080/abcd"
+    first = make_qr(url, tmp_path / f"first.{fmt}", fmt=fmt)
+    monkeypatch.setattr("time.strftime", lambda *_args: "20300101000000")
+    second = make_qr(url, tmp_path / f"second.{fmt}", fmt=fmt)
 
     assert first.read_bytes() == second.read_bytes()
+@
+
+Blanking must leave a PDF that a reader can still follow.  The cross-reference
+table has to sit where [[startxref]] says, and each entry in it has to point at
+its object, which fails if the blanking ever changes the length of the file.
+
+<<test functions>>=
+def test_make_qr_keeps_the_pdf_offsets_right(tmp_path):
+    pdf = make_qr("http://localhost:8080/abcd", tmp_path / "Q.pdf").read_bytes()
+
+    [table] = re.findall(rb"startxref\r\n(\d+)", pdf)
+    assert pdf[int(table):].startswith(b"xref")
+    entries = re.findall(rb"(\d{10}) 00000 n", pdf)
+    assert len(entries) == 5
+    for number, offset in enumerate(entries, start=1):
+        assert pdf[int(offset):].startswith(b"%d 0 obj" % number)
+    assert b"/Producer(" in pdf
 @
 
 The sidecar is the heart of the anti-drift contract, so the contents matter.
@@ -450,6 +505,8 @@ import pytest
 from mentipy.qr import *
 from mentipy.store import DEFAULT_QR_DIR
 from pathlib import Path
+import pytest
+import re
 
 <<test functions>>
 @
