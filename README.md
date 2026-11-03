@@ -221,8 +221,12 @@ mentipy watch --store ./mentipy.json --server http://localhost:9000
 You can pass `base_url` / `--base-url` while rendering, or store a default:
 
 ```sh
-mentipy config mentipy.base_url --set http://localhost:8080
+mentipy config mentipy.base_url --set http://polls.example.org:8080
 ```
+
+Use an address the students' phones can reach. The QR codes then use it as
+written, whatever `--port` the server runs on. To go back to the LAN address,
+run `mentipy config mentipy.base_url --set auto`.
 
 If no base URL is configured, `mentipy` resolves the current LAN address from
 the serving port. Because QR codes are generated when the document compiles,
