@@ -83,7 +83,9 @@ def resolve_public_ip() -> str:
 The UPnP dependency stays optional because only one of the public modes needs
 it, and many users will never expose a lecture outside their own machine.  The
 private helper returns both the URL and a teardown callback so the public
-context manager can remove the mapping on shutdown.
+context manager can remove the mapping on shutdown.  The router holds the mapping
+as soon as it has accepted it, so a lookup of the address that fails or is
+interrupted has to remove it here, since no caller has the callback yet.
 
 <<functions>>=
 def _upnp_mapping(port: int) -> tuple[str, Callable[[], None]]:
@@ -126,7 +128,7 @@ def _upnp_mapping(port: int) -> tuple[str, Callable[[], None]]:
 
     try:
         public_ip = resolve_public_ip()
-    except PublicExposureError:
+    except BaseException:
         cleanup()
         raise
 
@@ -222,6 +224,18 @@ failure and stderr is the useful diagnostic.  If the process is still running,
 the reverse forward may still be unreachable from outside the server, so the
 preflight probe must succeed before the URL is returned.
 
+From the moment [[Popen]] returns there is a child that nothing else knows about
+until this function returns it.  So any other way out has to stop it, and that
+includes an interruption during the wait or the probe.  A Ctrl-C reaches [[ssh]]
+through the terminal anyway, but a signal sent to Mentipy alone does not, hence
+[[BaseException]].
+
+From the moment [[Popen]] returns there is a child that nothing else knows about
+until this function returns it.  So any other way out has to stop it, and that
+includes an interruption during the wait or the probe.  A Ctrl-C reaches [[ssh]]
+through the terminal anyway, but a signal sent to Mentipy alone does not, hence
+[[BaseException]].
+
 <<functions>>=
 def expose_ssh(
     local_port: int, ssh_endpoint: str
@@ -256,7 +270,7 @@ def expose_ssh(
     except subprocess.TimeoutExpired:
         try:
             _preflight_ssh_tunnel(host, remote_port)
-        except PublicExposureError:
+        except BaseException:
             _stop_ssh_process(process)
             raise
         threading.Thread(
@@ -266,6 +280,9 @@ def expose_ssh(
             name="mentipy-ssh-stderr",
         ).start()
         return process, f"http://{host}:{remote_port}"
+    except BaseException:
+        _stop_ssh_process(process)
+        raise
 
     stderr_text = ""
     if process.stderr is not None:
@@ -327,7 +344,9 @@ def _stop_ssh_process(process: subprocess.Popen[str]):
 
 The CLI wants one uniform [[with]]-block no matter which strategy it picked.
 The context manager keeps that interface small and guarantees that teardown runs
-on Ctrl-C as well as on a normal return.
+on Ctrl-C as well as on a normal return.  The CLI raises the same interruption for
+a plain [[kill]] and a closed terminal; only a process that is killed outright
+leaves the tunnel or the mapping behind.
 
 <<functions>>=
 @contextmanager
@@ -662,6 +681,66 @@ def test_expose_ssh_raises_when_preflight_times_out(monkeypatch):
     assert "killed" not in called
 @
 
+An interruption during that wait or that probe has no tunnel to report, but the
+child process is running, and nothing above this function knows about it yet.
+
+<<test functions>>=
+class _StartingSsh:
+    def __init__(self, *, wait_failure):
+        self.stderr = io.StringIO("")
+        self.terminated = False
+        self.wait_failure = wait_failure
+
+    def poll(self):
+        return 0 if self.terminated else None
+
+    def wait(self, timeout):
+        if self.terminated:
+            return 0
+        raise self.wait_failure
+
+    def terminate(self):
+        self.terminated = True
+
+    def kill(self):
+        pytest.fail("a polite terminate was enough")
+
+
+def test_expose_ssh_stops_the_child_when_interrupted_during_the_wait(
+    monkeypatch,
+):
+    process = _StartingSsh(wait_failure=KeyboardInterrupt())
+    monkeypatch.setattr(
+        public_module.subprocess, "Popen", lambda *_args, **_kwargs: process
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        expose_ssh(8080, "alice@example.test:9000")
+
+    assert process.terminated
+
+
+def test_expose_ssh_stops_the_child_when_interrupted_during_the_probe(
+    monkeypatch,
+):
+    process = _StartingSsh(
+        wait_failure=public_module.subprocess.TimeoutExpired(["ssh"], 1)
+    )
+
+    def interrupted(_address, timeout):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        public_module.subprocess, "Popen", lambda *_args, **_kwargs: process
+    )
+    monkeypatch.setattr(public_module.socket, "create_connection", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        expose_ssh(8080, "alice@example.test:9000")
+
+    assert process.terminated
+@
+
 A refused connection is the same operational problem as a timeout for this
 module: the advertised address is unreachable from the caller's network.  It
 should therefore produce the same GatewayPorts/firewall guidance and cleanup.
@@ -860,6 +939,43 @@ def test_expose_context_manager_runs_cleanup(monkeypatch):
     with expose(PublicMode.upnp, 8080) as public_url:
         assert public_url == "http://198.51.100.9:8080"
         assert "deleted" not in state
+
+    assert state["deleted"] == (8080, UPNP_PROTOCOL)
+@
+
+A mapping exists as soon as the router has accepted it, so an interruption while
+the address is still being looked up must remove it, as a failed lookup does.
+
+<<test functions>>=
+def test_an_interrupted_address_lookup_removes_the_mapping(monkeypatch):
+    state = {}
+
+    class FakeUPnP:
+        lanaddr = "192.0.2.10"
+
+        def discover(self):
+            return 1
+
+        def selectigd(self):
+            return None
+
+        def addportmapping(self, *_arguments):
+            return True
+
+        def deleteportmapping(self, external_port, protocol):
+            state["deleted"] = (external_port, protocol)
+
+    def interrupted():
+        raise KeyboardInterrupt
+
+    monkeypatch.setitem(
+        sys.modules, "miniupnpc", types.SimpleNamespace(UPnP=FakeUPnP)
+    )
+    monkeypatch.setattr("mentipy.public.resolve_public_ip", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        with expose(PublicMode.upnp, 8080):
+            pytest.fail("the lookup should not have returned")
 
     assert state["deleted"] == (8080, UPNP_PROTOCOL)
 @
