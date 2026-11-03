@@ -1563,6 +1563,17 @@ opens that question for the room.  This holds for the first question as
 well, so the results page of a question is opened \emph{before} its
 slide is shown.  The index page at the server's root URL links to every
 results page and labels each question as active, open or locked.
+If the store holds questions that the latest build of the deck no longer
+registers, the index puts the deck's own questions first, under
+\enquote{Current questions}, so the first line is the deck's first
+question, and the rest after them, under \enquote{Old questions}.  Old
+questions keep their answers, links and QR codes.  Building a cut-down
+deck or rendering one question again from a terminal moves the others
+under the old heading until the next full build, as it does on the
+navigation row.  An old question still counts for the labels: it stands
+right before the deck's first question as far as the gate is concerned,
+so opening the last old one also opens a first question with
+[[lock=False]], and leaving it locked keeps that question locked.
 Until a question is open, respondents see a waiting page instead of the
 form; it refreshes itself and carries a \enquote{Try again} link, so the
 form appears on its own once the lecturer moves on.

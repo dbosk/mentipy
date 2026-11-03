@@ -2500,9 +2500,9 @@ def question(self, full_hash: str) -> Question:
 
 The question listing follows the dict's natural iteration order, which after
 [[register]]'s pop-then-reinsert is the document order of the last full
-build.  Index pages and the CLI listing therefore mirror what a lecturer sees
-in their slide deck, and the same order seeds the book-style navigation row on
-the post-submit and results pages.
+build, preceded by whatever earlier builds left behind.  The CLI listing shows
+it as it is, and the same order seeds the book-style navigation row on the
+post-submit and results pages.
 
 <<store methods>>=
 def all_questions(self) -> list[dict[str, Any]]:
@@ -2517,6 +2517,67 @@ def all_questions(self) -> list[dict[str, Any]]:
         rows.append(row)
 
     return rows
+@
+
+Which of those questions are on the slides right now is a separate question,
+answered by the live deck of \cref{sec:live-deck}.  The server's index shows
+it to the lecturer, and it must not work out its own idea of \enquote{current}:
+the Previous and Next links would then be able to disagree with it.
+
+<<store methods>>=
+def live_hashes(self) -> list[str]:
+    """Return the hashes of the live deck, in deck order."""
+
+    return _live_hashes(self._data())
+@
+
+The public view of the live deck has to agree with the navigation, including
+when a rebuild has left questions behind, and it is empty only for an empty
+store.
+
+<<test functions>>=
+def test_live_hashes_is_the_deck_of_the_latest_build(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    assert store.live_hashes() == []
+
+    dropped, kept = OpenQuestion("Dropped?"), OpenQuestion("Kept?")
+    added = OpenQuestion("Added?")
+    _build(store.path, [dropped, kept])
+    _build(store.path, [kept, added])
+
+    assert store.live_hashes() == [question_hash(kept), question_hash(added)]
+    assert store.live_hashes() == _live_sequence(store)
+@
+
+The server's index relies on a non-empty store having at least one live
+question, namely the last one registered, or its page would have only old
+questions and no first question to show.  Every way of reading the deck has to
+keep that promise: the links, a link that leads nowhere, a stale chain that
+falls back to the serials, and a store from before the links.
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    "damage",
+    [
+        lambda entry: None,
+        lambda entry: entry.update(registered_after="0" * 64),
+        lambda entry: entry.update(
+            registered_after=None, registration_serial=9
+        ),
+        lambda entry: entry.pop("registered_after"),
+    ],
+    ids=["links", "dangling link", "stale head", "no links"],
+)
+def test_live_hashes_holds_the_last_registered_question(tmp_path, damage):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    _build(store.path, [OpenQuestion("Q1"), OpenQuestion("Q2")])
+    _build(store.path, [OpenQuestion("Q3"), OpenQuestion("Q4")])
+    data = json.loads(store.path.read_text(encoding="utf-8"))
+    last = list(data["questions"])[-1]
+    damage(data["questions"][last])
+    store.path.write_text(json.dumps(data), encoding="utf-8")
+
+    assert store.live_hashes()[-1] == last
 @
 
 The forward sequence-navigation helper walks only the live deck of
