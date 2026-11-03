@@ -52,9 +52,9 @@ call through [[mentipy.latex]] returns LaTeX during the document build, while
 be inspected or redirected.  The examples below keep the question text and
 rendering options fixed while varying one practical aspect at a time.
 
-These examples keep their state in a local [[./mentipy.json]] store and write
-QR artifacts in [[mentipy-obj/]].  That keeps the generated files next to the
-manual.
+These examples keep the questions in a local [[./mentipy.json]] store, the
+answers beside it in [[./mentipy-answers.jsonl]], and write QR artifacts in
+[[mentipy-obj/]].  That keeps the generated files next to the manual.
 
 \begin{description}
 \item[Build the manual] Run [[make]] in [[doc/]].
@@ -1799,6 +1799,39 @@ warning, which [[mentipy present]] keeps in its banner.
   serves the poll, and recompiles when refreshed QR artifacts must be embedded
   in the document.
 }
+
+\subsection{Where the Answers Are}
+\label{sec:where-answers-are}
+
+The answers go in a log beside the store, named after it: [[mentipy.json]] gets
+[[mentipy-answers.jsonl]], one answer per line.  Nothing ever rewrites the log, so
+you can recompile a deck during a lecture without risking an answer, whichever
+version of Mentipy the deck's environment has, and a stopped build cannot delay one.
+Once [[mentipy serve]] has started it does not write the store either, except that
+starting a second server marks a new session.  To move a store to another machine,
+copy the store, its log and [[mentipy-images/]].  To start a deck over, delete the
+store and its log: with the log left behind, a question registered again gets its old
+answers back.
+
+The log holds what students wrote, and what git should do with it depends on the
+repository.
+\begin{description}
+\item[A repository that ignores its store] should ignore the log too, by adding
+  [[mentipy-answers.jsonl]] to its [[.gitignore]].  A line that says [[mentipy.json]]
+  does not match it, and [[git add .]] would commit the answers, so [[mentipy serve]]
+  and [[mentipy present]] warn at the start when git ignores the store but not the log.
+\item[A repository that commits its store] to keep the answers now commits two files,
+  so [[git add mentipy-answers.jsonl]] once; until then the new answers stay out of
+  the repository.  The log is well suited to it: a lecture shows up as added lines, and
+  the store's bytes no longer change with the answers.  With the line
+  [[mentipy-answers.jsonl merge=union]] in [[.gitattributes]], answers added on two
+  branches merge without a conflict.
+\end{description}
+
+Answers recorded by an older version stay in [[mentipy.json]] and are read from there,
+so such a store needs nothing done to it.  An older [[mentipy serve]] on a newer store does
+not show the answers in the log, though they stay safe, and what it records goes to
+[[mentipy.json]] as before.
 
 \section{Lecturing in Another Language}
 \label{sec:locale}

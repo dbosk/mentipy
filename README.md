@@ -56,8 +56,8 @@ uv pip install --python .venv/bin/python mentipy
 5. Watch or export answers with `mentipy watch`, `mentipy export`, or the live
    results page.
 
-The examples below keep state in `./mentipy.json` and write QR artifacts in
-`mentipy-obj/`.
+The examples below keep the questions in `./mentipy.json`, the answers beside it
+in `./mentipy-answers.jsonl`, and write QR artifacts in `mentipy-obj/`.
 
 ## Authoring a Poll
 
@@ -244,6 +244,32 @@ the remote SSH server must allow the forwarded port to be reached publicly.
 The polling server is intentionally simple. Anyone with the URL can submit
 answers, and with `--results` they can view the live tally. Treat a public poll
 URL like a shared room link, not like a private admin interface.
+
+## Where the Answers Are
+
+The answers go in a log beside the store, named after it: `mentipy.json` gets
+`mentipy-answers.jsonl`, one answer per line. Nothing ever rewrites the log, so
+a build running during a lecture cannot lose an answer, whichever Mentipy the
+build uses, and a stopped build cannot delay one. To move a store to another
+machine, copy the store, its log and `mentipy-images/`. To start a deck over,
+delete the store and its log: with the log left behind, a question registered
+again gets its old answers back.
+
+The log holds what students wrote, so decide what git does with it:
+
+- A repository that ignores its store should ignore the log too: add
+  `mentipy-answers.jsonl` to `.gitignore`. `mentipy serve` and `mentipy present`
+  warn when git ignores the store but not the log, since `git add .` would
+  otherwise commit the answers.
+- A repository that commits its store to keep the answers now commits two files:
+  `git add mentipy-answers.jsonl`. The log is well suited to it, as a lecture
+  shows up as added lines and the store's bytes no longer change with the
+  answers. Set `mentipy-answers.jsonl merge=union` in `.gitattributes` so that
+  answers added on two branches merge without a conflict.
+
+Answers recorded by an older version stay in `mentipy.json` and are read from there.
+An older `mentipy serve` on a newer store does not show the answers in the log,
+though they stay safe.
 
 ## Discovering Commands
 

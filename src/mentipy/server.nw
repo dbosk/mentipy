@@ -5598,6 +5598,65 @@ def do_POST(self):
     self._redirect(f"/{prefix}/thanks")
 @
 
+Once the server has started it has no reason to write the store: answers go to
+their log, and the lecture's progress is session state.  This is what makes an
+older Mentipy's build harmless to a running server and the other way round, so the
+test walks a lecture through every route that changes something, and compares the
+file's bytes.
+
+<<test functions>>=
+def test_a_lecture_leaves_the_store_file_alone(tmp_path):
+    path = tmp_path / "mentipy.json"
+    store = Store(path, min_prefix=4)
+    first = store.register(OpenQuestion("First?"))
+    second = store.register(OpenQuestion("Second?"))
+    form = {"Content-Type": "application/x-www-form-urlencoded"}
+
+    with _running_server(store) as port:
+        before = path.read_bytes()
+        for method, route in (
+            ("GET", "/"),
+            ("GET", f"/{first}/results"),
+            ("GET", f"/{first}"),
+            ("GET", "/active"),
+            ("POST", f"/{first}/skip"),
+            ("POST", f"/{first}/reopen"),
+            ("GET", f"/{first}/next"),
+            ("GET", f"/{second}/results"),
+            ("GET", f"/{second}/results.json"),
+        ):
+            response, _ = _request(port, method, route)
+            assert response.status < 400, route
+        response, _ = _request(
+            port, "POST", f"/{first}", body="value=An+answer", headers=form
+        )
+        assert response.status == 303
+
+    assert path.read_bytes() == before
+    assert store.results(store.resolve(first))["total"] == 1
+@
+
+An answer that could not be written must not look like one that was.  A directory
+in the log's place makes the write fail for real, and the respondent gets the
+closed connection of any failed request, with the reason in the lecturer's log,
+rather than the redirect to the thank-you page.
+
+<<test functions>>=
+def test_an_answer_that_cannot_be_written_is_no_success(tmp_path, caplog):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    store.answer_log().mkdir()
+    form = {"Content-Type": "application/x-www-form-urlencoded"}
+
+    with _running_server(store, lock=False) as port:
+        with pytest.raises((http.client.HTTPException, ConnectionError)):
+            _request(
+                port, "POST", f"/{prefix}", body="value=An+answer", headers=form
+            )
+
+    assert "unexpected error while handling request" in caplog.text
+@
+
 The lecturer's Skip button posts to [[/<prefix>/skip]].  Unlike an
 answer, a skip steers the room, so it is admin-only like the results
 page that carries the button.  It closes the question and then
@@ -8251,15 +8310,11 @@ def test_results_page_window_query_filters_recent_only(tmp_path):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(MCQuestion("Pick one", ("A", "B")))
     full_hash = store.resolve(prefix)
-    store.record(full_hash, 0)
-    store.record(full_hash, 1)
-
-    data = store._data()
     aged = (
         datetime.now(timezone.utc) - timedelta(hours=2)
     ).isoformat().replace("+00:00", "Z")
-    data["answers"][full_hash][0]["ts"] = aged
-    store._write(data)
+    _record_at(store, full_hash, 0, aged)
+    store.record(full_hash, 1)
 
     with _running_server(store) as port:
         _, last_hour = _request(
@@ -8461,15 +8516,11 @@ def test_results_json_window_filter_is_applied(tmp_path):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(OpenQuestion("Comment?"))
     full_hash = store.resolve(prefix)
-    store.record(full_hash, "first")
-    store.record(full_hash, "second")
-
-    data = store._data()
     aged = (
         datetime.now(timezone.utc) - timedelta(hours=2)
     ).isoformat().replace("+00:00", "Z")
-    data["answers"][full_hash][0]["ts"] = aged
-    store._write(data)
+    _record_at(store, full_hash, "first", aged)
+    store.record(full_hash, "second")
 
     with _running_server(store) as port:
         _, body = _request(
@@ -8567,6 +8618,7 @@ from mentipy.questions import *
 from mentipy.server import *
 from mentipy.store import *
 from mentipy.store import _start_registration_run
+from test_store import _record_at
 
 <<test functions>>
 @
