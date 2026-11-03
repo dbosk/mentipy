@@ -4389,7 +4389,7 @@ def _ends_in_a_torn_line(descriptor: int) -> bool:
 Reading follows from the same two cases.  Only what ends in a newline counts: anything
 after the last newline is a torn write, or one in progress.  We split bytes at that
 newline and decode each line alone, so that a torn character stays in its own line and a
-[[ ]] in an answer, which [[str.splitlines]] would split at, stays in its answer.  A
+U+2028 in an answer, which [[str.splitlines]] would split at, stays in its answer.  A
 blank line is what the repair above leaves.  A malformed line is skipped, since one bad
 line must not break every results page, and the warning comes once per log per process,
 since results pages refresh throughout a lecture.  The warning gives the line's number
@@ -4544,7 +4544,7 @@ unescaped, which is why the reader splits bytes at the newline alone.
 <<test functions>>=
 @pytest.mark.parametrize(
     "text",
-    ["two\nlines", "carriage\rreturn", "line separator", "next\x85line"],
+    ["two\nlines", "carriage\rreturn", "line\u2028separator", "next\x85line"],
 )
 def test_an_answer_with_any_line_break_stays_one_line(tmp_path, text):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
