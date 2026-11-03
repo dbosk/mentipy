@@ -5808,8 +5808,12 @@ def serve(
     lock: bool = True,
     locale: str | None = None,
     default_locale: str = DEFAULT_LOCALE,
+    on_bound=None,
 ):
-    """Run the mentipy HTTP server until interrupted."""
+    """Run the mentipy HTTP server until interrupted.
+
+    ``on_bound``, if given, is called once the server holds its socket.
+    """
 
     server = create_server(
         store,
@@ -5825,6 +5829,8 @@ def serve(
         default_locale=default_locale,
     )
     try:
+        if on_bound is not None:
+            on_bound()
         server.serve_forever()
     finally:
         server.server_close()

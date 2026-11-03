@@ -1447,8 +1447,9 @@ Rendered in the document, that call becomes:
   with three options, the QR output directory, the QR format, and the article
   layout.
 
-  \textbf{What this reveals}: When [[base_url]] is omitted, the helper reads
-  the [[mentipy.base_url]] setting.  If that setting is absent, it resolves
+  \textbf{What this reveals}: When [[base_url]] is omitted and no server has
+  run on this store, the helper reads the [[mentipy.base_url]] setting.  If
+  that setting is absent, it resolves
   the current LAN address together with [[mentipy.port]], so the QR is a
   compile-time placeholder that [[mentipy serve]] can refresh later.  We use a
   fresh poll here because mentipy keys QR files by content-derived hash;
@@ -1754,12 +1755,23 @@ recompile the slides so the PDF embeds the new codes.  If the public endpoint
 is fronted by HTTPS, [[mentipy.public_base_url]] can override the derived URL so
 the regenerated QR codes point at the externally visible address.
 
-That recompile step relies on PythonTeX's cache.  PythonTeX caches the output
-of unchanged PythonTeX code blocks, so a second LaTeX compilation reads the
-already refreshed QR sidecars from disk instead of rerunning the render helper.
-As long as the lecture source does not change the PythonTeX code block, the
-regenerated QR images and captions survive into the next PDF rather than being
-replaced by new compile-time placeholders.
+That recompile keeps the address even when PythonTeX reruns the render helper,
+say after an edit to a prompt.  While it runs, the server leaves the address it
+serves in [[mentipy-obj/.served-base-url]], beside the QR codes, and a build
+without an explicit [[base_url]] uses that before [[mentipy.base_url]].  So the
+workflow for any lecture is to start the server and then compile while it runs,
+in any network, without changing the configuration:
+\begin{verbatim}
+mentipy present --public upnp
+make slides.pdf
+\end{verbatim}
+The file is not part of the store, because a project may track its store in a
+public repository and the address may be the lecturer's home IP.  A server
+removes it on stopping with Ctrl-C or an error, and later builds fall back to
+the configuration, though the QR files keep the served address until PythonTeX
+next rewrites them.  A server that is killed, or whose terminal is closed, leaves
+the file behind until the next start of a server replaces it or the QR directory
+is removed.
 
 The store remembers which QR files each question wrote, so that
 [[mentipy serve]] knows what to rewrite.  A QR file in the store's checkout,
