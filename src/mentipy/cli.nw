@@ -58,6 +58,8 @@ from mentipy.latex import (
     pin_text as render_pin_text_question,
     ranking as render_ranking_question,
     regenerate_qrs,
+    forget_served_address,
+    remember_served_address,
     scale as render_scale_question,
     word_cloud as render_word_cloud_question,
 )
@@ -637,9 +639,10 @@ def _latex_reference() -> str:
 
         Shared keyword arguments
           store: defaults to config key {STORE_CONFIG}
-          base_url: defaults to {BASE_URL_CONFIG}; if omitted, Mentipy
-            first reads that setting and only resolves the current LAN
-            address using {PORT_CONFIG} when it is unset, empty, or auto
+          base_url: if omitted, Mentipy uses the address a running server
+            of this store serves, kept in {QR_DIR_CONFIG} beside the store,
+            then {BASE_URL_CONFIG}, and resolves the current LAN address
+            using {PORT_CONFIG} only when it is unset, empty, or auto
           qr_dir: defaults to {QR_DIR_CONFIG}
           qr_format: defaults to {QR_FORMAT_CONFIG}
           environment: defaults to {QUESTION_ENVIRONMENT_CONFIG};
@@ -2366,7 +2369,8 @@ def serve(
     """Run the local polling server.
 
     Respondent URLs use config setting ``mentipy.base_url`` unless it is
-    unset, empty, or ``auto``.
+    unset, empty, or ``auto``.  Builds of the slides use the address of the
+    running server, so they can be recompiled while it runs.
     """
 
     chosen_host = host or get_setting(HOST_CONFIG, DEFAULT_HOST)
@@ -2430,7 +2434,9 @@ def _run_server(
         lines = _local_start_lines(
             store, host, port, results=results, lock=lock
         )
-        runner(lines, store, host, port, **options)
+        base = resolve_base_url(_configured_base(None), port)
+        with _recording_served_address(store, base) as on_bound:
+            runner(lines, store, host, port, on_bound=on_bound, **options)
         return
 
     admin_token, require_token = _admin_token_policy(public)
@@ -2444,15 +2450,17 @@ def _run_server(
             lock=lock,
             admin_token=admin_token,
         )
-        runner(
-            lines,
-            store,
-            host,
-            port,
-            admin_token=admin_token,
-            require_token=require_token,
-            **options,
-        )
+        with _recording_served_address(store, public_url) as on_bound:
+            runner(
+                lines,
+                store,
+                host,
+                port,
+                admin_token=admin_token,
+                require_token=require_token,
+                on_bound=on_bound,
+                **options,
+            )
 
 
 def _serve_runner(
@@ -2462,6 +2470,39 @@ def _serve_runner(
         typer.echo(line)
     with _reporting_bind_errors(host, port):
         serve_http(store, host, port, **options)
+@
+
+The start-up lines are built, and the QR codes rewritten, before the bind, but
+the address a later build should use is recorded only through [[on_bound]], once
+the socket is ours.  A start that fails, because the port is taken say, has
+served nothing, so it must not decide what the next build writes: a rewritten QR
+code is repaired by the next rerun of PythonTeX, but a false record would keep
+putting the wrong address back.
+
+The same run removes the record when the runner ends, whether by Ctrl-C, by an
+error or by returning, so [[serve]] and [[present]] need no code of their own for
+it.  That is why it sits here, around the runner, and inside the exposure context:
+the record is gone before the public address closes, also when closing it fails.
+Only a run that reached [[on_bound]] may remove anything.  A start that failed on
+a taken port usually carries the very address of the server holding that port,
+so the comparison in [[forget_served_address]] would not protect that server's
+record.
+
+<<functions>>=
+@contextmanager
+def _recording_served_address(store: Store, base_url: str):
+    bound = False
+
+    def on_bound():
+        nonlocal bound
+        bound = True
+        remember_served_address(store, base_url)
+
+    try:
+        yield on_bound
+    finally:
+        if bound:
+            forget_served_address(store, base_url)
 @
 
 A port that is taken, or an address the machine does not have, is the
@@ -2567,6 +2608,372 @@ def _regenerated(store: Store, base_url: str) -> tuple[int, list[str]]:
     with _logging_into(collector):
         count = regenerate_qrs(store, base_url)
     return count, collector.lines
+@
+
+The tests below follow the lecturer's order through the real start-up path, a
+real bind and the real render helper, since what matters is what a rebuild
+writes after a server has started, and each build gets a new [[Store]], as a
+PythonTeX process does.  Three things are replaced.  The LAN lookup, because its
+result depends on the network of the machine running the tests.  The public
+address, because a real one needs a tunnel or a router.  And the wait in
+[[serve_forever]], which is where a test does what the lecturer does while the
+server runs: it takes the place of the terminal, so returning from it is a clean
+stop.
+
+<<test functions>>=
+def _served_deck(tmp_path, monkeypatch, base_url):
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"mentipy": {"base_url": base_url}}))
+    monkeypatch.setenv("MENTIPY_CONFIG", str(config))
+    monkeypatch.setattr(mentipy.network, "local_ip", lambda: "192.0.2.10")
+    monkeypatch.setattr(
+        "mentipy.server.ThreadingHTTPServer.serve_forever",
+        lambda _server: None,
+    )
+    monkeypatch.chdir(tmp_path)
+
+
+def _while_serving(monkeypatch, step):
+    monkeypatch.setattr(
+        "mentipy.server.ThreadingHTTPServer.serve_forever",
+        lambda _server: step(),
+    )
+
+
+def _rebuild():
+    mentipy.latex.mc("One?", ["Yes", "No"], store=Store("mentipy.json"))
+
+
+def _sidecar_text():
+    [sidecar] = Path("mentipy-obj").glob("*.pdf_tex")
+    return sidecar.read_text()
+
+
+def _record_of_the_deck():
+    record = Path("mentipy-obj") / mentipy.latex.SERVED_ADDRESS_FILE
+    return record.read_text().strip() if record.exists() else None
+
+
+def _start_local(port=0):
+    mentipy.cli._run_server(
+        Store("mentipy.json"), "127.0.0.1", port,
+        public=None, results=True, lock=False, locale=None,
+        runner=mentipy.cli._serve_runner,
+    )
+
+
+def _start_public(monkeypatch, url):
+    @contextmanager
+    def public_url(*_args, **_kwargs):
+        yield url
+
+    monkeypatch.setattr(mentipy.cli, "_public_url_context", public_url)
+    mentipy.cli._run_server(
+        Store("mentipy.json"), "127.0.0.1", 0,
+        public=PublicMode.upnp, results=True, lock=False, locale=None,
+        runner=mentipy.cli._serve_runner,
+    )
+
+
+def test_a_rebuild_keeps_the_public_address_of_the_server(
+    tmp_path, monkeypatch
+):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    _rebuild()
+    _while_serving(monkeypatch, _rebuild)
+
+    _start_public(monkeypatch, "http://203.0.113.7:8080")
+
+    assert "203.0.113.7" in _sidecar_text()
+
+
+def test_a_rebuild_keeps_the_local_address_of_the_server(
+    tmp_path, monkeypatch
+):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    _rebuild()
+    monkeypatch.setattr(mentipy.network, "local_ip", lambda: "192.0.2.99")
+
+    def rebuild_on_another_network():
+        monkeypatch.setattr(mentipy.network, "local_ip", lambda: "192.0.2.11")
+        _rebuild()
+
+    _while_serving(monkeypatch, rebuild_on_another_network)
+    _start_local()
+
+    assert "192.0.2.99" in _sidecar_text()
+
+
+def test_a_public_server_outranks_a_pinned_base_url_in_a_rebuild(
+    tmp_path, monkeypatch
+):
+    _served_deck(tmp_path, monkeypatch, "http://pinned.example:8080")
+    _rebuild()
+    _while_serving(monkeypatch, _rebuild)
+
+    _start_public(monkeypatch, "http://203.0.113.7:8080")
+
+    assert "203.0.113.7" in _sidecar_text()
+    assert "pinned.example" not in _sidecar_text()
+
+
+def test_a_first_build_while_the_server_runs_gets_its_address(
+    tmp_path, monkeypatch
+):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    _while_serving(monkeypatch, _rebuild)
+
+    _start_public(monkeypatch, "http://203.0.113.7:8080")
+
+    assert "203.0.113.7" in _sidecar_text()
+
+
+def test_a_new_server_replaces_the_record_a_killed_one_left(
+    tmp_path, monkeypatch
+):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    _rebuild()
+    remember_served_address(Store("mentipy.json"), "http://203.0.113.7:8080")
+    _while_serving(monkeypatch, _rebuild)
+
+    _start_public(monkeypatch, "http://198.51.100.5:8080")
+
+    assert "198.51.100.5" in _sidecar_text()
+
+
+def test_the_served_address_stays_out_of_the_tracked_store(
+    tmp_path, monkeypatch
+):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    _rebuild()
+    _while_serving(monkeypatch, _rebuild)
+
+    _start_public(monkeypatch, "http://203.0.113.7:8080")
+
+    assert "203.0.113.7" not in Path("mentipy.json").read_text()
+@
+
+The record says what a running server serves, so it ends with that server: a
+build afterwards must not keep putting the lecturer's home address into a PDF.
+That holds however the server stops short of being killed, so the tests stop it
+cleanly, with Ctrl-C and with an error while it serves.  The rebuild shows where
+the address comes from, as the sidecar is rewritten from the configuration.
+
+<<test functions>>=
+def test_a_stopped_server_takes_its_address_back(tmp_path, monkeypatch):
+    _served_deck(tmp_path, monkeypatch, "http://config.example:8080")
+    _rebuild()
+
+    _start_public(monkeypatch, "http://203.0.113.7:8080")
+    _rebuild()
+
+    assert "config.example" in _sidecar_text()
+    assert "203.0.113.7" not in _sidecar_text()
+
+
+@pytest.mark.parametrize("failure", [KeyboardInterrupt, RuntimeError])
+def test_a_server_that_ends_abruptly_takes_its_address_back(
+    tmp_path, monkeypatch, failure
+):
+    _served_deck(tmp_path, monkeypatch, "http://config.example:8080")
+    _rebuild()
+
+    def serve_until_it_fails():
+        assert _record_of_the_deck() == "http://203.0.113.7:8080"
+        raise failure
+
+    _while_serving(monkeypatch, serve_until_it_fails)
+    with pytest.raises(failure):
+        _start_public(monkeypatch, "http://203.0.113.7:8080")
+
+    assert _record_of_the_deck() is None
+@
+
+Only the run that wrote the record may take it back.  A second server on the
+store has replaced it, and what it serves must survive the first one stopping;
+comparing the address is what tells the two apart.  A run that never bound is the
+harder case, as it can carry the same address as the server it failed to replace:
+the same port on the same machine is the usual reason for the failure.  So the
+comparison is not enough, and the run must also have bound.
+
+<<test functions>>=
+def test_a_stopping_server_leaves_the_record_of_a_later_one(
+    tmp_path, monkeypatch
+):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    _rebuild()
+    _while_serving(
+        monkeypatch,
+        lambda: remember_served_address(
+            Store("mentipy.json"), "http://198.51.100.5:8080"
+        ),
+    )
+
+    _start_public(monkeypatch, "http://203.0.113.7:8080")
+
+    assert _record_of_the_deck() == "http://198.51.100.5:8080"
+
+
+def test_a_failed_start_leaves_the_record_of_the_server_it_collided_with(
+    tmp_path, monkeypatch
+):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    _rebuild()
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        port = taken.getsockname()[1]
+        running = f"http://192.0.2.10:{port}"
+        remember_served_address(Store("mentipy.json"), running)
+
+        result = CliRunner().invoke(
+            cli,
+            ["serve", "--store", "mentipy.json", "--host", "127.0.0.1",
+             "--port", str(port)],
+        )
+
+    assert result.exit_code == 1
+    assert _record_of_the_deck() == running
+@
+
+A record is a claim that a server used this address, so a start that fails must
+leave no record.  The port really is taken here, by a socket of the test, and
+the command goes through the real command line, since the lecturer sees the
+failure there.
+
+<<test functions>>=
+def test_a_server_that_cannot_bind_leaves_no_address(tmp_path, monkeypatch):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    _rebuild()
+    remember_served_address(Store("mentipy.json"), "http://203.0.113.7:8080")
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        port = taken.getsockname()[1]
+
+        result = CliRunner().invoke(
+            cli,
+            ["serve", "--store", "mentipy.json", "--host", "127.0.0.1",
+             "--port", str(port)],
+        )
+
+    assert result.exit_code == 1
+    assert "cannot listen" in result.output
+    _rebuild()
+    assert "203.0.113.7" in _sidecar_text()
+
+
+def test_present_that_cannot_bind_leaves_no_address(tmp_path, monkeypatch):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    _rebuild()
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        port = taken.getsockname()[1]
+
+        result = CliRunner().invoke(
+            cli,
+            ["present", "--store", "mentipy.json", "--host", "127.0.0.1",
+             "--port", str(port), "--no-open"],
+        )
+
+    assert result.exit_code == 1
+    assert not (Path("mentipy-obj") / mentipy.latex.SERVED_ADDRESS_FILE).exists()
+@
+
+Offline, the LAN lookup falls back to the loopback address.  That is an address
+only this machine can reach, so a build must not carry it onto a slide once the
+network is back.
+
+<<test functions>>=
+def test_an_offline_server_does_not_decide_the_address_of_later_builds(
+    tmp_path, monkeypatch
+):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    _rebuild()
+    monkeypatch.setattr(mentipy.network, "local_ip", lambda: "127.0.0.1")
+
+    def rebuild_with_the_network_back():
+        monkeypatch.setattr(mentipy.network, "local_ip", lambda: "192.0.2.11")
+        _rebuild()
+
+    _while_serving(monkeypatch, rebuild_with_the_network_back)
+    _start_local()
+
+    assert "192.0.2.11" in _sidecar_text()
+@
+
+A record that cannot be written costs the next rebuild, not the lecture, so it
+is a warning.  [[serve]] logs it, and [[present]] must keep it in its banner,
+because the first screen clear would remove anything else.
+
+<<test functions>>=
+def test_serve_warns_when_it_cannot_leave_its_address(
+    tmp_path, monkeypatch, caplog
+):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    Path("mentipy-obj").write_text("a file where the directory should be")
+
+    _start_public(monkeypatch, "http://203.0.113.7:8080")
+
+    assert "cannot remember the served address" in caplog.text
+
+
+def _present_at_a_lan_address(tmp_path, monkeypatch, *steps):
+    # _run_present pins a loopback address, which is never recorded.
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    set_setting("base_url", "http://192.0.2.7:8080")
+    _play_the_lecture(monkeypatch, *steps)
+    return CliRunner().invoke(
+        cli,
+        ["present", "--host", "127.0.0.1", "--port", str(_free_port()),
+         "--store", str(tmp_path / "mentipy.json")],
+    )
+
+
+def test_present_leaves_its_address_while_it_runs_and_takes_it_back(
+    tmp_path, monkeypatch, browser_spy
+):
+    record = tmp_path / "mentipy-obj" / mentipy.latex.SERVED_ADDRESS_FILE
+    seen = []
+
+    result = _present_at_a_lan_address(
+        tmp_path, monkeypatch, lambda: seen.append(record.read_text().strip())
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen == ["http://192.0.2.7:8080"]
+    assert not record.exists()
+
+
+def test_present_that_fails_while_it_runs_takes_its_address_back(
+    tmp_path, monkeypatch, browser_spy
+):
+    record = tmp_path / "mentipy-obj" / mentipy.latex.SERVED_ADDRESS_FILE
+    seen = []
+
+    def lecture_that_fails():
+        seen.append(record.exists())
+        raise RuntimeError("the watch broke")
+
+    result = _present_at_a_lan_address(
+        tmp_path, monkeypatch, lecture_that_fails
+    )
+
+    assert seen == [True]
+    assert isinstance(result.exception, RuntimeError)
+    assert not record.exists()
+
+
+def test_present_keeps_the_warning_in_its_banner(
+    tmp_path, monkeypatch, browser_spy
+):
+    (tmp_path / "mentipy-obj").write_text("a file, not a directory")
+
+    result = _present_at_a_lan_address(tmp_path, monkeypatch)
+
+    assert result.exit_code == 0, result.output
+    assert "cannot remember the served address" in result.stdout
 @
 
 \subsection{Presenting: serving and following in one terminal}
@@ -2691,6 +3098,7 @@ def _present_runner(
     pin_heat: str,
     open_command: str | None,
     startup_warnings: list[str],
+    on_bound=None,
     **options,
 ):
     with _reporting_bind_errors(host, port):
@@ -2701,6 +3109,8 @@ def _present_runner(
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
+            if on_bound is not None:
+                on_bound()
             for warning in startup_warnings:
                 LOGGER.warning("%s", warning)
             if open_command is not None:
@@ -8592,6 +9002,7 @@ from typer.testing import CliRunner
 from mentipy.cli import *
 from mentipy.questions import *
 import ipaddress
+import mentipy.latex
 import mentipy.network
 import mentipy.server
 from mentipy.server import create_server
