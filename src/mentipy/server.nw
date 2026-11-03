@@ -3974,16 +3974,116 @@ def _json_results(
 \section{Serving and routing}
 
 The custom server class enables threading, keeps worker threads from blocking
-shutdown, and centralizes request-thread error reporting.
+shutdown, leaves room for a whole class connecting at once, and centralizes
+request-thread error reporting.
 
 <<classes>>=
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     """A small threaded HTTP server for mentipy."""
 
     daemon_threads = True
+    <<threading HTTP server class attributes>>
 
     <<threading HTTP server methods>>
 @
+
+\subsection{Room for a whole class at once}
+
+A class scanning a QR code is a burst: everyone connects within a second or
+two.  The server thread accepts one connection at a time, and between two
+[[accept]] calls the kernel holds the finished handshakes in the listen queue,
+whose length the server chooses when it starts listening.  The standard
+library's default, $5$, is far too short for this use.  With a full queue a
+new connection does not simply wait.  The student's browser gets a reset, or a
+delay of a second or more from a retransmitted handshake, and a reset answer
+never reaches the store.
+
+We measured this with $150$ simultaneous POSTs from another process against a
+real server on Linux, three rounds each, at a machine load of about $2$:
+
+\begin{description}
+\item[A backlog of $5$] gave $244$ resets out of $450$, a median response time
+  of a second, and about $340$ listen overflows per round
+  ([[TcpExtListenOverflows]]).  The $206$ answers that got a redirect were the
+  $206$ in the store.
+\item[A backlog of $128$] gave no resets and no overflows, but [[ss -ltn]]
+  showed $124$ waiting connections at the peak, so it had almost no margin.
+  With $500$ POSTs it overflowed and reset $65$ of $1000$.
+\item[A backlog of $1024$] gave no resets and no overflows with $150$ or $500$
+  POSTs.  The longest queue we saw was $453$.
+\end{description}
+
+The queue only holds what a client has actually started, so a long one costs
+nothing while the room is quiet.  The kernel silently lowers the value to
+[[net.core.somaxconn]], which is $4096$ on current Linux but was $128$ before
+kernel 5.4.  A machine with the lower cap holds only that many waiting
+connections, and nothing in Mentipy warns about it.
+
+<<constants>>=
+LISTEN_BACKLOG = 1024
+<<threading HTTP server class attributes>>=
+request_queue_size = LISTEN_BACKLOG
+@
+
+Whether the queue overflows depends on how fast the server drains it, so a test
+that only sends many requests at once would pass or fail with the speed of the
+machine.  This test takes speed out of it: the server listens but accepts
+nothing until every client has connected and sent its answer.  All of them
+must then fit in the queue, however slow the machine is, and each answer must
+reach the store once the server starts.  Before the fix the seventh connection
+times out.  The number of clients stays below the system's cap, since no choice
+of ours can exceed that, and each one takes two file descriptors in this
+process, which keeps the number well inside the usual limit of $1024$.
+
+<<test functions>>=
+FULL_LECTURE_HALL = 300
+
+
+def _listen_queue_cap():
+    try:
+        with open("/proc/sys/net/core/somaxconn") as cap:
+            return int(cap.read())
+    except OSError:
+        return 100
+
+
+def test_a_full_lecture_hall_waits_in_the_queue_until_it_is_served(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("Pick one", ("A", "B")))
+    server = create_server(store, host="127.0.0.1", port=0)
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    hall = min(FULL_LECTURE_HALL, _listen_queue_cap())
+    clients = []
+
+    try:
+        for _ in range(hall):
+            client = http.client.HTTPConnection(
+                "127.0.0.1", server.server_address[1], timeout=30
+            )
+            clients.append(client)
+            client.request(
+                "POST",
+                f"/{prefix}",
+                body="value=0",
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded"
+                },
+            )
+        serving.start()
+        statuses = [client.getresponse().status for client in clients]
+    finally:
+        for client in clients:
+            client.close()
+        if serving.is_alive():
+            server.shutdown()
+            serving.join()
+        server.server_close()
+
+    assert statuses == [303] * hall
+    assert store.results(store.resolve(prefix), window="all")["total"] == hall
+@
+
+\subsection{Errors from request threads}
 
 Routine client disconnects are normal on a live server.  Browsers can close the
 tab halfway through a response, and phones can switch networks while the server
