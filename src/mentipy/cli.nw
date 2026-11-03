@@ -2613,38 +2613,55 @@ def _regenerated(store: Store, base_url: str) -> tuple[int, list[str]]:
     return count, collector.lines
 @
 
-A deck decides for itself what git does with its store, and most decide by the store's
-name.  A [[.gitignore]] that says [[mentipy.json]] was enough while that file held the
-answers, but it does not match the answer log (\cref{sec:answer-log}), so in such a deck
-[[git add .]] would start committing the students' free text.  Only the server can notice
-in time, since it is what creates the log, so the warning is a start-up line, shown like
-the others by [[serve]] and kept in [[present]]'s banner.
+A deck decides for itself what git does with its store, and moving the answers to a log
+(\cref{sec:answer-log}) undoes that decision in both directions.  A [[.gitignore]] that
+says [[mentipy.json]] does not match the log, so [[git add .]] would start committing the
+students' free text.  A deck that commits its store to keep the answers is worse off:
+they are now in an untracked file, which [[git commit -a]] leaves out and [[git clean -fd]]
+deletes, and that file is the only copy.  Only the server can notice in time, since it is
+what creates the log, so each warning is a start-up line, shown like the others by
+[[serve]] and kept in [[present]]'s banner.
 
 Git has the answers, so we ask it rather than read [[.gitignore]] files: a pattern can be
-in a parent directory, in [[.git/info/exclude]] or in a global file.  The warning is for
-a store that is ignored while the log is neither ignored nor tracked.  [[check-ignore]]
-does not report a tracked file, so a deck that commits its store passes the first test
-even if its [[.gitignore]] names the file, and a deck that tracks its log has already
-decided.  That the log of a committing deck is not yet tracked is no danger, so it gets
-no warning here; the manual tells such decks to add the file.  Anything else that goes
-wrong with git, no repository or no git at all, says nothing: a lecture must not depend
-on it.
+in a parent directory, in [[.git/info/exclude]] or in a global file.  A log that git
+tracks or ignores has been decided about, so it gets no warning; [[git clean -fd]] leaves
+an ignored file alone, too.  Otherwise the store says what the deck wants.  Git answers
+for a path whether the file exists or not, so a tracked store is warned about before its
+first answer, which is when the lecturer can still do something about it; [[git add]]
+does need the file, hence the \enquote{once it exists}.  [[check-ignore]] does not report
+a tracked file, so a store forced past its own [[.gitignore]] counts as tracked.  We only
+say what to do and write nothing into the repository, not even [[.git/info/exclude]],
+since what goes in it is the lecturer's choice.  Anything else that goes wrong with git,
+no repository or no git at all, says nothing: a lecture must not depend on it.
 
 <<functions>>=
 def _answer_log_warnings(store: Store) -> list[str]:
+    name = store.path.name
     log = store.answer_log().name
     directory = store.path.parent
-    if (
-        not _git_succeeds(directory, "check-ignore", "-q", "--", store.path.name)
-        or _git_succeeds(directory, "check-ignore", "-q", "--", log)
-        or _git_succeeds(directory, "ls-files", "--error-unmatch", "--", log)
-    ):
+    if _git_tracks(directory, log) or _git_ignores(directory, log):
         return []
-    return [
-        f"Warning: git ignores {store.path.name} but not {log}, which holds "
-        "the answers, so `git add .` would commit what students wrote. Add "
-        f"{log} to .gitignore, or track it on purpose."
-    ]
+    if _git_tracks(directory, name):
+        return [
+            f"Warning: git tracks {name} but not {log}, which holds the "
+            "answers, so `git commit -a` leaves them out and `git clean` "
+            f"deletes them: `git add {log}` once it exists."
+        ]
+    if _git_ignores(directory, name):
+        return [
+            f"Warning: git ignores {name} but not {log}, which holds the "
+            "answers, so `git add .` would commit what students wrote. Add "
+            f"{log} to .gitignore, or track it on purpose."
+        ]
+    return []
+
+
+def _git_tracks(directory: Path, name: str) -> bool:
+    return _git_succeeds(directory, "ls-files", "--error-unmatch", "--", name)
+
+
+def _git_ignores(directory: Path, name: str) -> bool:
+    return _git_succeeds(directory, "check-ignore", "-q", "--", name)
 
 
 def _git_succeeds(directory: Path, *arguments: str) -> bool:
@@ -2725,25 +2742,6 @@ def test_no_git_warning_when_both_are_ignored(tmp_path, real_git):
     assert mentipy.cli._answer_log_warnings(_deck_store(tmp_path)) == []
 
 
-def test_no_git_warning_when_the_store_is_tracked(tmp_path, real_git):
-    real_git("init")
-    store = _deck_store(tmp_path)
-    real_git("add", "mentipy.json")
-
-    assert mentipy.cli._answer_log_warnings(store) == []
-
-
-def test_no_git_warning_when_the_store_is_tracked_though_its_name_is_ignored(
-    tmp_path, real_git
-):
-    real_git("init")
-    (tmp_path / ".gitignore").write_text("mentipy.json\n")
-    store = _deck_store(tmp_path)
-    real_git("add", "--force", "mentipy.json")
-
-    assert mentipy.cli._answer_log_warnings(store) == []
-
-
 def test_no_git_warning_when_the_log_is_tracked_on_purpose(tmp_path, real_git):
     real_git("init")
     (tmp_path / ".gitignore").write_text("mentipy.json\n")
@@ -2752,6 +2750,23 @@ def test_no_git_warning_when_the_log_is_tracked_on_purpose(tmp_path, real_git):
     real_git("add", "mentipy-answers.jsonl")
 
     assert mentipy.cli._answer_log_warnings(store) == []
+
+
+def test_no_git_warning_when_a_tracked_store_has_an_ignored_log(
+    tmp_path, real_git
+):
+    real_git("init")
+    (tmp_path / ".gitignore").write_text("mentipy-answers.jsonl\n")
+    store = _deck_store(tmp_path)
+    real_git("add", "mentipy.json")
+
+    assert mentipy.cli._answer_log_warnings(store) == []
+
+
+def test_no_git_warning_for_a_store_git_says_nothing_about(tmp_path, real_git):
+    real_git("init")
+
+    assert mentipy.cli._answer_log_warnings(_deck_store(tmp_path)) == []
 
 
 def test_no_git_warning_outside_a_repository(tmp_path, real_git):
@@ -2767,6 +2782,51 @@ def test_no_git_warning_without_git(tmp_path, real_git, monkeypatch):
     monkeypatch.setenv("PATH", str(tmp_path / "nowhere"))
 
     assert mentipy.cli._answer_log_warnings(store) == []
+@
+
+A deck that commits its store is the case that can lose answers, so this test goes
+all the way: the warning comes before the log exists and after, and with the advice
+followed it stops and [[git clean -fd]], which would otherwise delete the only copy
+of the answers, leaves them alone.  A store forced past its own [[.gitignore]] line
+is tracked like any other.
+
+<<test functions>>=
+def test_git_warning_for_a_tracked_store_keeps_the_answers_from_git_clean(
+    tmp_path, real_git
+):
+    real_git("init")
+    store = _deck_store(tmp_path)
+    full_hash = store.resolve(store.register(OpenQuestion("Comment?")))
+    real_git("add", "mentipy.json")
+
+    [before_the_first_answer] = mentipy.cli._answer_log_warnings(store)
+    store.record(full_hash, "an answer")
+    [after_it] = mentipy.cli._answer_log_warnings(store)
+
+    assert before_the_first_answer == after_it
+    assert after_it.startswith("Warning: ")
+    assert "git tracks mentipy.json but not mentipy-answers.jsonl" in after_it
+    assert "`git add mentipy-answers.jsonl`" in after_it
+
+    real_git("add", "mentipy-answers.jsonl")
+    real_git("clean", "-fdq")
+
+    assert mentipy.cli._answer_log_warnings(store) == []
+    assert store.results(full_hash)["total"] == 1
+
+
+def test_git_warning_for_a_store_tracked_though_its_name_is_ignored(
+    tmp_path, real_git
+):
+    real_git("init")
+    (tmp_path / ".gitignore").write_text("lecture.json\n")
+    store = Store(tmp_path / "lecture.json", min_prefix=4)
+    store.register(OpenQuestion("Comment?"))
+    real_git("add", "--force", "lecture.json")
+
+    [warning] = mentipy.cli._answer_log_warnings(store)
+
+    assert "git tracks lecture.json but not lecture-answers.jsonl" in warning
 @
 
 The warning is among the start-up lines on both of the server's paths, and so
