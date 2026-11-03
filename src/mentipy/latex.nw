@@ -1249,7 +1249,11 @@ def _existing_conventional_targets(
 Regeneration walks the store rather than the filesystem because the store knows
 which QR artifacts belong to which canonical question.  Each rewrite recomputes
 the public URL from the current base URL and the stable prefix, then asks the QR
-module to refresh both the image and its sidecar.
+module to refresh both the image and its sidecar.  A sidecar that would not change
+keeps its date (\cref{sec:qr-sidecar}), so a restart at the same address gives
+[[make]] nothing to rebuild.  The warning to recompile still appears then, because
+an earlier start may have rewritten the files for a PDF that was never rebuilt;
+asking once too often is harmless when [[make]] then finds nothing to do.
 
 <<functions>>=
 def regenerate_qrs(
@@ -3755,6 +3759,108 @@ def test_regenerate_qrs_rewrites_every_registered_question(tmp_path, monkeypatch
     ]
 @
 
+A restart at the same address must keep the sidecar's date, or [[make]] rebuilds
+slides that are already right.  These tests render a deck the way PythonTeX does,
+so the sidecar holds a relative path, and regenerate from another directory, as a
+server may.  They date the sidecar back, since two writes within one test can share
+a timestamp, and ask whether the old date survives.  The count stays the number of
+QR codes written, which feeds the warning to recompile.
+
+<<test functions>>=
+def _deck_with_a_poll(tmp_path, monkeypatch, *formats):
+    deck = tmp_path / "deck"
+    deck.mkdir()
+    monkeypatch.chdir(deck)
+    store = Store("mentipy.json")
+    for qr_format in formats or ("pdf",):
+        mc(
+            "One?",
+            ["Yes", "No"],
+            store=store,
+            base_url="http://a.example:8080",
+            qr_format=qr_format,
+        )
+    [sidecar] = (deck / "mentipy-obj").glob("*.pdf_tex")
+    assert "\\includegraphics[width=\\linewidth]{mentipy-obj/" in (
+        sidecar.read_text()
+    )
+    served_store = Store(deck / "mentipy.json")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    os.utime(sidecar, (1_000_000_000, 1_000_000_000))
+    return served_store, sidecar
+
+
+def test_regenerating_for_the_same_address_keeps_the_sidecar_date(
+    tmp_path, monkeypatch
+):
+    store, sidecar = _deck_with_a_poll(tmp_path, monkeypatch)
+    dated = sidecar.stat().st_mtime_ns
+
+    count = regenerate_qrs(store, "http://a.example:8080")
+
+    assert sidecar.stat().st_mtime_ns == dated
+    assert count == 1
+
+
+def test_regenerating_for_another_address_rewrites_the_sidecar(
+    tmp_path, monkeypatch
+):
+    store, sidecar = _deck_with_a_poll(tmp_path, monkeypatch)
+    dated = sidecar.stat().st_mtime_ns
+
+    regenerate_qrs(store, "http://b.example:8080")
+
+    assert sidecar.stat().st_mtime_ns != dated
+    assert "b.example" in sidecar.read_text()
+@
+
+The sidecar's text cannot vouch for the images.  Every format of a question in one
+directory shares one sidecar, so the first format written makes it match while the
+next format still holds the old address, which would put one address's code above
+another's caption.  The test compares each file with a fresh code for the new
+address.  They are the same bytes for the same URL, except that a PDF carries the
+time it was made, which the comparison strips.  PDF has to be among the formats, as
+it is the default and the one decks use.
+
+<<test functions>>=
+def _without_the_creation_date(image):
+    return re.sub(rb"/CreationDate\s*\([^)]*\)", b"", image.read_bytes())
+
+
+def test_regenerating_updates_every_format_beside_a_shared_sidecar(
+    tmp_path, monkeypatch
+):
+    store, sidecar = _deck_with_a_poll(
+        tmp_path, monkeypatch, "pdf", "png", "svg"
+    )
+    prefix = sidecar.stem.removeprefix("Q-")
+    url = f"http://b.example:8080/{prefix}"
+
+    regenerate_qrs(store, "http://b.example:8080")
+
+    for fmt in ("pdf", "png", "svg"):
+        fresh = make_qr(url, tmp_path / f"fresh.{fmt}", fmt=fmt)
+        written = sidecar.with_suffix(f".{fmt}")
+        assert _without_the_creation_date(written) == (
+            _without_the_creation_date(fresh)
+        ), fmt
+
+
+def test_regenerating_repairs_an_image_at_the_same_address(
+    tmp_path, monkeypatch
+):
+    store, sidecar = _deck_with_a_poll(tmp_path, monkeypatch, "png")
+    image = sidecar.with_suffix(".png")
+    expected = image.read_bytes()
+    image.write_bytes(b"")
+
+    regenerate_qrs(store, "http://a.example:8080")
+
+    assert image.read_bytes() == expected
+@
+
 Remembered QR paths matter when the same question has been rendered into more
 than one document or file format.  Regeneration must refresh every remembered
 artifact and preserve the document-relative include path for each sidecar.
@@ -4328,6 +4434,7 @@ def test_write_snippet_writes_under_the_base_dir(book, tmp_path):
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import unicodedata
