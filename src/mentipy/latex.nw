@@ -3820,15 +3820,10 @@ The sidecar's text cannot vouch for the images.  Every format of a question in o
 directory shares one sidecar, so the first format written makes it match while the
 next format still holds the old address, which would put one address's code above
 another's caption.  The test compares each file with a fresh code for the new
-address.  They are the same bytes for the same URL, except that a PDF carries the
-time it was made, which the comparison strips.  PDF has to be among the formats, as
-it is the default and the one decks use.
+address, which has the same bytes for the same URL.  PDF has to be among the
+formats, as it is the default and the one decks use.
 
 <<test functions>>=
-def _without_the_creation_date(image):
-    return re.sub(rb"/CreationDate\s*\([^)]*\)", b"", image.read_bytes())
-
-
 def test_regenerating_updates_every_format_beside_a_shared_sidecar(
     tmp_path, monkeypatch
 ):
@@ -3843,9 +3838,7 @@ def test_regenerating_updates_every_format_beside_a_shared_sidecar(
     for fmt in ("pdf", "png", "svg"):
         fresh = make_qr(url, tmp_path / f"fresh.{fmt}", fmt=fmt)
         written = sidecar.with_suffix(f".{fmt}")
-        assert _without_the_creation_date(written) == (
-            _without_the_creation_date(fresh)
-        ), fmt
+        assert written.read_bytes() == fresh.read_bytes(), fmt
 
 
 def test_regenerating_repairs_an_image_at_the_same_address(
@@ -4434,7 +4427,6 @@ def test_write_snippet_writes_under_the_base_dir(book, tmp_path):
 import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 import unicodedata

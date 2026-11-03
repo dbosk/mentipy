@@ -207,9 +207,10 @@ share one sidecar, so it can match while another format still holds an old addre
 and an interrupted write leaves the two disagreeing as well.  Writing the image on
 every call repairs that for each target the caller names, and a server start names
 every remembered one.  This relies on Makefiles depending on the sidecars rather
-than on the images, whose dates do move; a direct [[latexmk]] run compares the
-images and may rerun.  The one case it misses is narrow: an image repaired at the
-same address leaves the sidecar's date alone, so [[make]] does not rebuild a PDF
+than on the images, whose dates do move; a direct [[latexmk]] run compares content,
+and the image's bytes stay the same.  The one case it misses is narrow: an image
+repaired at the same address leaves the sidecar's date alone, so [[make]] does not
+rebuild a PDF
 made from the broken image, though the server still says to recompile.  Here a
 sidecar that cannot be read counts as different and gets overwritten, as it always
 did in [[make_qr]]; a server start still fails on one earlier, when
