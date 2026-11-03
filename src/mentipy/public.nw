@@ -759,6 +759,7 @@ def test_expose_ssh_stops_the_child_when_interrupted_starting_the_reader(
 
 
 def test_stopping_ssh_cannot_hang_on_a_lock_an_interruption_left(monkeypatch):
+    pytest.importorskip("fcntl")
     monkeypatch.setattr(public_module, "SSH_SHUTDOWN_TIMEOUT", 0.1)
     process = public_module.subprocess.Popen(["sleep", "60"])
     process._waitpid_lock.acquire()

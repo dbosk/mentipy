@@ -3118,20 +3118,29 @@ started under, so that [[nohup make test]] tests the same thing.  A
 address is pinned, so no test depends on the network, and it is not a loopback
 address, so a record is written; its content tells the test the socket is bound.
 
-Whatever a test starts ends by itself: the command by an alarm, the programs
-below after a bounded loop.  A test run that is killed runs no teardown, and a
-program with a session of its own is not stopped along with it, so an endless
-one would stay behind.  One did, for 41 minutes.  The limits are far above
-what a test needs on a loaded machine.
+Whatever a test starts ends by itself.  A test run that is killed runs no
+teardown, and a program with a session of its own is not stopped along with it,
+so an endless one would stay behind.  One did, for 41 minutes.  The command has
+a thread that ends it soon after the test run has gone, or at a limit.  It is
+not an alarm, since the deadline under test replaces the alarm, and a test may
+start the command with [[SIGALRM]] ignored.  The programs below run a bounded
+loop, as one of them has to outlive the command.  The limits are far above what
+a test needs on a loaded machine.
 
 <<test functions>>=
 _SERVED = "http://203.0.113.7:8080"
 _CLI_PROCESS = '''\
-import signal
+import os, signal, threading, time
 signal.signal(signal.SIGINT, signal.default_int_handler)
 signal.signal(signal.SIGTERM, signal.SIG_DFL)
 signal.signal(signal.SIGHUP, signal.SIG_DFL)
-signal.alarm({limit})
+def end_with_the_test_run(limit):
+    while os.getppid() == {test_run} and time.monotonic() < limit:
+        time.sleep(0.5)
+    os._exit(70)
+threading.Thread(
+    target=end_with_the_test_run, args=(time.monotonic() + {limit},), daemon=True
+).start()
 {setup}
 import mentipy.cli
 mentipy.cli.main()
@@ -3162,7 +3171,10 @@ def _lecture(tmp_path, command, *options, setup="", settings=None, **popen):
     with open(tmp_path / "output.log", "wb") as log:
         process = _REAL_POPEN(
             [sys.executable, "-c",
-             _CLI_PROCESS.format(setup=setup, limit=_LECTURE_LIMIT), command,
+             _CLI_PROCESS.format(
+                 setup=setup, limit=_LECTURE_LIMIT, test_run=os.getpid()
+             ),
+             command,
              "--host", "127.0.0.1", "--port", str(port),
              "--store", str(tmp_path / "mentipy.json"), *options],
             cwd=tmp_path,
@@ -3707,6 +3719,7 @@ def _handlers():
 
 
 def test_a_signal_goes_on_to_the_handler_from_before(tmp_path, monkeypatch):
+    pytest.importorskip("fcntl")
     _served_deck(tmp_path, monkeypatch, "auto")
     calls = []
 
@@ -3756,6 +3769,7 @@ def test_the_handlers_come_back_after_a_run(tmp_path, monkeypatch, ending):
 
 
 def test_a_run_without_a_signal_leaves_an_alarm_alone(tmp_path, monkeypatch):
+    pytest.importorskip("fcntl")
     _served_deck(tmp_path, monkeypatch, "auto")
     signal.alarm(600)
     try:
@@ -3782,13 +3796,17 @@ def test_a_handler_not_set_from_python_is_left_in_place(tmp_path, monkeypatch):
     during = []
 
     def serving():
-        during.extend(real_getsignal(s) for s in (signal.SIGHUP, signal.SIGTERM))
+        during.extend(
+            real_getsignal(signum) for signum in (signal.SIGHUP, signal.SIGTERM)
+        )
 
     _while_serving(monkeypatch, serving)
     monkeypatch.setattr(
         signal,
         "getsignal",
-        lambda signum: None if signum == signal.SIGHUP else real_getsignal(signum),
+        lambda signum: (
+            None if signum == signal.SIGHUP else real_getsignal(signum)
+        ),
     )
 
     _start_local()
