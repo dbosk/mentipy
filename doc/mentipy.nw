@@ -1567,7 +1567,8 @@ If the store holds questions that the latest build of the deck no longer
 registers, the index puts the deck's own questions first, under
 \enquote{Current questions}, so the first line is the deck's first
 question, and the rest after them, under \enquote{Old questions}.  Old
-questions keep their answers, links and QR codes.  Building a cut-down
+questions keep their answers, links and QR codes.  The row of the active
+question has a toned background, in whichever section it stands.  Building a cut-down
 deck or rendering one question again from a terminal moves the others
 under the old heading until the next full build, as it does on the
 navigation row.  An old question still counts for the labels: it stands

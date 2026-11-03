@@ -197,6 +197,7 @@ The server's root URL is your index of the questions, on the lecture machine
 or with the admin token. After a rebuild that dropped questions it has two
 sections: `Current questions`, the deck as last built with its first question
 at the top, and `Old questions`, which keep their answers, links and QR codes.
+The row of the question the lecture is on has a toned background.
 
 Terminal helpers use question hash prefixes. List registered questions first,
 then watch or export one question by prefix:

@@ -424,6 +424,7 @@ pre code.highlight {
   padding: 0.1rem 0.4rem;
 }
 .status-active { background: #4a90d9; color: white; }
+.index-active { background: #e3eefa; }
 .status-open { background: #dfeee0; color: #1f5c2a; }
 .status-locked { background: #eee; color: #555; }
 .status-skipped { background: #fff3cd; color: #7a5b00; }
@@ -1413,6 +1414,12 @@ row as it is claimed is what guarantees every question exactly one line,
 and a live hash that has left the store, because the file was replaced, is
 skipped.
 
+The row of the active question, the one [[/active]] goes to, has a toned
+background, so the lecturer finds the lecture's place from across the page.
+It follows the label rather than deciding anything itself, and the label
+keeps the row readable without colour.  The first question gets no marking,
+since it is already first on the page.
+
 <<functions>>=
 
 
@@ -1455,14 +1462,17 @@ def _render_index_list(
 
     for entry in entries:
         status = ""
+        row = "<li>"
         if progress is not None:
             label = progress.status(entry["hash"], deck)
+            if label == "active":
+                row = '<li class="index-active">'
             status = (
                 f' <span class="status status-{label}">'
                 f'{escape(catalogue("status." + label))}</span>'
             )
         items.append(
-            "<li>"
+            f"{row}"
             f'<a href="/{entry["url_prefix"]}"><code>{entry["url_prefix"]}</code></a> '
             f'{_render_inline(entry["text"])} '
             f'(<a href="/{entry["url_prefix"]}/results">{results}</a>)'
@@ -1534,10 +1544,10 @@ must still be the first thing on the page.
 <<test functions>>=
 def _index_sections(page):
     pieces = re.split(r"<h2>(.*?)</h2>", page)
-    sections = [(None, pieces[0])] if "<li>" in pieces[0] else []
+    sections = [(None, pieces[0])] if "</li>" in pieces[0] else []
     sections += list(zip(pieces[1::2], pieces[2::2]))
     return [
-        (heading, re.findall(r'<li><a href="/([^"/]+)">', body))
+        (heading, re.findall(r'<li[^>]*><a href="/([^"/]+)">', body))
         for heading, body in sections
     ]
 
@@ -1545,10 +1555,15 @@ def _index_sections(page):
 def _index_labels(page):
     return dict(
         re.findall(
-            r'<li><a href="/([^"/]+)">.*?class="status status-(\w+)".*?</li>',
+            r'<li[^>]*><a href="/([^"/]+)">.*?'
+            r'class="status status-(\w+)".*?</li>',
             page,
         )
     )
+
+
+def _toned_rows(page):
+    return re.findall(r'<li class="index-active"><a href="/([^"/]+)">', page)
 
 
 def _rebuilt_without_two_questions(tmp_path):
@@ -1673,6 +1688,32 @@ def test_render_index_lists_every_question_when_the_store_changes(tmp_path):
     assert len(rows) == 3
     listed = [prefix for _heading, prefixes in sections for prefix in prefixes]
     assert sorted(listed) == sorted(row["url_prefix"] for row in rows)
+@
+
+Exactly one row is toned, the active question's, wherever it stands: nowhere
+before the lecturer has opened anything, on the first line when the lecture
+is on the deck's first question, and in the old section when it is on an old
+one.  A skip takes the tone along with the label, to the opening before it.
+The style sheet has to define the class, or the markup would tone nothing.
+
+<<test functions>>=
+def test_render_index_tones_only_the_active_row(tmp_path):
+    store, current, old = _rebuilt_without_two_questions(tmp_path)
+    progress = LectureProgress()
+
+    def toned():
+        return _toned_rows(server_module._render_index(store, progress))
+
+    assert toned() == []
+    progress.open(store.resolve(current[0]))
+    assert toned() == [current[0]]
+    progress.open(store.resolve(old[1]))
+    assert toned() == [old[1]]
+    progress.open(store.resolve(current[1]))
+    progress.close(store.resolve(current[1]))
+    assert toned() == [old[1]]
+    assert "index-active" not in server_module._render_index(store)
+    assert re.search(r"\.index-active \{ background: #", STYLE_CSS)
 @
 
 The headings are catalogue strings, and every catalogue string is escaped
@@ -8268,6 +8309,8 @@ def test_index_labels_old_questions_as_the_gate_treats_them(tmp_path):
     ]
     assert set(_index_labels(fresh).values()) == {"locked"}
     assert len(_index_labels(fresh)) == 4
+    assert _toned_rows(fresh) == []
+    assert _toned_rows(opened) == [old_last]
     assert waiting in head_when_fresh
     assert _index_labels(opened) == {
         head: "open",
