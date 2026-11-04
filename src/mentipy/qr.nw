@@ -1,4 +1,5 @@
 \chapter{QR Codes}
+\label{chap:qr}
 
 The QR module is intentionally thin.  The interesting design decision happened
 earlier: we chose [[segno]] because it stays in pure Python and writes PDF files
@@ -47,10 +48,10 @@ QR_SCALE = 10
 @
 
 The single public function does three things: ensure the parent directory
-exists, let segno infer the output format from the extension, and write the
-[[.pdf_tex]] sidecar next to the QR image.  We write the sidecar for every
-format because LaTeX-facing consumers (slides and the printed manual) may
-prefer either PDF or PNG output, and the sidecar is cheap to produce.  The
+exists, write the QR image, with [[segno]] inferring the output format from the
+extension, and write the [[.pdf_tex]] sidecar next to it.  We write the sidecar
+for every format because LaTeX-facing consumers (slides and the printed manual)
+may prefer either PDF or PNG output, and the sidecar is cheap to produce.  The
 HTML results page consumes the image file directly via [[<img>]] and simply
 ignores the sidecar---an extra small text file on disk is far less of a hazard
 than silently producing a broken [[\input]] target.
@@ -86,9 +87,144 @@ def make_qr(
     path = Path(out_path)
     target = path if path.suffix else path.with_suffix(f".{fmt}")
     target.parent.mkdir(parents=True, exist_ok=True)
-    segno.make(url, error=QR_ERROR_LEVEL).save(target, scale=QR_SCALE)
+    _write_qr_image(url, target)
     _write_pdf_tex_sidecar(target, url, include_path=include_path)
     return target
+@
+
+\subsection{Writing a file whole}
+
+Slides and notes built by [[make -j]] share a store and so write the same QR
+files at the same moment, and a server start can join them.  Writing in place
+loses data there.  One writer's [[open]] empties the file that the other has
+just finished, and a writer that then reads the file back to blank its date, as
+[[make_qr]] used to do, writes those zero bytes over it.  Two processes started
+together on one target left an empty file in about one round in a thousand, and
+[[pdflatex]] stopped with [[reading image file failed]].  PythonTeX does not
+rerun an unchanged block, so nothing repaired it.  A [[pdflatex]] reading the
+file during a write could see the same empty or partial file.
+
+So [[segno]] writes a temporary file only this call knows about, the blanking
+happens there, and [[os.replace]] moves the finished file into place.  The move
+is atomic: a reader finds the earlier file or the new one, and two writers can
+only overwrite each other with a whole file.
+
+A file whose bytes would not change is left alone: we compare the temporary file
+with it, and remove the temporary file if they match.  A rebuild at the same
+address then keeps the file's number, date, group, ACL and hard links, which a
+new file would lose.  The evidence is the image's own bytes, since a matching
+sidecar says nothing about the image (\cref{sec:qr-sidecar}).  A file that
+cannot be read counts as different and is replaced.  What a changed address
+still drops is what a new file cannot inherit: a group other than the
+directory's, an ACL and a hard link.  A file marked read-only is replaced like
+any other and keeps its mode.
+
+The temporary file is a path rather than an [[io.BytesIO]], for two reasons.
+[[segno]] cannot write EPS, TeX, XBM or XPM to a binary stream.  And since it
+opens the path with a plain [[open]], the umask decides the mode just as when it
+wrote the target directly, whereas [[tempfile]] would make the file 0600 and
+lock colleagues out of a shared deck directory.  A file that already exists
+hands on its mode, since writing in place would have kept that too.
+
+The name ends with the target's, because [[segno]] takes the format from it, and
+starts with a dot, so that a shell pattern like [[*.pdf]] does not match it.
+A random part keeps writers apart.  The store's process number would not do
+here, since threads of one process write QR files too, and a deck directory can
+be on a file system shared between machines.  The price is that a process killed
+before the move leaves its file behind for good, while a process number would
+let a later process recognise it.  That window is short, and the file is small
+and harmless.
+
+The target's symbolic links are resolved first, as [[os.replace]] would replace
+the link instead of writing through it.  All this does need one permission that
+writing in place did not, namely to write in the directory, even when the bytes
+turn out the same.  A build then gets the error; a server start only warns,
+since that must not stop a lecture (\cref{sec:regenerating-qrs}).
+
+The route does not depend on what is written, so [[write_whole]] takes that as
+a function, and the sidecar uses it too (\cref{sec:qr-sidecar}).
+
+<<imports>>=
+import contextlib
+import os
+import secrets
+import shutil
+from collections.abc import Callable
+<<functions>>=
+def write_whole(target: Path, write: Callable[[Path], object]):
+    """Replace `target` with what `write` puts in the path it is given.
+
+    A reader finds the earlier file or the new one, never part of one.  If
+    the bytes would not change, `target` stays the very same file.
+    """
+
+    destination = Path(os.path.realpath(target))
+    temporary = destination.with_name(
+        f".{secrets.token_hex(8)}.{destination.name}"
+    )
+    try:
+        write(temporary)
+        if _same_bytes(destination, temporary):
+            return
+        with contextlib.suppress(FileNotFoundError):
+            shutil.copymode(destination, temporary)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _same_bytes(first: Path, second: Path) -> bool:
+    try:
+        return first.read_bytes() == second.read_bytes()
+    except OSError:
+        return False
+
+
+def _write_qr_image(url: str, target: Path):
+    def write(temporary: Path):
+        segno.make(url, error=QR_ERROR_LEVEL).save(temporary, scale=QR_SCALE)
+        _blank_pdf_creation_date(temporary)
+
+    write_whole(target, write)
+@
+
+\subsection{Blanking the PDF's date}
+
+The same URL should give the same bytes, and a PDF from [[segno]] does not: it
+carries a [[/CreationDate]] with the time it was written, and [[segno]] has no
+option to leave it out.  That matters because [[latexmk]] decides by content
+whether an input has changed.  We tried it: rewriting a QR PDF for the same URL
+made [[latexmk]] compile the document again, where nothing had changed.  Every
+server start and every PythonTeX run writes these files anew, and with a date in
+them no two would agree, so the comparison above could never leave one alone.
+Nobody reads the date of a QR code, and the file's own timestamp already says
+when it was written.
+
+We blank the date with spaces rather than cut it out.  The PDF's cross-reference
+table records byte offsets, and the [[startxref]] offset lies after the date, so
+removing the bytes would leave the file pointing at the wrong place.  Spaces
+between two dictionary entries are valid PDF and keep every offset right.  A
+later [[segno]] that writes the date differently would slip past the pattern.
+Comparing two writes need not notice that, as they agree within one second, so
+the offsets test below also looks for the date's key in the file itself.
+
+Only PDF needs this.  PNG and SVG carry no date, and we leave the date in the
+EPS and TeX formats, which give different bytes at each write: [[pdflatex]]
+cannot include EPS, and the slides use neither.
+
+<<imports>>=
+import re
+<<constants>>=
+PDF_CREATION_DATE = re.compile(rb"/CreationDate\(D:[^)]*\)")
+<<functions>>=
+def _blank_pdf_creation_date(image: Path):
+    if image.suffix.lower() != ".pdf":
+        return
+    image.write_bytes(
+        PDF_CREATION_DATE.sub(
+            lambda date: b" " * len(date[0]), image.read_bytes()
+        )
+    )
 @
 
 \section{The [[.pdf_tex]] sidecar}
@@ -144,7 +280,7 @@ def _write_pdf_tex_sidecar(
     except (OSError, UnicodeError):
         current = None
     if current != text:
-        sidecar.write_text(text)
+        write_whole(sidecar, lambda temporary: temporary.write_text(text))
     return sidecar
 
 
@@ -169,19 +305,27 @@ def _sidecar_text(
 A sidecar whose text would not change keeps its file, and so its date.  Deck
 Makefiles depend on the sidecars, so a new date means a rebuild of the slides, and
 both the server and every PythonTeX run write these files with nothing to change
-most of the time.  The image is always written, though, since a matching sidecar
-says nothing about it: [[Q-x.pdf]], [[Q-x.png]] and [[Q-x.svg]] in one directory
-share one sidecar, so it can match while another format still holds an old address,
-and an interrupted write leaves the two disagreeing as well.  Writing the image on
-every call repairs that for each target the caller names, and a server start names
-every remembered one.  This relies on Makefiles depending on the sidecars rather
-than on the images, whose dates do move; a direct [[latexmk]] run compares the
-images and may rerun.  The one case it misses is narrow: an image repaired at the
-same address leaves the sidecar's date alone, so [[make]] does not rebuild a PDF
-made from the broken image, though the server still says to recompile.  Here a
-sidecar that cannot be read counts as different and gets overwritten, as it always
-did in [[make_qr]]; a server start still fails on one earlier, when
-[[sidecar_include_path]] reads it.
+most of the time.  The image is always made and compared, though, since a
+matching sidecar says nothing about it: [[Q-x.pdf]], [[Q-x.png]] and [[Q-x.svg]]
+in one directory share one sidecar, so it can match while another format still
+holds an old address, and an interrupted call leaves the two disagreeing as
+well.  Comparing on every call repairs that for each target the caller names,
+and a server start names every remembered one.  A rebuild at the same address
+therefore moves no date, so neither [[make]] nor [[latexmk]] sees a change; only
+the EPS and TeX formats, which hold a date, are replaced each time.  The one case
+it misses is narrow: an image repaired at the same address leaves the sidecar's
+date alone, so [[make]] does not rebuild a PDF made from the broken image, though
+the server still says to recompile.  Here a sidecar that cannot be read counts as
+different and gets overwritten, as it always did in [[make_qr]]; a server start
+still fails on one that is not valid text, earlier, when [[sidecar_include_path]]
+reads it.
+
+A sidecar that does change is written whole, like the image.  An empty sidecar
+is worse than an empty image, because nothing complains: [[\input]] of an empty
+file is valid LaTeX, so a slide compiled at that moment would lose its QR code
+and URL without an error, where an empty image at least stops [[pdflatex]].  A
+server starting at that moment would also read no include path from it, and fall
+back on computing one.
 
 <<constants>>=
 QR_TEX_SUFFIX = ".pdf_tex"
@@ -271,15 +415,372 @@ def test_make_qr_writes_a_pdf(tmp_path):
 @
 
 Regeneration may run several times for the same question as the public address
-changes or the document is rebuilt.  For a fixed URL, however, the artifact
-should be stable; otherwise a rebuild alone would create needless file churn.
+changes or the document is rebuilt.  For a fixed URL, however, the formats the
+slides and pages use should be stable, whatever the time; otherwise a rebuild
+alone would create needless file churn.  The test moves the clock between the
+two writes instead of waiting for it: two writes in one second would agree even
+with a date in the file.  The clock is the one thing here we cannot make real,
+and it is [[segno]]'s present clock only, so this test cannot see a date from
+any other source.
 
 <<test functions>>=
-def test_make_qr_is_deterministic_for_the_same_url(tmp_path):
-    first = make_qr("http://localhost:8080/abcd", tmp_path / "first.pdf")
-    second = make_qr("http://localhost:8080/abcd", tmp_path / "second.pdf")
+@pytest.mark.parametrize("fmt", ["pdf", "png", "svg"])
+def test_make_qr_is_deterministic_for_the_same_url(tmp_path, monkeypatch, fmt):
+    url = "http://localhost:8080/abcd"
+    first = make_qr(url, tmp_path / f"first.{fmt}", fmt=fmt)
+    monkeypatch.setattr("time.strftime", lambda *_args: "20300101000000")
+    second = make_qr(url, tmp_path / f"second.{fmt}", fmt=fmt)
 
     assert first.read_bytes() == second.read_bytes()
+@
+
+Blanking must leave a PDF that a reader can still follow.  The cross-reference
+table has to sit where [[startxref]] says, and each entry in it has to point at
+its object, which fails if the blanking ever changes the length of the file.
+Whatever replaces the date has to be white space, as anything else corrupts the
+dictionary, so the test checks that only white space separates the start of the
+dictionary from its [[/Producer]].  And the key must be gone: that is what
+notices a date written in a way the pattern misses, whichever clock it comes
+from.
+
+<<test functions>>=
+def test_make_qr_keeps_the_pdf_offsets_right(tmp_path):
+    pdf = make_qr("http://localhost:8080/abcd", tmp_path / "Q.pdf").read_bytes()
+
+    [table] = re.findall(rb"startxref\r\n(\d+)", pdf)
+    assert pdf[int(table):].startswith(b"xref")
+    entries = re.findall(rb"(\d{10}) 00000 n", pdf)
+    assert len(entries) == 5
+    for number, offset in enumerate(entries, start=1):
+        assert pdf[int(offset):].startswith(b"%d 0 obj" % number)
+    assert b"CreationDate" not in pdf
+    assert re.search(rb"5 0 obj <<\s+/Producer\(", pdf)
+@
+
+The format comes from the extension whatever its case, so the date goes there
+too.
+
+<<test functions>>=
+def test_make_qr_blanks_the_date_whatever_the_extension_looks_like(tmp_path):
+    pdf = make_qr("http://localhost:8080/abcd", tmp_path / "Q.PDF").read_bytes()
+
+    assert b"CreationDate" not in pdf
+@
+
+\subsection{A whole file, whatever the timing}
+
+Each test below holds one property of the replacement.  The first two are the
+race itself.  Its timing cannot be had on demand from real processes, so the
+first test puts the other writer's truncation at the worst moment, right after
+[[segno]] has written; the second needs no such help, since a reader that
+opened the file before the write is real, and in-place writing changes what it
+reads.
+
+<<test functions>>=
+URL = "http://localhost:8080/abcd"
+
+
+def _after_segno_writes(monkeypatch, action):
+    real_save = segno.QRCode.save
+
+    def save_and_act(self, out, **kwargs):
+        real_save(self, out, **kwargs)
+        action()
+
+    monkeypatch.setattr(segno.QRCode, "save", save_and_act)
+
+
+def test_make_qr_survives_another_writer_emptying_the_file(
+    tmp_path, monkeypatch
+):
+    whole = make_qr(URL, tmp_path / "whole.pdf").read_bytes()
+    target = tmp_path / "Q.pdf"
+    _after_segno_writes(monkeypatch, lambda: target.write_bytes(b""))
+
+    make_qr(URL, target)
+
+    assert target.read_bytes() == whole
+
+
+def test_make_qr_leaves_the_file_a_reader_has_open_alone(tmp_path):
+    target = make_qr("http://old.example/abcd", tmp_path / "Q.pdf")
+    earlier = target.read_bytes()
+
+    with target.open("rb") as reader:
+        make_qr("http://new.example/abcd", target)
+
+        assert reader.read() == earlier
+    assert target.read_bytes() != earlier
+@
+
+The second test cannot see a moment with no file at the target, as a delete
+and write would make, so here is the same promise under real concurrency, for
+the image and the sidecar.  Two threads write while the main thread reads, and
+they change the address, since an unchanged file is not replaced at all.  This
+can only pass by luck on broken code, never fail by luck on working code:
+whatever the timing, every read of correct code gets a whole file.
+
+<<test functions>>=
+@pytest.mark.parametrize("suffix", [".pdf", ".pdf_tex"])
+def test_make_qr_shows_a_concurrent_reader_only_whole_files(tmp_path, suffix):
+    urls = ["http://a.example/abcd", "http://b.example/abcd"]
+    target = tmp_path / "Q.pdf"
+    file = target.with_suffix(suffix)
+    whole = set()
+    for url in urls:
+        make_qr(url, target)
+        whole.add(file.read_bytes())
+
+    def keep_changing():
+        for _ in range(25):
+            for url in urls:
+                make_qr(url, target)
+
+    with ThreadPoolExecutor(2) as pool:
+        writers = [pool.submit(keep_changing) for _ in range(2)]
+        seen = {file.read_bytes()}
+        while not all(writer.done() for writer in writers):
+            seen.add(file.read_bytes())
+    for writer in writers:
+        writer.result()
+
+    assert seen <= whole
+@
+
+Two writers in one process must not share a temporary file, which the process
+number alone would make them do.  The barrier holds both after [[segno]] has
+written, so with one shared name the file can only be moved once and the other
+writer fails.  Its limit only keeps a bug from hanging the suite.
+
+<<test functions>>=
+def test_make_qr_writers_in_one_process_keep_apart(tmp_path, monkeypatch):
+    target = tmp_path / "Q.pdf"
+    whole = make_qr(URL, tmp_path / "whole.pdf").read_bytes()
+    both_have_written = threading.Barrier(2, timeout=300)
+    _after_segno_writes(monkeypatch, both_have_written.wait)
+
+    with ThreadPoolExecutor(2) as pool:
+        writers = [pool.submit(make_qr, URL, target) for _ in range(2)]
+    for writer in writers:
+        writer.result()
+
+    assert target.read_bytes() == whole
+    assert _names_in(tmp_path) == {
+        "Q.pdf", "Q.pdf_tex", "whole.pdf", "whole.pdf_tex"
+    }
+
+
+def _names_in(directory):
+    return {path.name for path in directory.iterdir()}
+@
+
+Separate processes are the [[make -j]] case, and they have the same thread names
+and thread numbers, so they need their own test.  Each process waits after
+[[segno]] has written until the other has too, so with one shared name the file
+can only be moved once and the other process fails.
+
+<<test functions>>=
+_QR_WRITER = """
+import pathlib, sys, time
+import segno
+from mentipy.qr import make_qr
+
+url, target, mine, theirs = sys.argv[1:]
+real_save = segno.QRCode.save
+
+
+def save_and_wait(self, out, **kwargs):
+    real_save(self, out, **kwargs)
+    pathlib.Path(mine).touch()
+    while not pathlib.Path(theirs).exists():
+        time.sleep(0.001)
+
+
+segno.QRCode.save = save_and_wait
+make_qr(url, target)
+"""
+
+
+def test_make_qr_writers_in_two_processes_keep_apart(tmp_path):
+    deck = tmp_path / "deck"
+    urls = ["http://a.example/abcd", "http://b.example/abcd"]
+    whole = {
+        make_qr(url, tmp_path / f"{number}.pdf").read_bytes()
+        for number, url in enumerate(urls)
+    }
+    deck.mkdir()
+    marks = [tmp_path / "first.mark", tmp_path / "second.mark"]
+    writers = [
+        subprocess.Popen(
+            [sys.executable, "-c", _QR_WRITER, url, str(deck / "Q.pdf"),
+             str(mine), str(theirs)]
+        )
+        for url, mine, theirs in zip(urls, marks, reversed(marks))
+    ]
+    try:
+        assert [writer.wait(timeout=120) for writer in writers] == [0, 0]
+    finally:
+        for writer in writers:
+            if writer.poll() is None:
+                writer.kill()
+
+    assert (deck / "Q.pdf").read_bytes() in whole
+    assert _names_in(deck) == {"Q.pdf", "Q.pdf_tex"}
+@
+
+While it exists, the temporary file stays out of the way of a Makefile's or a
+shell's wildcard, which might otherwise pick it up as one more QR code.
+
+<<test functions>>=
+def test_make_qr_hides_its_temporary_file_from_wildcards(tmp_path, monkeypatch):
+    found = []
+    _after_segno_writes(
+        monkeypatch,
+        lambda: found.extend(glob.glob(str(tmp_path / "*.pdf"))),
+    )
+
+    make_qr(URL, tmp_path / "Q.pdf")
+
+    assert found == []
+    assert (tmp_path / "Q.pdf").exists()
+@
+
+A QR file keeps the permissions it would have had when written in place: a new
+one follows the umask, which the temporary files of [[tempfile]] do not, and an
+existing one keeps its mode.  In a directory shared with colleagues, 0600 would
+lock them out of the deck's QR codes.
+
+<<test functions>>=
+def test_make_qr_gives_a_new_file_the_mode_of_a_plain_open(tmp_path):
+    earlier = os.umask(0o027)
+    try:
+        target = make_qr(URL, tmp_path / "Q.pdf")
+    finally:
+        os.umask(earlier)
+
+    sidecar = target.with_suffix(".pdf_tex")
+    assert stat.S_IMODE(target.stat().st_mode) == 0o640
+    assert stat.S_IMODE(sidecar.stat().st_mode) == 0o640
+
+
+@pytest.mark.parametrize("mode", [0o640, 0o444, 0o000])
+def test_make_qr_keeps_the_mode_of_an_existing_file(tmp_path, mode):
+    target = make_qr(URL, tmp_path / "Q.pdf")
+    earlier = target.read_bytes()
+    target.chmod(mode)
+
+    make_qr("http://other.example/abcd", target)
+
+    assert stat.S_IMODE(target.stat().st_mode) == mode
+    target.chmod(0o640)
+    assert target.read_bytes() != earlier
+
+
+def test_make_qr_keeps_the_mode_of_an_existing_sidecar(tmp_path):
+    sidecar = make_qr(URL, tmp_path / "Q.pdf").with_suffix(".pdf_tex")
+    sidecar.chmod(0o640)
+
+    make_qr("http://other.example/abcd", tmp_path / "Q.pdf")
+
+    assert stat.S_IMODE(sidecar.stat().st_mode) == 0o640
+@
+
+A symbolic link at the target stays a link, and the file it points to gets the
+new code, as with any write through a link.  The temporary file has to be beside
+that file rather than beside the link, as the link may lead to another file
+system, and [[os.replace]] cannot cross one.
+
+<<test functions>>=
+def test_make_qr_writes_through_a_symbolic_link(tmp_path, monkeypatch):
+    real = make_qr(URL, tmp_path / "elsewhere" / "Q.pdf")
+    earlier = real.read_bytes()
+    link = tmp_path / "Q.pdf"
+    link.symlink_to(real)
+    beside_the_real_file = []
+    _after_segno_writes(
+        monkeypatch, lambda: beside_the_real_file.extend(real.parent.iterdir())
+    )
+
+    make_qr("http://other.example/abcd", link)
+
+    assert link.is_symlink()
+    assert real.read_bytes() != earlier
+    assert len(beside_the_real_file) == 3
+@
+
+A write that fails leaves the earlier file as it was and no temporary file
+behind.  Limiting the size of the files this process may write makes the write
+itself fail for real, like a full disk, and a directory at the target makes the
+last step fail.  The limit is not there on every platform.
+
+<<test functions>>=
+@contextmanager
+def _files_limited_to(size):
+    resource = pytest.importorskip("resource")
+    soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (size, hard))
+    try:
+        yield
+    finally:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+
+
+def test_make_qr_keeps_the_earlier_file_when_the_write_fails(tmp_path):
+    target = make_qr(URL, tmp_path / "Q.pdf")
+    earlier = target.read_bytes()
+    names = _names_in(tmp_path)
+
+    with _files_limited_to(100), pytest.raises(OSError):
+        make_qr("http://other.example/abcd", target)
+
+    assert target.read_bytes() == earlier
+    assert _names_in(tmp_path) == names
+
+
+def test_make_qr_removes_its_temporary_file_on_a_keyboard_interrupt(
+    tmp_path, monkeypatch
+):
+    def interrupt():
+        raise KeyboardInterrupt
+
+    _after_segno_writes(monkeypatch, interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        make_qr(URL, tmp_path / "Q.pdf")
+
+    assert _names_in(tmp_path) == set()
+
+
+def test_make_qr_removes_its_temporary_file_when_the_last_step_fails(tmp_path):
+    target = tmp_path / "Q.pdf"
+    target.mkdir()
+
+    with pytest.raises(OSError):
+        make_qr(URL, target)
+
+    assert _names_in(tmp_path) == {"Q.pdf"}
+@
+
+The temporary file must not change which formats work, so every format
+[[segno]] accepts together with a scale gives what [[segno]] itself would write.
+[[segno]] cannot write all of them to a stream, which is why the temporary file
+is a path and not a buffer.  The clock is fixed because some of them hold a
+date.
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    "fmt", ["png", "svg", "eps", "tex", "xbm", "xpm", "pbm", "pam", "ppm"]
+)
+def test_make_qr_writes_every_format_as_segno_does(
+    tmp_path, monkeypatch, fmt
+):
+    monkeypatch.setattr("time.strftime", lambda *_args: "20300101000000")
+    direct = tmp_path / f"direct.{fmt}"
+    segno.make(URL, error=QR_ERROR_LEVEL).save(direct, scale=QR_SCALE)
+
+    written = make_qr(URL, tmp_path / f"Q.{fmt}", fmt=fmt)
+
+    assert written.read_bytes() == direct.read_bytes()
 @
 
 The sidecar is the heart of the anti-drift contract, so the contents matter.
@@ -371,6 +872,26 @@ def test_make_qr_sidecar_can_keep_a_relative_include_path(tmp_path):
     )
 @
 
+An image whose bytes would not change stays the same file, not merely the same
+content.  So a rebuild at the same address keeps everything about it that a new
+file would lose, and the file's number stands for those here: its group, an ACL
+and its hard links.  The test dates the file back, because two writes within one
+test can share a timestamp.
+
+<<test functions>>=
+def test_make_qr_leaves_an_unchanged_image_alone(tmp_path):
+    target = make_qr("http://localhost:8080/abcd", tmp_path / "Q.pdf")
+    os.utime(target, (1_000_000_000, 1_000_000_000))
+    earlier = target.stat()
+    names = _names_in(tmp_path)
+
+    make_qr("http://localhost:8080/abcd", target)
+
+    assert target.stat().st_ino == earlier.st_ino
+    assert target.stat().st_mtime_ns == earlier.st_mtime_ns
+    assert _names_in(tmp_path) == names
+@
+
 A sidecar keeps its date only when its whole text would stay the same.  Any
 difference counts: another address, another include path, or a layout from an
 earlier release.  One that cannot be read is overwritten rather than an error,
@@ -426,6 +947,57 @@ def test_make_qr_replaces_any_other_sidecar_at_the_same_address(
     assert "\\includegraphics" in sidecar.read_text()
 @
 
+A sidecar that changes must not pass through an empty state.  Opening a file for
+writing is the moment that empties it, and that moment cannot be had on demand
+from real processes, so the test looks at the sidecar right after each file
+[[pathlib]] opens for writing during the call.  It first checks that it saw the
+sidecar's own write, which also notices if [[pathlib]] stops going through
+[[io.open]].
+
+<<test functions>>=
+def test_make_qr_never_empties_a_sidecar_while_writing_it(
+    tmp_path, monkeypatch
+):
+    target = make_qr("http://old.example/abcd", tmp_path / "Q.pdf")
+    sidecar = target.with_suffix(".pdf_tex")
+    earlier = sidecar.read_bytes()
+    written, seen = [], set()
+    real_open = io.open
+
+    def open_and_look(file, mode="r", *args, **kwargs):
+        stream = real_open(file, mode, *args, **kwargs)
+        if "w" in mode and isinstance(file, Path):
+            written.append(file.name)
+            seen.add(sidecar.read_bytes())
+        return stream
+
+    monkeypatch.setattr(io, "open", open_and_look)
+    make_qr("http://new.example/abcd", target)
+    monkeypatch.undo()
+
+    assert any(name.endswith(".pdf_tex") for name in written)
+    assert seen == {earlier}
+    assert "http://new.example/abcd" in sidecar.read_text()
+@
+
+A write that fails leaves the earlier sidecar and no temporary file.  With a
+limit of zero the [[open]] of a write in place still succeeds and empties the
+file, and only the write itself fails.
+
+<<test functions>>=
+def test_make_qr_keeps_the_earlier_sidecar_when_its_write_fails(tmp_path):
+    target = make_qr("http://old.example/abcd", tmp_path / "Q.pdf")
+    sidecar = target.with_suffix(".pdf_tex")
+    earlier = sidecar.read_bytes()
+    names = _names_in(tmp_path)
+
+    with _files_limited_to(0), pytest.raises(OSError):
+        _write_pdf_tex_sidecar(target, "http://new.example/abcd")
+
+    assert sidecar.read_bytes() == earlier
+    assert _names_in(tmp_path) == names
+@
+
 The recorded include path must survive a round trip through the
 sidecar, and a missing sidecar must say so rather than invent a path.
 
@@ -443,13 +1015,24 @@ def test_sidecar_include_path_reads_back_what_make_qr_wrote(tmp_path):
 @
 
 <<test [[qr.py]]>>=
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+import glob
+import io
 import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import threading
 
 import pytest
+import segno
 
 from mentipy.qr import *
+from mentipy.qr import QR_ERROR_LEVEL, QR_SCALE, _write_pdf_tex_sidecar
 from mentipy.store import DEFAULT_QR_DIR
-from pathlib import Path
 
 <<test functions>>
 @

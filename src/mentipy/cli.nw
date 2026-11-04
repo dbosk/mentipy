@@ -3127,6 +3127,32 @@ def _start_public(monkeypatch, url):
     )
 
 
+def test_a_read_only_qr_directory_does_not_stop_the_server(
+    tmp_path, monkeypatch
+):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    _rebuild()
+    qr_directory = tmp_path / "mentipy-obj"
+    served = []
+    _while_serving(monkeypatch, lambda: served.append(True))
+    qr_directory.chmod(0o555)
+    try:
+        if os.access(qr_directory, os.W_OK):
+            pytest.skip("this user can write in a read-only directory")
+        result = CliRunner().invoke(
+            cli,
+            ["serve", "--host", "127.0.0.1", "--port", str(_free_port()),
+             "--store", "mentipy.json"],
+        )
+    finally:
+        qr_directory.chmod(0o755)
+
+    assert result.exit_code == 0, result.output
+    assert served == [True]
+    assert "Warning: could not write 1 QR codes" in result.output
+    assert "mentipy-obj (Permission denied)" in result.output
+
+
 @
 
 A server writes the store once, at its start, and never again, including when it stops:
@@ -7017,7 +7043,16 @@ does, by a local request for its results page.  The clock is the only
 thing replaced: the sleep stub plays the lecture, one step per tick,
 and interrupts the watcher once the steps run out.
 
+The tests' clients get a time limit that only keeps a bug from hanging the
+suite, so no test checks how fast a page is any more.  It has two sides.  The
+slowest page we measured took 15 seconds, on a machine with 40 busy processes.
+And a server that hangs costs the suite this limit about a hundred times over,
+so 60 seconds means under two hours where 300 would mean almost nine.
+
 <<test functions>>=
+CLIENT_LIMIT = 60
+
+
 @contextmanager
 def _serving(store, *, port=0, **options):
     server = create_server(store, host="127.0.0.1", port=port, **options)
@@ -7034,7 +7069,7 @@ def _serving(store, *, port=0, **options):
 def _open_for_the_room(server, prefix, headers=None):
     parts = urllib.parse.urlsplit(server)
     connection = http.client.HTTPConnection(
-        parts.hostname, parts.port, timeout=5
+        parts.hostname, parts.port, timeout=CLIENT_LIMIT
     )
     connection.request("GET", f"/{prefix}/results", headers=headers or {})
     response = connection.getresponse()
@@ -8897,12 +8932,30 @@ may it reach a handler on the root logger, here pytest's capture,
 which a user's logging configuration could have put there.  Afterwards
 the [[mentipy]] logger is as it was.
 
+Each dropped request runs on in its own thread, rendering the page before
+its write fails, and the server's shutdown does not wait for such daemon
+threads.  The logger is global, so a thread that outlives the test logs into
+whatever handler is there by then.  This used to be a real failure: the test
+waited half a second, and under load the threads were still rendering when
+the next test started, so their warnings raised that test's exact warning
+count in its banner.  Waiting a longer time would only move the failure to a
+slower machine, so [[_drop_connections]] waits for the threads themselves.
+The server accepts connections in order and starts each thread as it accepts,
+so once a complete request made after the dropped ones has been answered,
+every dropped request that will ever get a thread has one.  We can then join
+those threads, by comparing with the threads running at the start.  This wait
+covers all 40 renders rather than one page, so it has a limit of its own.
+
 <<test functions>>=
+REQUEST_THREADS_LIMIT = 300
+
+
 def _drop_connections(server, path, *, attempts=40):
     parts = urllib.parse.urlsplit(server)
+    running_before = set(threading.enumerate())
     for _ in range(attempts):
         connection = socket.create_connection(
-            (parts.hostname, parts.port), timeout=5
+            (parts.hostname, parts.port), timeout=CLIENT_LIMIT
         )
         connection.sendall(
             f"GET {path} HTTP/1.1\r\nHost: x\r\n\r\n".encode()
@@ -8911,6 +8964,15 @@ def _drop_connections(server, path, *, attempts=40):
             socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
         )
         connection.close()
+    last = http.client.HTTPConnection(
+        parts.hostname, parts.port, timeout=REQUEST_THREADS_LIMIT
+    )
+    last.request("GET", "/")
+    last.getresponse().read()
+    last.close()
+    for thread in set(threading.enumerate()) - running_before:
+        thread.join(REQUEST_THREADS_LIMIT)
+        assert not thread.is_alive()
 
 
 def test_present_keeps_server_warnings_in_the_banner(
@@ -8935,15 +8997,10 @@ def test_present_keeps_server_warnings_in_the_banner(
     store.answer_log().write_text(f"{line}\n" * 1501, encoding="utf-8")
     short = store.register(MCQuestion("Pick one", ("A", "B")))
     monkeypatch.setattr("mentipy.cli.CLEAR_SCREEN", "[clear]")
-    real_sleep = time.sleep
-
-    def drop_then_wait():
-        _drop_connections(server, f"/{long}/results?window=all")
-        real_sleep(0.5)
 
     _play_the_lecture(
         monkeypatch,
-        drop_then_wait,
+        lambda: _drop_connections(server, f"/{long}/results?window=all"),
         lambda: _open_for_the_room(server, short),
     )
 
@@ -8998,7 +9055,9 @@ def test_present_keeps_unexpected_server_errors_in_the_banner(
     monkeypatch.setattr(mentipy.server, "_render_index", broken_index)
 
     def ask_for_the_index():
-        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", port, timeout=CLIENT_LIMIT
+        )
         connection.request("GET", "/")
         with pytest.raises(http.client.HTTPException):
             connection.getresponse()
@@ -9364,7 +9423,7 @@ since it reads the marker header and never the page's words.
 def _page(server, path):
     parts = urllib.parse.urlsplit(server)
     connection = http.client.HTTPConnection(
-        parts.hostname, parts.port, timeout=5
+        parts.hostname, parts.port, timeout=CLIENT_LIMIT
     )
     connection.request("GET", path)
     body = connection.getresponse().read().decode("utf-8")
@@ -9544,7 +9603,7 @@ def test_present_reaps_the_opener_in_another_thread(
     result, _port = _run_present(tmp_path, monkeypatch)
 
     assert result.exit_code == 0, result.output
-    assert _BrowserSpy.waited.wait(timeout=5)
+    assert _BrowserSpy.waited.wait(timeout=30)
     assert len(_BrowserSpy.waiters) == 1
     assert _BrowserSpy.waiters[0] is not threading.main_thread()
     assert _BrowserSpy.waiters[0].daemon
@@ -9627,7 +9686,7 @@ def test_present_opens_a_wildcard_or_localhost_bind(
 def _page_status(url):
     parts = urllib.parse.urlsplit(url)
     connection = http.client.HTTPConnection(
-        parts.hostname, parts.port, timeout=5
+        parts.hostname, parts.port, timeout=CLIENT_LIMIT
     )
     connection.request("GET", parts.path or "/")
     response = connection.getresponse()
@@ -9889,7 +9948,7 @@ def test_present_opens_the_tokenised_index_under_ssh(
     def follow_the_link():
         parts = urllib.parse.urlsplit(browser_spy[0]["argv"][-1])
         connection = http.client.HTTPConnection(
-            parts.hostname, parts.port, timeout=5
+            parts.hostname, parts.port, timeout=CLIENT_LIMIT
         )
         connection.request("GET", f"{parts.path}?{parts.query}")
         response = connection.getresponse()
