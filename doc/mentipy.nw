@@ -1778,8 +1778,8 @@ the closing of its terminal, as [[nohup]] asks, and keeps running; a plain
 
 While a server stops, further signals are ignored, so that they cannot cut the
 cleanup short.  The cleanup has 30 seconds.  A router that does not answer can
-use them up, and the mapping may then stay on the router; the file is gone by
-then.
+use them up, and the mapping may then stay on the router; the file has normally
+gone by then.
 
 A server stopped by [[kill -9]], Ctrl-\textbackslash{} or a power cut cannot
 clean up.  Later builds then put its dead address in the QR codes, without a

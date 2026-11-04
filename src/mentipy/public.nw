@@ -85,11 +85,14 @@ it, and many users will never expose a lecture outside their own machine.  The
 private helper returns both the URL and a teardown callback so the public
 context manager can remove the mapping on shutdown.  The router may hold the
 mapping from the moment it is asked for it, and an interruption during that
-call only takes effect when the call returns.  So until a caller has the
-callback, an interruption, or a lookup of the address that fails, has to
-remove the mapping here.  Asking to delete one that never came about fails,
-which [[cleanup]] ignores, and if the router has another program's mapping on
-this port, that one was about to be replaced anyway.
+call only takes effect when the call returns.  So from that call until a
+caller has the callback, an interruption, or a lookup of the address that
+fails, has to remove the mapping here.  Before that call there is nothing to
+remove, and a delete could only hit another program's mapping on this port,
+which is what [[asked]] prevents.  Asking to delete a mapping the router never
+made fails, which [[cleanup]] ignores.  An interruption during the call itself
+cannot tell whether the router took it, so it deletes anyway; if the router had
+refused because another program holds the port, that program loses its mapping.
 
 <<functions>>=
 def _upnp_mapping(port: int) -> tuple[str, Callable[[], None]]:
@@ -110,10 +113,12 @@ def _upnp_mapping(port: int) -> tuple[str, Callable[[], None]]:
         except Exception:
             return
 
+    asked = False
     try:
         if upnp.discover() == 0:
             raise PublicExposureError("no UPnP gateway answered discovery")
         upnp.selectigd()
+        asked = True
         mapped = upnp.addportmapping(
             port,
             UPNP_PROTOCOL,
@@ -127,7 +132,8 @@ def _upnp_mapping(port: int) -> tuple[str, Callable[[], None]]:
     except Exception as err:
         raise PublicExposureError("could not create a UPnP port mapping") from err
     except BaseException:
-        cleanup()
+        if asked:
+            cleanup()
         raise
 
     if not mapped:
@@ -237,8 +243,11 @@ to that return, the wait, the probe and the start of the reader thread, and any
 way out of it stops the child.  A Ctrl-C reaches [[ssh]] through the terminal
 anyway, but a signal sent to Mentipy alone does not, hence [[BaseException]].  A
 child that has exited during the wait needs no stopping, so reading its stderr
-stays outside.  What is left is the few instructions between this return and the
-[[try]] in [[expose]], too short to have shown up in testing.
+stays outside.  Two windows are left, and they matter only for a signal to
+Mentipy alone, as a hang-up reaches [[ssh]] by itself.  One is inside [[Popen]],
+which waits after the fork for the child's [[exec]], for some milliseconds: a
+signal then leaves [[ssh]] running, as nobody has the process object yet.  The
+other is the few instructions between this return and the [[try]] in [[expose]].
 
 <<functions>>=
 def expose_ssh(
@@ -763,14 +772,21 @@ def test_stopping_ssh_cannot_hang_on_a_lock_an_interruption_left(monkeypatch):
     monkeypatch.setattr(public_module, "SSH_SHUTDOWN_TIMEOUT", 0.1)
     process = public_module.subprocess.Popen(["sleep", "60"])
     process._waitpid_lock.acquire()
-    stopping = threading.Thread(
-        target=public_module._stop_ssh_process, args=(process,), daemon=True
-    )
+    failures = []
+
+    def stop():
+        try:
+            public_module._stop_ssh_process(process)
+        except BaseException as failure:
+            failures.append(failure)
+
+    stopping = threading.Thread(target=stop, daemon=True)
     try:
         stopping.start()
         stopping.join(30)
 
         assert not stopping.is_alive()
+        assert failures == []
     finally:
         process._waitpid_lock.release()
         process.kill()

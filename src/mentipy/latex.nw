@@ -1433,9 +1433,11 @@ recorded again; a build then falls back until that server restarts.
 Ctrl-C, a plain [[kill]], a closed terminal and an error all count as stopping
 (\cref{sec:stop-signals}).  Only a server that runs no code on its way out
 leaves its record behind: [[kill -9]], Ctrl-\textbackslash{} or a power cut.
-The deadline on a stop does not, as the record goes before the exposure, where
-a stop can hang.  The record then stays until the next start of a server
-overwrites it, or the file or the QR directory is removed, and builds
+The deadline on a stop normally does not, as the record goes before the
+exposure, where a stop can hang.  The exception is a first signal that Python
+swallows, after which the deadline ends the server with its record still there
+(\cref{sec:stop-signals}).  The record then stays until the next start of a
+server overwrites it, or the file or the QR directory is removed, and builds
 meanwhile print the dead address without a word about it.  We accept that.  It
 gives the old behaviour of a wrong address until the next start, which is no
 worse than the configuration being out of date, and a build that had to ask

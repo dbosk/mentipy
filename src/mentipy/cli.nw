@@ -3015,11 +3015,11 @@ design is about what surrounds that one line.
   C call, where a router that does not answer would hold it and no Python
   handler could run.  The deadline allows for the five seconds that [[ssh]]
   gets and for a slow router.  Stopping the server waits for no network and the
-  record goes next, so what a deadline cuts off is the exposure, and a mapping
-  may then stay on the router.  Such an end has the status of [[SIGALRM]],
-  since the cleanup did not finish.  [[SIGQUIT]] keeps its default action too,
-  so Ctrl-\textbackslash{} remains the way to leave at once, without any
-  cleanup.
+  record goes next, so what a deadline cuts off is normally the exposure, and a
+  mapping may then stay on the router.  Such an end has the status of
+  [[SIGALRM]], since the cleanup did not finish.  [[SIGQUIT]] keeps its default
+  action too, so Ctrl-\textbackslash{} remains the way to leave at once, without
+  any cleanup.
 \item[The process ends by the signal it received.]
   When the cleanup is over, the handler from before is back and the signal is
   raised again, so with the default handler the process dies from it, as it
@@ -3058,6 +3058,14 @@ thing to happen is the signal.  A hang-up reaches the session of the terminal,
 so it stops an [[ssh]] child by itself, but a plain [[kill]] reaches Mentipy
 alone.  The browser that [[present]] opened has a session of its own, and a
 Python handler does not survive [[exec]], so it runs on either way.
+
+A first signal can be lost.  Python swallows an exception raised in a weakref
+callback or a [[__del__]], and prints \enquote{Exception ignored}, so a signal
+that lands there raises nothing, while the handler has already armed the
+deadline and made later signals ignored.  The server then runs on, and the
+deadline ends it with the record and the exposure both left behind.  We accept
+that, as we have only seen it by forcing the moment, and the main thread mostly
+sits waiting, where no such callback runs.
 
 What no handler can catch is [[SIGKILL]] or the power going off, and
 [[SIGQUIT]] is left alone as said.  \Cref{sec:keep-served-address} says what
@@ -3385,7 +3393,10 @@ the signal is the real code.  With a signal sent only to Mentipy, as a plain
 [[kill]] does, nothing else would stop that [[ssh]].  The signal may also come
 while the tunnel or the mapping is being set up, even while the router is
 adding the mapping, before the exposure context has anything to clean up, so
-the set-up has to clean up after itself.
+the set-up has to clean up after itself.  Before the router has been asked
+there is nothing to clean up, and a delete could only hit another program's
+mapping on that port.  A delete that fails, since the router never made the
+mapping, must not change how the stop goes.
 
 <<test functions>>=
 _QUICK_SSH = (
@@ -3484,6 +3495,7 @@ def test_a_signal_while_the_tunnel_starts_stops_it(tmp_path, fake_ssh):
 def _fake_router(
     tmp_path,
     *,
+    selecting="return None",
     adding="return True",
     removing="open('mapping-removed', 'w').close()",
 ):
@@ -3493,12 +3505,16 @@ def _fake_router(
         "    def discover(self):\n"
         "        return 1\n"
         "    def selectigd(self):\n"
-        "        return None\n"
+        f"        {selecting}\n"
         "    def addportmapping(self, *_arguments):\n"
         f"        {adding}\n"
         "    def deleteportmapping(self, *_arguments):\n"
         f"        {removing}\n"
     )
+
+
+def _noting_and_hanging(note):
+    return f"open({note!r}, 'w').close(); __import__('time').sleep(300)"
 
 
 _KNOWN_PUBLIC_ADDRESS = (
@@ -3547,13 +3563,7 @@ def test_closing_the_terminal_removes_the_port_mapping(tmp_path):
 
 
 def test_a_signal_while_the_router_adds_the_mapping_removes_it(tmp_path):
-    _fake_router(
-        tmp_path,
-        adding=(
-            "open('adding-the-mapping', 'w').close(); "
-            "__import__('time').sleep(300)"
-        ),
-    )
+    _fake_router(tmp_path, adding=_noting_and_hanging("adding-the-mapping"))
     with _lecture(
         tmp_path, "serve", "--public", "upnp", setup=_KNOWN_PUBLIC_ADDRESS
     ) as lecture:
@@ -3563,6 +3573,37 @@ def test_a_signal_while_the_router_adds_the_mapping_removes_it(tmp_path):
 
         assert lecture.process.wait(timeout=60) == -signal.SIGTERM
         assert (tmp_path / "mapping-removed").exists()
+
+
+def test_a_signal_before_the_router_is_asked_removes_nothing(tmp_path):
+    _fake_router(
+        tmp_path, selecting=_noting_and_hanging("selecting-the-gateway")
+    )
+    with _lecture(
+        tmp_path, "serve", "--public", "upnp", setup=_KNOWN_PUBLIC_ADDRESS
+    ) as lecture:
+        _wait_until((tmp_path / "selecting-the-gateway").exists)
+
+        lecture.process.terminate()
+
+        assert lecture.process.wait(timeout=60) == -signal.SIGTERM
+        assert not (tmp_path / "mapping-removed").exists()
+
+
+def test_a_mapping_the_router_cannot_remove_does_not_change_the_stop(tmp_path):
+    _fake_router(
+        tmp_path,
+        adding=_noting_and_hanging("adding-the-mapping"),
+        removing="raise Exception('no such mapping')",
+    )
+    with _lecture(
+        tmp_path, "serve", "--public", "upnp", setup=_KNOWN_PUBLIC_ADDRESS
+    ) as lecture:
+        _wait_until((tmp_path / "adding-the-mapping").exists)
+
+        lecture.process.terminate()
+
+        _assert_clean_stop(tmp_path, lecture, -signal.SIGTERM)
 
 
 def test_a_signal_while_the_mapping_starts_removes_it(tmp_path):
