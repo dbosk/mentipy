@@ -2720,8 +2720,8 @@ in one run, with the other keys kept, the record included.
 Each row reads as a deck built here, a deck built by that version over it, and
 the sequence to read.  In the first row the stale record says that A followed
 Y, and the serials agree, so the walk reaches the questions of the build before;
-only the store's order gives that away.  In the next two the record happens to
-be true, because that deck really has Y there, and the walk may keep it.  The
+only the store's order gives that away.  The second has the same record further
+from the end.  In the next two the record happens to be true, because that deck really has Y there, and the walk may keep it.  The
 last two stand for the entry being read before the record.  With both at serial
 3, the record would lead to X and Y again; and where the record's target does
 not agree, falling back to the serials would bring in W, the first question of
@@ -2752,6 +2752,7 @@ def _as_rebuilt_by_0_17(path, texts):
     "built, old, live",
     [
         ("XYABCA", "QRABCA", "BCA"),
+        ("XYABCA", "QRABCAD", "BCAD"),
         ("XYABCA", "ZYABCA", "ZYBCA"),
         ("XYABCA", "QYABCA", "QYBCA"),
         ("XYABCA", "QRABC", "QRABC"),
@@ -2772,6 +2773,26 @@ def test_a_stale_record_under_links_of_an_older_writer(
         ]
     )
     assert _live_sequence(store) == _hashes(_deck(*live))
+@
+
+The check is on the order as well as on the membership.  No writer produces
+this store, so the links and serials are written by hand: they read B, A, C
+where the store holds A, B, C, and C holds a record, which the walk does not use.
+
+<<test functions>>=
+def test_a_record_in_a_deck_out_of_the_stores_order_is_not_trusted(tmp_path):
+    path = tmp_path / "mentipy.json"
+    store = _build(path, _deck(*"ABC"))
+    a, b, c = _hashes(_deck(*"ABC"))
+    data = json.loads(path.read_text())
+    for full_hash, after, serial in [(b, None, 1), (a, b, 2), (c, a, 3)]:
+        data["questions"][full_hash][REGISTERED_AFTER_KEY] = after
+        data["questions"][full_hash][REGISTRATION_SERIAL_KEY] = serial
+    data["questions"][c][EARLIER_REGISTRATIONS_KEY] = []
+    path.write_text(json.dumps(data, indent=2) + "\n")
+
+    assert store.live_hashes() == _live_hashes_by_serials(data["questions"])
+    assert store.live_hashes() == [c]
 @
 
 That check reads the store's order, so it must never trip on what this version
