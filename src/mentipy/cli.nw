@@ -182,8 +182,8 @@ STORE_HELP = f"Path to mentipy.json. Defaults to config setting {STORE_CONFIG}."
 VENV_HELP = f"Virtualenv path. Defaults to config setting {VENV_CONFIG}."
 PUBLIC_HELP = (
     "Expose the server publicly. Bare --public defaults to upnp. SSH mode "
-    f"reads {SSH_TUNNEL_CONFIG}, and QR regeneration prefers "
-    f"{PUBLIC_BASE_URL_CONFIG}."
+    f"reads config setting {SSH_TUNNEL_CONFIG}, and QR regeneration prefers "
+    f"config setting {PUBLIC_BASE_URL_CONFIG}."
 )
 LOCALE_HELP = (
     "Language of all web pages: en or sv. Without it, a question's "
@@ -648,15 +648,16 @@ def _latex_reference() -> str:
         Shared keyword arguments
           store: defaults to config key {STORE_CONFIG}
           base_url: if omitted, Mentipy uses the address a running server
-            of this store serves, kept in {QR_DIR_CONFIG} beside the store,
-            then {BASE_URL_CONFIG}, and resolves the current LAN address
-            using {PORT_CONFIG} only when it is unset, empty, or auto
-          qr_dir: defaults to {QR_DIR_CONFIG}
-          qr_format: defaults to {QR_FORMAT_CONFIG}
-          environment: defaults to {QUESTION_ENVIRONMENT_CONFIG};
+            of this store serves, kept in the directory of config key
+            {QR_DIR_CONFIG} beside the store, then config key
+            {BASE_URL_CONFIG}, and resolves the current LAN address using
+            config key {PORT_CONFIG} only when it is unset, empty, or auto
+          qr_dir: defaults to config key {QR_DIR_CONFIG}
+          qr_format: defaults to config key {QR_FORMAT_CONFIG}
+          environment: defaults to config key {QUESTION_ENVIRONMENT_CONFIG};
             MENTIPY_QUESTION_ENVIRONMENT overrides it
-          show_url: defaults to {SHOW_URL_CONFIG} and only affects QR-less
-            article output; QR layouts caption the QR via the LaTeX
+          show_url: defaults to config key {SHOW_URL_CONFIG} and only affects
+            QR-less article output; QR layouts caption the QR via the LaTeX
             macro \\mentipyqrcaption, which the document may redefine
           layout: slide, article, article+qr, or auto
 
@@ -672,7 +673,7 @@ def _latex_reference() -> str:
             `mentipy serve --locale` overrides it.  The pages of no
             question (the index, /active) and of a question without a
             record follow the language that every recorded question in
-            the store agrees on, else {LOCALE_CONFIG}.  Each
+            the store agrees on, else config key {LOCALE_CONFIG}.  Each
             label is a macro that the snippet defines with
             \\providecommand, so a deck's own definition in its
             preamble wins: \\newcommand{{\\mentipychooseone}}{{Pick one:}}.
@@ -1519,7 +1520,7 @@ the theme at the cold end of the ramp, and heat over the padding that
 fills each line to the grid width stays visible, so a pin past the
 end of a short line still shows up --- foreground colour on a space
 is invisible.  Foreground mode remains available through
-[[--pin-heat]] or the [[mentipy.pin_heat]] config key for terminals
+[[--pin-heat]] or the [[pin_heat]] config key for terminals
 and capture pipelines that render background colour poorly.  The
 content is deliberately \emph{not} syntax-highlighted in either mode,
 unlike on the HTML pages: colour \emph{is} the heat channel here, and
@@ -2353,7 +2354,7 @@ locked} from the room without knowing that opening the results page is the
 fix.  The gate is a flag rather than a config key because pacing is a
 per-lecture decision, like [[--results]], not a per-machine one.  The
 language of the pages is both: a lecturer's decks are usually in one
-language, which [[mentipy.locale]] records once, but a guest lecture
+language, which the [[locale]] setting records once, but a guest lecture
 in English on a Swedish lecturer's machine needs [[--locale en]] for
 one run.  The flag and the setting are passed on separately, because
 between them the server places what the slides recorded, each
@@ -2375,7 +2376,7 @@ def serve(
 ):
     """Run the local polling server.
 
-    Respondent URLs use config setting ``mentipy.base_url`` unless it is
+    Respondent URLs use config setting base_url unless it is
     unset, empty, or ``auto``.  Builds of the slides use the address of the
     running server, so they can be recompiled while it runs.
     """
@@ -3080,7 +3081,7 @@ stop.
 <<test functions>>=
 def _served_deck(tmp_path, monkeypatch, base_url):
     config = tmp_path / "config.json"
-    config.write_text(json.dumps({"mentipy": {"base_url": base_url}}))
+    config.write_text(json.dumps({"base_url": base_url}))
     monkeypatch.setenv("MENTIPY_CONFIG", str(config))
     monkeypatch.setattr(mentipy.network, "local_ip", lambda: "192.0.2.10")
     monkeypatch.setattr(
@@ -3683,7 +3684,7 @@ def _lecture(tmp_path, command, *options, setup="", settings=None, **popen):
     pytest.importorskip("fcntl")
     config = tmp_path / "config.json"
     config.write_text(
-        json.dumps({"mentipy": {"base_url": _SERVED, **(settings or {})}})
+        json.dumps({"base_url": _SERVED, **(settings or {})})
     )
     port = _free_port()
     with open(tmp_path / "output.log", "wb") as log:
@@ -4611,10 +4612,10 @@ shared machine a lecture under [[--public ssh]] should use
 [[--no-open]].
 
 The command comes from [[--open-with]], else from
-[[mentipy.open_command]], else from the platform's default
+the [[open_command]] setting, else from the platform's default
 (\cref{sec:open-command} in the store); [[--no-open]] skips the step,
 for a lecturer whose browser is already open on the index.  An empty
-[[mentipy.open_command]], or [[none]], makes [[--no-open]] permanent on
+[[open_command]] setting, or [[none]], makes [[--no-open]] permanent on
 a machine.  [[--open-with]] together with [[--no-open]] contradicts
 itself; [[--no-open]] wins, and a banner warning says the command was
 ignored.
@@ -4758,7 +4759,7 @@ import shlex
 QR codes carry the address of the server, so slides for this lecture can only be
 finished once the server is up, which leaves the lecturer starting the server,
 then building, then opening the viewer.  [[--slides-command]], or the setting
-[[mentipy.slides_command]], makes that part of the one command, typically
+[[slides_command]], makes that part of the one command, typically
 [[make slides.pdf && pdfpc -w both slides.pdf]].  It runs after the bind and after
 the server has recorded its address (\cref{sec:qr-regeneration}), so a build that
 reruns PythonTeX finds the right address.  It runs in a shell, unlike the browser
@@ -7147,7 +7148,7 @@ def _active_state(server: str) -> _LectureState:
 \paragraph{Which server.}
 The default is the server [[mentipy serve]] would start with the same
 configuration, since the watcher normally runs on the lecture machine
-beside it: [[mentipy.host]] at [[mentipy.port]].  The server is IPv4
+beside it: the [[host]] and [[port]] settings.  The server is IPv4
 only: its [[ThreadingHTTPServer]] keeps the socket server's default
 address family, so there is no IPv6 wildcard to consider.  A wildcard
 bind ([[0.0.0.0]] or empty) listens on every IPv4 interface, the
@@ -7168,8 +7169,8 @@ WATCH_SERVER_OPTION = typer.Option(
     metavar="URL",
     help=(
         "Server whose active question a watch without PREFIX follows."
-        f" Defaults to {HOST_CONFIG} (127.0.0.1 when it binds every"
-        f" interface) at {PORT_CONFIG}."
+        f" Defaults to config setting {HOST_CONFIG} (127.0.0.1 when it binds"
+        f" every interface) at config setting {PORT_CONFIG}."
     ),
     show_default=False,
 )
@@ -7753,7 +7754,7 @@ def test_watch_follows_without_the_admin_token(tmp_path, monkeypatch):
 @
 
 Without [[--server]] the watcher asks the configured server: the
-loopback address when [[mentipy.host]] binds every interface, as it
+loopback address when the [[host]] setting binds every interface, as it
 does by default, or the bound address itself.  The first test points
 the port setting at a real server on a free port, with the default
 host.  The second needs nothing listening: the message about the
@@ -8166,10 +8167,125 @@ def test_config_round_trip_uses_typerconf_command_shape(tmp_path):
     assert result.stdout.strip() == f"{PORT_CONFIG} = 9000"
 @
 
+The next tests run the real command in a process of its own, because
+[[typerconf]] reads the file once, when the command is added to the application.
+That is at import, so a test in this process would see the file of whichever
+test imported the module first.  The image is compared with a QR code made from
+the expected address: reading the code back would need a decoder, and an SVG is
+the same bytes for the same address.  [[_REAL_POPEN]] is there because this
+file replaces [[subprocess.Popen]] for every test, so that none opens a browser.
+
+<<test functions>>=
+def _mentipy_process(tmp_path, *arguments):
+    process = _REAL_POPEN(
+        [sys.executable, "-c", "from mentipy.cli import main; main()",
+         *arguments],
+        cwd=tmp_path,
+        env={**os.environ, "MENTIPY_CONFIG": str(tmp_path / "config.json")},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=60)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+    return SimpleNamespace(
+        returncode=process.returncode, stdout=stdout, stderr=stderr
+    )
+
+
+def _qr_image_of_a_render(tmp_path):
+    render = _mentipy_process(
+        tmp_path, "render", "open", "A question?",
+        "--store", "mentipy.json", "--qr-format", "svg",
+    )
+    assert render.returncode == 0, render.stderr
+    return next((tmp_path / "mentipy-obj").glob("Q-*.svg"))
+
+
+def _qr_image_for(tmp_path, base_url, image):
+    prefix = image.stem.removeprefix("Q-")
+    expected = mentipy.latex.make_qr(
+        f"{base_url}/{prefix}", tmp_path / "expected.svg"
+    )
+    return expected.read_bytes()
+
+
+def test_mentipy_config_sets_a_key_that_a_render_puts_in_the_qr_code(tmp_path):
+    url = "http://polls.example:8080"
+
+    written = _mentipy_process(tmp_path, "config", "base_url", "--set", url)
+    shown = _mentipy_process(tmp_path, "config", "base_url")
+    image = _qr_image_of_a_render(tmp_path)
+
+    assert written.returncode == 0, written.stderr
+    assert json.loads((tmp_path / "config.json").read_text()) == {
+        "base_url": url
+    }
+    assert shown.stdout.strip() == f"base_url = {url}"
+    assert image.read_bytes() == _qr_image_for(tmp_path, url, image)
+@
+
+A leftover section stays in the file, whatever the command writes around it, and
+the render takes the new key instead of it.
+
+<<test functions>>=
+def test_mentipy_config_leaves_an_old_section_and_a_render_ignores_it(tmp_path):
+    config = tmp_path / "config.json"
+    old = {"base_url": "http://old.example:8080", "ssh_tunnel": "a@b.test:9"}
+    url = "http://polls.example:8080"
+    config.write_text(json.dumps({"mentipy": old}))
+
+    written = _mentipy_process(tmp_path, "config", "base_url", "--set", url)
+    image = _qr_image_of_a_render(tmp_path)
+
+    assert written.returncode == 0, written.stderr
+    assert json.loads(config.read_text()) == {"mentipy": old, "base_url": url}
+    assert image.read_bytes() == _qr_image_for(tmp_path, url, image)
+@
+
+The old spelling is not an error.  There is no compatibility code, so to the
+command [[mentipy.base_url]] is a path like any other: it exits successfully and
+stores a value that this version never reads.  This pins that known weakness, so
+that a change to it is a decision.
+
+<<test functions>>=
+def test_the_old_spelling_of_a_key_is_stored_and_never_read(tmp_path):
+    url = "http://old.example:8080"
+
+    written = _mentipy_process(
+        tmp_path, "config", "mentipy.base_url", "--set", url
+    )
+    image = _qr_image_of_a_render(tmp_path)
+
+    assert written.returncode == 0, written.stderr
+    assert json.loads((tmp_path / "config.json").read_text()) == {
+        "mentipy": {"base_url": url}
+    }
+    assert image.read_bytes() != _qr_image_for(tmp_path, url, image)
+    assert "old.example" not in image.with_suffix(".pdf_tex").read_text()
+@
+
 The environment commands document a concrete workflow, so their help text should
 name the reasons for the extra step and the shell form that activation expects.
 
+A key is a short word now, and [[store]] or [[port]] appears in a help text for
+many other reasons.  So the tests of the help look for the phrase that names a
+setting, which needs a terminal wide enough not to break that phrase across two
+lines.
+
 <<test functions>>=
+def _wide_help(*command):
+    result = CliRunner().invoke(
+        cli, [*command, "--help"], env={"COLUMNS": "500"}
+    )
+    assert result.exit_code == 0, result.output
+    return result.output
+
+
 def test_environment_command_help_mentions_the_virtualenv_workflow():
     runner = CliRunner()
 
@@ -8179,13 +8295,13 @@ def test_environment_command_help_mentions_the_virtualenv_workflow():
     assert "PEP 668" in result.output
     assert "uv tool" in result.output
     assert "PythonTeX" in result.output
-    assert VENV_CONFIG in result.output
+    assert f"config setting {VENV_CONFIG}" in _wide_help("init")
 
     result = runner.invoke(cli, ["activate", "--help"])
 
     assert result.exit_code == 0
     assert "eval $(mentipy activate)" in result.output
-    assert VENV_CONFIG in result.output
+    assert f"config setting {VENV_CONFIG}" in _wide_help("activate")
 @
 
 The behaviour tests stay at the CLI boundary: no real virtual environment or
@@ -8331,7 +8447,11 @@ def test_latex_command_prints_the_reference_and_all_config_keys():
     for name in SLIDE_LABEL_MACROS.values():
         assert f"\\{name}" in result.output
     for key, _description in CONFIG_KEY_HELP:
-        assert key in result.output
+        assert f"\n  {key}: " in result.output
+    assert "mentipy.base_url" not in result.output
+    assert {key for key, _description in CONFIG_KEY_HELP} == set(
+        DEFAULT_SETTINGS
+    )
 @
 
 \section{Serving command contracts}
@@ -8367,11 +8487,8 @@ def test_serve_command_uses_config_defaults(tmp_path, monkeypatch):
 
 
 def test_serve_help_mentions_the_relevant_config_keys():
-    runner = CliRunner()
+    output = _wide_help("serve")
 
-    result = runner.invoke(cli, ["serve", "--help"])
-
-    assert result.exit_code == 0
     for key in (
         BASE_URL_CONFIG,
         HOST_CONFIG,
@@ -8381,7 +8498,7 @@ def test_serve_help_mentions_the_relevant_config_keys():
         PUBLIC_BASE_URL_CONFIG,
         LOCALE_CONFIG,
     ):
-        assert key in result.output
+        assert f"config setting {key}" in output
 @
 
 The [[--results]] flag only changes the post-submit destination and the public
@@ -10279,7 +10396,7 @@ def test_unquoted_removes_one_matching_pair(token, unquoted):
     assert mentipy.cli._unquoted(token) == unquoted
 @
 
-An empty [[mentipy.open_command]], or [[none]], turns the step off for
+An empty [[open_command]] setting, or [[none]], turns the step off for
 good on a machine, as [[--no-open]] does for one run.  [[--open-with]]
 together with [[--no-open]] is a contradiction, which [[--no-open]]
 wins, with a warning in the banner.
@@ -10316,7 +10433,7 @@ def test_present_warns_about_open_with_and_no_open(
     )
 @
 
-The command comes from [[mentipy.open_command]] unless [[--open-with]]
+The command comes from the [[open_command]] setting unless [[--open-with]]
 names another, and is split like a shell would split it.  A [[{url}]]
 in it marks where the URL goes; without one, the URL is the last
 argument.
@@ -11135,7 +11252,7 @@ def test_a_slides_setting_that_is_not_text_is_reported_as_a_failure(
     monkeypatch.setattr("mentipy.cli.CLEAR_SCREEN", "[clear]")
     monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
     (tmp_path / "config.json").write_text(
-        json.dumps({"mentipy": {"slides_command": 5}})
+        json.dumps({"slides_command": 5})
     )
     monkeypatch.setattr("mentipy.cli.subprocess.Popen", _REAL_POPEN)
     monkeypatch.chdir(tmp_path)
@@ -11739,8 +11856,8 @@ def test_the_banner_asks_for_a_recompile_without_a_running_command(
 @
 
 The command comes from [[--slides-command]], else from
-[[mentipy.slides_command]].  There is no built-in one, because a tool that ran
-[[make]] on its own in whatever directory it started in would be a surprise, so
+the [[slides_command]] setting.  There is no built-in one, because a tool that
+ran [[make]] on its own in whatever directory it started in would be a surprise, so
 nothing runs by default.  An empty setting or [[none]] means the same.
 
 <<test functions>>=
@@ -12083,11 +12200,8 @@ surface for both transient flags and persistent settings.
 
 <<test functions>>=
 def test_render_help_mentions_the_relevant_config_keys():
-    runner = CliRunner()
+    output = _wide_help("render", "mc")
 
-    result = runner.invoke(cli, ["render", "mc", "--help"])
-
-    assert result.exit_code == 0
     for key in (
         QUESTION_ENVIRONMENT_CONFIG,
         SHOW_URL_CONFIG,
@@ -12096,7 +12210,7 @@ def test_render_help_mentions_the_relevant_config_keys():
         QR_FORMAT_CONFIG,
         STORE_CONFIG,
     ):
-        assert key in result.output
+        assert f"config setting {key}" in output
 @
 
 \section{Listing, watching, and export contracts}
@@ -12383,16 +12497,16 @@ def test_url_command_rejects_base_and_public_together(tmp_path):
 
 
 def test_url_help_mentions_the_relevant_config_keys():
-    runner = CliRunner()
+    output = _wide_help("url")
 
-    result = runner.invoke(cli, ["url", "--help"])
-
-    assert result.exit_code == 0
-    assert STORE_CONFIG in result.output
-    assert BASE_URL_CONFIG in result.output
-    assert PORT_CONFIG in result.output
-    assert PUBLIC_BASE_URL_CONFIG in result.output
-    assert SSH_TUNNEL_CONFIG in result.output
+    for key in (
+        STORE_CONFIG,
+        BASE_URL_CONFIG,
+        PORT_CONFIG,
+        PUBLIC_BASE_URL_CONFIG,
+        SSH_TUNNEL_CONFIG,
+    ):
+        assert f"config setting {key}" in output
 @
 
 <<test [[cli.py]]>>=

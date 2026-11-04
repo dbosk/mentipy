@@ -159,7 +159,7 @@ The body renderers in the next section print respondent instructions
 next to the QR code: \enquote{Choose exactly one:}, a character limit,
 a scale's range.  Those words are Mentipy's, not the lecturer's, so
 they come from the catalogue (\cref{chap:catalogue}) in the language
-of the [[mentipy.locale]] setting (\cref{sec:locale-setting}).  A
+of the [[locale]] setting (\cref{sec:locale-setting}).  A
 built-in translation is not always the wording a deck wants, though.
 Decks in Swedish used to rewrite the returned LaTeX with string
 replacements, which broke silently whenever a release reworded a
@@ -281,7 +281,7 @@ SLIDE_NUMBER_MACRO = "mentipynumber"
 
 The locale comes from the helper's [[locale=]] keyword, which a deck
 sets once in its shared block (every helper takes it), and otherwise
-from [[mentipy.locale]], then English.  The keyword is how a deck says
+from the [[locale]] setting, then English.  The keyword is how a deck says
 what language it is in, independent of the machine compiling it; the
 setting is the lecturer's default for decks that say nothing.  The
 helper records the locale its slide used with the question
@@ -407,7 +407,7 @@ def test_slide_labels_are_macros_with_the_english_words_by_default(
     )
 @
 
-With [[mentipy.locale]] set to Swedish the same helpers define the
+With the [[locale]] setting at Swedish the same helpers define the
 Swedish words, and no English one is left.  The question is the same
 question in either language: the second rendering registers nothing
 new, so its prefix and QR code stay.
@@ -1355,7 +1355,7 @@ next build falls back to the configuration.
 
 The record lives in the configured QR directory, so two things follow.  A deck
 that passes its own [[qr_dir=]] gets the record in the configured directory, not
-in its own, which that deck may not ignore.  And an absolute [[mentipy.qr_dir]]
+in its own, which that deck may not ignore.  And an absolute [[qr_dir]] setting
 gives all decks the same record, so the latest server of any of them decides.
 
 A loopback address is never a record.  Offline, the LAN lookup falls back to
@@ -1441,15 +1441,15 @@ still go ahead: the server runs and the regenerated QR codes are right; only a
 later rebuild would lose the address.  A record that cannot be read counts as
 no record, since the build then has its usual fallbacks.
 
-The record outranks [[mentipy.base_url]], because it describes what is actually
-being served, whereas the setting describes what a server would use if it had
-no other information: [[--public]] and [[mentipy.public_base_url]] both override
+The record outranks the [[base_url]] setting, because it describes what is
+actually being served, whereas the setting describes what a server would use if it had
+no other information: [[--public]] and [[public_base_url]] both override
 it.  An explicit [[base_url=]] still wins, since a deck that names an address
 has said that it wants that one.
 
 The record lasts as long as its server, because that is all it can vouch for.
 If it outlived the server, a build next week would print last week's address on
-another network, a changed [[mentipy.base_url]] would be ignored, and every
+another network, a changed [[base_url]] setting would be ignored, and every
 later PDF of a deck served with [[--public upnp]] would carry the lecturer's
 home IP, which keeping the address out of the store was meant to avoid.  So a
 server that stops takes its record back, and the next build has its usual
@@ -1513,7 +1513,7 @@ def _build_one_poll(**kwargs):
 def configured_deck(tmp_path, monkeypatch):
     config = tmp_path / "config.json"
     config.write_text(
-        json.dumps({"mentipy": {"base_url": "http://config.example:8080"}})
+        json.dumps({"base_url": "http://config.example:8080"})
     )
     monkeypatch.setenv("MENTIPY_CONFIG", str(config))
     monkeypatch.chdir(tmp_path)

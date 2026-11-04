@@ -4098,7 +4098,7 @@ floor of the peak are skipped --- the kernel tails would otherwise
 emit thousands of imperceptible rects.
 
 The grid resolution is the one knob a lecturer may want to turn, so it
-is a configuration setting ([[mentipy.heatmap_bins]], threaded in from
+is a configuration setting ([[heatmap_bins]], threaded in from
 the CLI) rather than a constant.  Because the kernel width is fixed in
 \emph{cells}, the resolution controls blob size and smoothing
 together: fewer bins make each hotspot larger and chunkier relative to
@@ -5166,7 +5166,7 @@ the GET routes are where it enters the rendering call.
 The page language comes in two parts that rank differently, which is
 why the CLI does not merge them.  [[locale]] is the [[--locale]] the
 lecturer gave, or [[None]], and it beats everything.
-[[default_locale]] is the configured [[mentipy.locale]], and it gives
+[[default_locale]] is the configured [[locale]], and it gives
 way to what the slides recorded (\cref{sec:recorded-locale}): a deck
 was compiled in that language, perhaps on another machine, and its
 questions should be answered in it.  Between the two lie the

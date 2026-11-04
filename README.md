@@ -47,6 +47,23 @@ uv venv --seed --python 3.11 .venv
 uv pip install --python .venv/bin/python mentipy
 ```
 
+### Upgrading from a version before 1.0
+
+Mentipy 1.0 keeps each setting as a key of its own in the config file:
+`mentipy config base_url --set ...` stores `base_url`. Earlier versions kept them
+in a `mentipy` section, written `mentipy.base_url`, and 1.0 neither reads nor
+converts that section. So a deck that relied on a configured address gets the LAN
+address instead, without a warning, until the value is set again.
+`mentipy config mentipy` lists the old values; set the ones you still want under
+their new names. The old spelling is still accepted by the command, but it only
+writes to the old section.
+
+A deck's `.venv` has its own Mentipy, which reads the same file, and the version
+there decides what a build sees: a venv older than 1.0 reads only the old section,
+and 1.0 reads only the new keys. Writing a new key leaves the old section as it
+was, so keep the section until every deck is on 1.0, which `mentipy init` in the
+deck does. `mentipy config mentipy --set ""` removes it afterwards.
+
 ## Basic Workflow
 
 1. Render questions from PythonTeX or from the `mentipy render` CLI.
@@ -173,7 +190,7 @@ server binds every interface or a loopback address (or under
 address would refuse the browser, and `present` says so instead. The
 command depends on the platform: `xdg-open` on Linux and other Unix
 systems, `open` on macOS and `explorer` on Windows. Set
-`mentipy.open_command` to use another (a `{url}` in it marks where the
+`open_command` to use another (a `{url}` in it marks where the
 URL goes, otherwise it is appended; on Windows a path may be quoted),
 or to an empty value or `none` to never open the browser on that
 machine. Pass `--open-with CMD` for one run, or `--no-open` to skip
@@ -182,12 +199,12 @@ through the opener's command line, so on a shared machine use
 `--no-open`:
 
 ```sh
-mentipy config mentipy.open_command --set "firefox --new-window"
+mentipy config open_command --set "firefox --new-window"
 mentipy present --store ./mentipy.json --no-open
 ```
 
 The QR codes carry the server's address, so the slides are best built once the
-server is up. `--slides-command CMD`, or the setting `mentipy.slides_command`,
+server is up. `--slides-command CMD`, or the setting `slides_command`,
 runs a shell command after the server has started, in the directory you started
 `present` in. Nothing runs if neither is set. `present` doesn't wait for it, and
 its output goes to `slides-command.log` in the QR directory beside the store.
@@ -195,7 +212,7 @@ When you restart `present` during a lecture, add `--no-slides`, or it opens a
 second viewer:
 
 ```sh
-mentipy config mentipy.slides_command --set "make slides.pdf && pdfpc -w both slides.pdf"
+mentipy config slides_command --set "make slides.pdf && pdfpc -w both slides.pdf"
 mentipy present --slides-command "make slides-intro.pdf && pdfpc -w both slides-intro.pdf"
 ```
 
@@ -293,8 +310,8 @@ During a lecture, a bare `mentipy watch` (no prefix) follows the
 question the lecturer has opened on the running server, and switches
 whenever Next or Skip moves the lecture on. Start it once, beside
 `mentipy serve`, with the same store. It asks the server for `/active`,
-on `mentipy.host` (its loopback address when the server binds every
-interface) at `mentipy.port`, unless `--server` names another address.
+at the `host` and `port` settings (its loopback address when the server binds
+every interface), unless `--server` names another address.
 It needs no admin rights, and it keeps retrying while the server is not
 running:
 
@@ -308,12 +325,12 @@ mentipy watch --store ./mentipy.json --server http://localhost:9000
 You can pass `base_url` / `--base-url` while rendering, or store a default:
 
 ```sh
-mentipy config mentipy.base_url --set http://polls.example.org:8080
+mentipy config base_url --set http://polls.example.org:8080
 ```
 
 Use an address the students' phones can reach. The QR codes then use it as
 written, whatever `--port` the server runs on. To go back to the LAN address,
-run `mentipy config mentipy.base_url --set auto`.
+run `mentipy config base_url --set auto`.
 
 If no base URL is configured, `mentipy` resolves the current LAN address from
 the serving port. Because QR codes are generated when the document compiles,
@@ -332,7 +349,7 @@ For public access, `mentipy serve` can expose the local server in two modes:
 
 ```sh
 mentipy serve --store ./mentipy.json --public upnp
-mentipy config mentipy.ssh_tunnel --set user@example.org:8080
+mentipy config ssh_tunnel --set user@example.org:8080
 mentipy serve --store ./mentipy.json --public ssh
 ```
 

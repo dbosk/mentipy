@@ -61,26 +61,34 @@ outside the [[mentipy]] command.  We therefore compute the config file path from
 the fixed application name, not from [[sys.argv[0]]].  The built-in settings
 table also serves as the source for configuration discovery, so keys that
 default to [[None]] still belong there.  In particular,
-[[mentipy.base_url]] uses [[None]] to mean \enquote{resolve the LAN URL later}.
+[[base_url]] uses [[None]] to mean \enquote{resolve the LAN URL later}.
+
+The file belongs to Mentipy alone, in the configuration directory that
+[[CONFIG_NAMESPACE]] names.  A section around the keys would protect them from
+nothing, so they stand at the top level of the file, under the names a lecturer
+types, and each constant holds exactly that name.  Versions before 1.0 did keep
+a [[mentipy]] section.  This version neither reads it nor converts it: to the
+code below it is a key that nobody asks for, and the upgrade is a step in the
+manual rather than a second way of looking up every setting.
 
 <<constants>>=
 CONFIG_NAMESPACE = "mentipy"
 
-BASE_URL_CONFIG = "mentipy.base_url"
-HOST_CONFIG = "mentipy.host"
-PORT_CONFIG = "mentipy.port"
-STORE_CONFIG = "mentipy.store"
-QR_DIR_CONFIG = "mentipy.qr_dir"
-QR_FORMAT_CONFIG = "mentipy.qr_format"
-VENV_CONFIG = "mentipy.venv"
-MIN_PREFIX_CONFIG = "mentipy.min_prefix"
-SSH_TUNNEL_CONFIG = "mentipy.ssh_tunnel"
-PUBLIC_BASE_URL_CONFIG = "mentipy.public_base_url"
-QUESTION_ENVIRONMENT_CONFIG = "mentipy.question_environment"
-SHOW_URL_CONFIG = "mentipy.show_url"
-ALLOW_IMAGES_CONFIG = "mentipy.allow_images"
-HEATMAP_BINS_CONFIG = "mentipy.heatmap_bins"
-PIN_HEAT_CONFIG = "mentipy.pin_heat"
+BASE_URL_CONFIG = "base_url"
+HOST_CONFIG = "host"
+PORT_CONFIG = "port"
+STORE_CONFIG = "store"
+QR_DIR_CONFIG = "qr_dir"
+QR_FORMAT_CONFIG = "qr_format"
+VENV_CONFIG = "venv"
+MIN_PREFIX_CONFIG = "min_prefix"
+SSH_TUNNEL_CONFIG = "ssh_tunnel"
+PUBLIC_BASE_URL_CONFIG = "public_base_url"
+QUESTION_ENVIRONMENT_CONFIG = "question_environment"
+SHOW_URL_CONFIG = "show_url"
+ALLOW_IMAGES_CONFIG = "allow_images"
+HEATMAP_BINS_CONFIG = "heatmap_bins"
+PIN_HEAT_CONFIG = "pin_heat"
 
 DEFAULT_BASE_URL = None
 DEFAULT_HOST = "0.0.0.0"
@@ -130,8 +138,8 @@ catalogue (\cref{chap:catalogue}); the store only holds the choice,
 with every other key.  The default is English, so a deck that never
 sets it renders as before.
 
-The key is [[mentipy.locale]] rather than the more obvious
-[[mentipy.language]], because \enquote{language} already means
+The key is [[locale]] rather than the more obvious
+[[language]], because \enquote{language} already means
 something else in Mentipy: a pin-text question's or a context
 snippet's [[language=]] is a Pygments lexer or [[latex]], the language
 of the \emph{content}.  A setting called [[language]] next to those
@@ -143,7 +151,7 @@ built-in table here, so [[mentipy config]] and [[mentipy latex]] list
 it with the others.
 
 <<constants>>=
-LOCALE_CONFIG = "mentipy.locale"
+LOCALE_CONFIG = "locale"
 DEFAULT_LOCALE = "en"
 DEFAULT_SETTINGS[LOCALE_CONFIG] = DEFAULT_LOCALE
 @
@@ -157,7 +165,7 @@ default depends on the platform: [[xdg-open]] on Linux and the other
 Unix systems, the freedesktop.org launcher that desktops provide;
 [[open]] on macOS, which has no [[xdg-open]]; and [[explorer]] on
 Windows, which opens a URL in the default browser.  The setting
-[[mentipy.open_command]] replaces the default, for a particular browser
+[[open_command]] replaces the default, for a particular browser
 or a window of its own, and an empty value or [[none]] turns the step
 off on the machine; [[present --open-with]] replaces both for one
 run.
@@ -171,7 +179,7 @@ changing [[sys.platform]].
 <<imports>>=
 import sys
 <<constants>>=
-OPEN_COMMAND_CONFIG = "mentipy.open_command"
+OPEN_COMMAND_CONFIG = "open_command"
 DEFAULT_SETTINGS[OPEN_COMMAND_CONFIG] = None
 <<functions>>=
 def default_open_command() -> str:
@@ -202,13 +210,13 @@ def test_default_open_command_follows_the_platform(
     assert default_open_command() == command
 @
 
-[[mentipy.slides_command]] is the shell command [[present]] runs to build and
-open the slides.  It has no built-in value, unlike the browser command: every
+The setting [[slides_command]] is the shell command [[present]] runs to build
+and open the slides.  It has no built-in value, unlike the browser command: every
 machine can open a URL, but no build and no viewer can be assumed, and a tool
 that ran [[make]] by itself would be a surprise.
 
 <<constants>>=
-SLIDES_COMMAND_CONFIG = "mentipy.slides_command"
+SLIDES_COMMAND_CONFIG = "slides_command"
 DEFAULT_SETTINGS[SLIDES_COMMAND_CONFIG] = None
 @
 
@@ -229,18 +237,6 @@ def config_path() -> Path:
     ) / "config.json"
 @
 
-The CLI accepts short keys such as [[port]], but the stored JSON keeps them
-under the [[mentipy]] namespace so unrelated settings do not collide.
-
-<<functions>>=
-def normalize_config_key(key: str) -> str:
-    """Return the fully qualified config key for ``key``."""
-
-    if key.startswith(f"{CONFIG_NAMESPACE}."):
-        return key
-    return f"{CONFIG_NAMESPACE}.{key}"
-@
-
 Loading the configuration is intentionally separated from reading individual
 settings.  The rest of the package should not know where the file lives or how
 [[typerconf]] persists it; those details are fixed here.  We also seed the
@@ -257,26 +253,25 @@ def load_config(*, writeback: bool = False) -> typerconf.Config:
     return config
 @
 
-Reading a setting first normalises the key and then falls back to the built-in
-defaults.  That two-step lookup is what lets callers pass either [[port]] or
-[[mentipy.port]] while still preserving explicit defaults for keys whose value
-is normally [[None]].  The generic [[typerconf]] command stores scalar
+Reading a setting falls back to the built-in defaults, which preserves explicit
+defaults for keys whose value is normally [[None]].  The generic [[typerconf]]
+command stores scalar
 [[--set]] values as strings, so we also coerce the built-in non-string settings
 back to the types the rest of the package expects.
 
 <<functions>>=
-def _coerce_setting_value(full_key: str, value: Any) -> Any:
+def _coerce_setting_value(key: str, value: Any) -> Any:
     if isinstance(value, str):
         parsed = parse_config_value(value)
     else:
         parsed = value
 
-    if full_key in (PORT_CONFIG, MIN_PREFIX_CONFIG, HEATMAP_BINS_CONFIG):
+    if key in (PORT_CONFIG, MIN_PREFIX_CONFIG, HEATMAP_BINS_CONFIG):
         if isinstance(parsed, int):
             return parsed
         return value
 
-    if full_key in (SHOW_URL_CONFIG, ALLOW_IMAGES_CONFIG):
+    if key in (SHOW_URL_CONFIG, ALLOW_IMAGES_CONFIG):
         if isinstance(parsed, bool):
             return parsed
         if isinstance(parsed, int):
@@ -289,11 +284,10 @@ def _coerce_setting_value(full_key: str, value: Any) -> Any:
 def get_setting(key: str, default: Any = None) -> Any:
     """Return the configured value for ``key``, or ``default``."""
 
-    full_key = normalize_config_key(key)
-    fallback = DEFAULT_SETTINGS.get(full_key, default)
+    fallback = DEFAULT_SETTINGS.get(key, default)
 
     try:
-        return _coerce_setting_value(full_key, load_config().get(full_key))
+        return _coerce_setting_value(key, load_config().get(key))
     except KeyError:
         return fallback
 @
@@ -308,9 +302,8 @@ returns [[None]] for an unset key instead of the default.
 def configured_setting(key: str) -> Any:
     """Return the value set for ``key`` in the configuration, or ``None``."""
 
-    full_key = normalize_config_key(key)
     try:
-        return _coerce_setting_value(full_key, load_config().get(full_key))
+        return _coerce_setting_value(key, load_config().get(key))
     except KeyError:
         return None
 @
@@ -327,16 +320,17 @@ def test_configured_setting_tells_a_set_value_from_the_default(
     assert configured_setting(LOCALE_CONFIG) == "en"
 @
 
-Writing a setting uses the same normalisation path as reading, so the CLI can
-remain concise without creating a second spelling of each configuration key on
-disk.
+Writing a setting takes the key as given, as reading does.  To [[typerconf]] a
+key is a path and a dot in it a level of nesting, which is why no built-in key
+has one: [[base_url]] is a top-level key, whereas [[mentipy.base_url]] is a key
+in a section that nothing here reads.
 
 <<functions>>=
 def set_setting(key: str, value: Any):
     """Store ``value`` under ``key`` in the mentipy configuration."""
 
     config = load_config(writeback=True)
-    config.set(normalize_config_key(key), value)
+    config.set(key, value)
 @
 
 Listing settings reports the effective values rather than only the values
@@ -350,8 +344,8 @@ def list_settings() -> dict[str, Any]:
     """Return the effective values of the built-in mentipy settings."""
 
     return {
-        full_key.split(".", 1)[1]: get_setting(full_key, default)
-        for full_key, default in DEFAULT_SETTINGS.items()
+        key: get_setting(key, default)
+        for key, default in DEFAULT_SETTINGS.items()
     }
 @
 
@@ -949,14 +943,94 @@ processes that are gone.  The age check is for a store on a network file system,
 where a live writer on another machine looks like a dead process here; on Windows
 nothing is removed this way, since it has no harmless way to ask about a process.
 
+A setting is a key at the top of the config file, under the very name the
+lecturer types.  The file has no section around it, so the test reads the file
+itself and not only what the helpers make of it.
+
 <<test functions>>=
-def test_setting_helpers_use_the_mentipy_namespace(tmp_path, monkeypatch):
-    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+def test_a_setting_is_stored_as_a_top_level_key(tmp_path, monkeypatch):
+    config = tmp_path / "config.json"
+    monkeypatch.setenv("MENTIPY_CONFIG", str(config))
 
     set_setting("port", 9000)
 
-    assert get_setting("mentipy.port") == 9000
+    assert json.loads(config.read_text()) == {"port": 9000}
+    assert get_setting("port") == 9000
+    assert configured_setting("port") == 9000
     assert list_settings()["port"] == 9000
+@
+
+The names are the interface a lecturer writes in a config file, so this test
+spells them out and does not go through the constants: renaming a constant's
+value must fail here.  It also pins the defaults that discovery reports,
+nullable ones included.
+
+<<test functions>>=
+def test_list_settings_gives_every_built_in_key_its_default(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+
+    assert list_settings() == {
+        "allow_images": False,
+        "base_url": None,
+        "heatmap_bins": 32,
+        "host": "0.0.0.0",
+        "locale": "en",
+        "min_prefix": 4,
+        "open_command": None,
+        "pin_heat": "background",
+        "port": 8080,
+        "public_base_url": None,
+        "qr_dir": "./mentipy-obj",
+        "qr_format": "pdf",
+        "question_environment": None,
+        "show_url": True,
+        "slides_command": None,
+        "ssh_tunnel": None,
+        "store": "./mentipy.json",
+        "venv": "./.venv",
+    }
+@
+
+Versions before 1.0 kept their settings in a [[mentipy]] section.  This version
+does not read that section, and it must not disturb it either: a deck's venv
+that still has an older Mentipy reads the same file, and [[typerconf]] rewrites
+the whole file on every write.
+
+<<test functions>>=
+_OLD_SECTION = {
+    "base_url": "http://old.example:8080",
+    "locale": "sv",
+    "port": "9000",
+    "store": "old.json",
+}
+
+
+def test_an_old_mentipy_section_gives_the_defaults(tmp_path, monkeypatch):
+    config = tmp_path / "config.json"
+    monkeypatch.setenv("MENTIPY_CONFIG", str(config))
+    config.write_text(json.dumps({"mentipy": _OLD_SECTION}))
+
+    assert list_settings() == DEFAULT_SETTINGS
+    assert configured_setting(LOCALE_CONFIG) is None
+
+
+def test_writing_a_setting_leaves_an_old_section_as_it_was(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "config.json"
+    monkeypatch.setenv("MENTIPY_CONFIG", str(config))
+    config.write_text(json.dumps({"mentipy": _OLD_SECTION}))
+
+    set_setting("base_url", "http://new.example:8080")
+
+    assert json.loads(config.read_text()) == {
+        "mentipy": _OLD_SECTION,
+        "base_url": "http://new.example:8080",
+    }
+    assert get_setting(BASE_URL_CONFIG) == "http://new.example:8080"
+    assert get_setting(PORT_CONFIG) == DEFAULT_PORT
 @
 
 The platform-directory lookup should be a pure path calculation here.  Creating
@@ -1736,7 +1810,7 @@ After a render-built deck A, B, F, E, C, a 0.16 build of A, C, B and
 continued renders of D and A, the walk shows B, D and A, where 0.16
 shows C, B, D and A.
 
-A version with links but no record, 0.17 and 0.18, gets past both checks.
+A version with links but no record, 0.17, gets past both checks.
 It writes correct links and positions as serials, and copies the record,
 so a place in the record can agree with the serials although it describes
 the build before: over X, Y, A, B, C, A, a build of Q, R, A, B, C, A leaves
@@ -2731,7 +2805,7 @@ def test_an_older_writer_over_a_repeating_deck_is_read_by_the_serials(
     assert _live_sequence(store) == (_live_hashes_by_serials(data["questions"]))
 @
 
-A version with links but no record, 0.17 and 0.18, is harder to catch.  Its
+A version with links but no record, 0.17, is harder to catch.  Its
 serials are positions in the run, like ours, so a place in the copied record
 can agree with them although it describes the build before.  The helper does
 to the file what 0.17's [[register]] did: a link and a serial for each question,
@@ -4271,7 +4345,7 @@ def test_a_target_that_is_not_recorded_is_reported(tmp_path, caplog):
 
 A question's pages should be in the language of the slide that asked
 it, and the slide's language is settled when the deck compiles: by the
-helper's [[locale=]] keyword, or by [[mentipy.locale]] on the machine
+helper's [[locale=]] keyword, or by the [[locale]] setting on the machine
 that compiled it (\cref{sec:slide-labels}).  The server runs later,
 perhaps on another machine whose configuration says something else, so
 the LaTeX helpers record the locale each slide \emph{actually used}
@@ -4281,7 +4355,7 @@ than the keyword is what makes a deck compiled on a Swedish-configured
 laptop serve Swedish from an English-configured server.
 
 Only a locale someone chose is recorded, though: the helper's keyword
-or a configured [[mentipy.locale]], and only when Mentipy has a
+or a configured [[locale]], and only when Mentipy has a
 catalogue for it, so that the slide really is in it.  A slide that is
 English because nothing was chosen, or because the choice is a
 language Mentipy lacks, records nothing.  That English is nobody's
