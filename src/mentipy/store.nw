@@ -1704,9 +1704,9 @@ current writer links a repeat to a question it has just registered, so a
 step back from a repeat with a record cannot fail unless the store was
 rewritten since, and the walk reads such a store by the serial rule rather
 than stopping there.  A continued render leaves no record, so its cycle
-stays out of reach.  A simulation of random histories, with repeats in
-half the builds' decks, found the walk and the older version disagreeing
-after 7 of about 2200 older builds.  A version with links but no record,
+stays out of reach.  A simulation of random histories, with decks that
+repeat questions, found the walk and the older version disagreeing after 7
+of about 2200 older builds.  A version with links but no record,
 0.17 say, is another case the checks cannot see.  It writes correct links
 and serials and copies the record, which goes stale without a trace when
 that version builds a different deck that asks the same question again at
