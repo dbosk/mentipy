@@ -8446,6 +8446,14 @@ def test_latex_command_prints_the_reference_and_all_config_keys():
     assert "every recorded question in" in result.output
     for name in SLIDE_LABEL_MACROS.values():
         assert f"\\{name}" in result.output
+    for argument, key in (
+        ("store", STORE_CONFIG),
+        ("qr_dir", QR_DIR_CONFIG),
+        ("qr_format", QR_FORMAT_CONFIG),
+        ("environment", QUESTION_ENVIRONMENT_CONFIG),
+        ("show_url", SHOW_URL_CONFIG),
+    ):
+        assert f"{argument}: defaults to config key {key}" in result.output
     for key, _description in CONFIG_KEY_HELP:
         assert f"\n  {key}: " in result.output
     assert "mentipy.base_url" not in result.output
@@ -12506,6 +12514,13 @@ def test_url_help_mentions_the_relevant_config_keys():
         PUBLIC_BASE_URL_CONFIG,
         SSH_TUNNEL_CONFIG,
     ):
+        assert f"config setting {key}" in output
+
+
+def test_watch_help_mentions_the_relevant_config_keys():
+    output = _wide_help("watch")
+
+    for key in (STORE_CONFIG, PIN_HEAT_CONFIG, HOST_CONFIG, PORT_CONFIG):
         assert f"config setting {key}" in output
 @
 
