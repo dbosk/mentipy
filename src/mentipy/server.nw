@@ -424,6 +424,7 @@ pre code.highlight {
   padding: 0.1rem 0.4rem;
 }
 .status-active { background: #4a90d9; color: white; }
+.index-active { background: #e3eefa; }
 .status-open { background: #dfeee0; color: #1f5c2a; }
 .status-locked { background: #eee; color: #555; }
 .status-skipped { background: #fff3cd; color: #7a5b00; }
@@ -1374,10 +1375,62 @@ open or locked --- computed by the [[LectureProgress]] tracker from the
 routing section, so the label can never disagree with what a respondent
 gets.  Clicking a question's results link is also how the lecturer opens
 it, which makes the index the natural place to read the lecture's state.
-A tracker-less call renders the plain list, which is what a server
-running with [[--no-lock]] shows.  The state's name stays in the
-[[status-]] class for the style sheet, and only the visible label is
-the catalogue's word for it.
+A tracker-less call renders no labels, which is what a server running
+with [[--no-lock]] shows.  The state's name stays in the [[status-]] class
+for the style sheet, and only the visible label is the catalogue's word
+for it.
+
+The store keeps every question it has ever registered, in the order of
+last registration, so the questions a rebuild dropped from the deck come
+first.  In the store's order the lecturer has to search for the deck's
+first question, which is the one line of the page needed at the start of a
+lecture.  The index therefore lists the live deck first, under a heading
+of its own, and the old questions after it.  The old ones stay on the page
+because their answers, prefixes and QR codes stay valid: a lecturer may
+want last year's tally.  A deck with no old questions gets no headings,
+since one heading with nothing to contrast it would only push the first
+question down the page.  The store guarantees the opposite case cannot
+happen: the question registered last is always live, so a non-empty store
+always has a first question to show.
+
+Which questions are live is the store's answer, so the page and the
+Previous and Next links cannot disagree.  That makes \enquote{old} mean
+\enquote{outside the live deck} (\cref{sec:live-deck}), with what that
+brings.  A cut-down build, or one question rendered again from a terminal,
+moves questions under the old heading until the next full build, just as it
+takes them off the navigation row.  A question the deck asks again has one
+row, at its last place, so a deck that repeats its first question does not
+open with it.  And a deck rebuilt with [[mentipy render]] without
+[[--new-run]] continues its old chain
+(\cref{sec:what-counts-as-a-run}), so what it no longer asks reads as
+current and the page may have no headings at all.
+
+Only the display is split.  The labels still get the store's full order,
+because that is what the gate walks
+(\cref{sec:lecturer-paced-progression}), and a
+label worked out from one section would disagree with what a respondent
+gets at both ends: the first current question follows the last old one
+there.
+
+The two lists come from two reads of the store, and a recompile may write
+between them.  Reading the live deck first means that a question registered
+in between is in the rows but not in the live list, so it gets a line under
+the old heading until the next request, rather than no line.  Removing each
+row as it is claimed is what guarantees every question exactly one line,
+and a live hash that has left the store, because the file was replaced, is
+skipped.
+
+The row of the active question, the one [[/active]] goes to, has a toned
+background, so the lecturer finds the lecture's place from across the page.
+It decides nothing itself: the tracker names the question, and the label
+keeps the row readable without colour.  The first question gets no marking,
+since where it matters, at the start of a lecture, the first line is enough.
+
+The tone and the labels answer different questions, so they are separate.
+The tracker follows the lecturer whether the gate is on or not, because
+[[/active]] works under [[--no-lock]] too, so the place in the lecture is
+known there as well.  Only the labels depend on the gate: without it every
+question is open to the room, and \enquote{locked} would be false.
 
 <<functions>>=
 
@@ -1386,31 +1439,61 @@ def _render_index(
     store: Store,
     progress: LectureProgress | None = None,
     *,
+    labels: bool = True,
     catalogue: Catalogue = ENGLISH,
 ) -> str:
-    items = []
+    live = store.live_hashes()
     deck = store.all_questions()
-    results = escape(catalogue("index.results"))
 
-    for entry in deck:
+    if not deck:
+        return f"<p>{escape(catalogue('index.empty'))}</p>"
+
+    rows = {entry["hash"]: entry for entry in deck}
+    current = [rows.pop(full_hash) for full_hash in live if full_hash in rows]
+    old = list(rows.values())
+    current_list = _render_index_list(
+        current, deck, progress, labels, catalogue
+    )
+
+    if not old:
+        return current_list
+
+    return (
+        f"<h2>{escape(catalogue('index.current'))}</h2>"
+        f"{current_list}"
+        f"<h2>{escape(catalogue('index.old'))}</h2>"
+        f"{_render_index_list(old, deck, progress, labels, catalogue)}"
+    )
+
+
+def _render_index_list(
+    entries: list[dict[str, Any]],
+    deck: list[dict[str, Any]],
+    progress: LectureProgress | None,
+    labels: bool,
+    catalogue: Catalogue,
+) -> str:
+    items = []
+    results = escape(catalogue("index.results"))
+    active = progress.active_hash() if progress is not None else None
+
+    for entry in entries:
         status = ""
-        if progress is not None:
+        row = '<li class="index-active">' if entry["hash"] == active else "<li>"
+        if progress is not None and labels:
             label = progress.status(entry["hash"], deck)
             status = (
                 f' <span class="status status-{label}">'
                 f'{escape(catalogue("status." + label))}</span>'
             )
         items.append(
-            "<li>"
+            f"{row}"
             f'<a href="/{entry["url_prefix"]}"><code>{entry["url_prefix"]}</code></a> '
             f'{_render_inline(entry["text"])} '
             f'(<a href="/{entry["url_prefix"]}/results">{results}</a>)'
             f"{status}"
             "</li>"
         )
-
-    if not items:
-        return f"<p>{escape(catalogue('index.empty'))}</p>"
 
     return "<ul>" + "".join(items) + "</ul>"
 @
@@ -1463,6 +1546,331 @@ def test_render_index_labels_questions_when_given_progress(tmp_path):
     assert rendered.index("status-locked") < rendered.index("status-active")
     assert rendered.index("status-active") < rendered.index("status-open")
     assert "status" not in server_module._render_index(store)
+@
+
+The sections are what the lecturer reads, so the tests read them back from
+the page, by heading and in page order, and compare whole lists: an
+assertion that a prefix is present somewhere would pass with every question
+under the wrong heading.  A deck rebuilt without two of its questions is the
+case that was hard to read.  Its dropped questions come first in the store,
+one of them even between two kept ones, and the deck's real first question
+must still be the first thing on the page, as it is unless the deck asks that
+question again.
+
+<<test functions>>=
+def _index_sections(page):
+    pieces = re.split(r"<h2>(.*?)</h2>", page)
+    sections = [(None, pieces[0])] if "</li>" in pieces[0] else []
+    sections += list(zip(pieces[1::2], pieces[2::2]))
+    return [
+        (heading, re.findall(r'<li[^>]*><a href="/([^"/]+)">', body))
+        for heading, body in sections
+    ]
+
+
+def _index_labels(page):
+    return dict(
+        re.findall(
+            r'<li[^>]*><a href="/([^"/]+)">.*?'
+            r'class="status status-(\w+)".*?</li>',
+            page,
+        )
+    )
+
+
+def _toned_rows(page):
+    return re.findall(r'<li class="index-active"><a href="/([^"/]+)">', page)
+
+
+def _rebuilt_without_two_questions(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    dropped_first = store.register(OpenQuestion("Dropped first?"))
+    kept_first = store.register(OpenQuestion("Kept first?"))
+    dropped_later = store.register(OpenQuestion("Dropped later?"))
+    kept_last = store.register(OpenQuestion("Kept last?"))
+    _start_registration_run(store)
+    store.register(OpenQuestion("Kept first?"))
+    store.register(OpenQuestion("Kept last?"))
+    added = store.register(OpenQuestion("Added?"))
+    return store, [kept_first, kept_last, added], [dropped_first, dropped_later]
+
+
+def test_render_index_lists_the_current_deck_before_the_old_questions(tmp_path):
+    store, current, old = _rebuilt_without_two_questions(tmp_path)
+
+    rendered = server_module._render_index(store)
+
+    assert _index_sections(rendered) == [
+        ("Current questions", current),
+        ("Old questions", old),
+    ]
+    assert rendered.startswith("<h2>Current questions</h2>")
+    for prefix in current + old:
+        assert rendered.count(f'href="/{prefix}"') == 1
+        assert rendered.count(f'href="/{prefix}/results"') == 1
+@
+
+An unchanged rebuild has nothing to contrast, so the page stays the plain
+list it always was.
+
+<<test functions>>=
+def test_render_index_has_no_headings_without_old_questions(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    deck = [OpenQuestion("Warm-up?"), OpenQuestion("Follow-up?")]
+    prefixes = [store.register(question) for question in deck]
+    _start_registration_run(store)
+    for question in deck:
+        store.register(question)
+
+    rendered = server_module._render_index(store)
+
+    assert _index_sections(rendered) == [(None, prefixes)]
+    assert rendered.startswith("<ul>")
+    assert rendered.count("<ul>") == 1
+    assert "<h2>" not in rendered
+@
+
+The current section is in the order of the Previous and Next links, not in
+the store's.  The two agree unless an older version of Mentipy copied links
+that no longer fit, so this store is written by hand: its links and serials
+are consistent, and they read B, A, C where the store holds A, B, C.
+
+<<test functions>>=
+def _write_links(store, links):
+    data = json.loads(store.path.read_text(encoding="utf-8"))
+    for prefix, (after, serial) in links.items():
+        entry = data["questions"][store.resolve(prefix)]
+        entry["registered_after"] = after and store.resolve(after)
+        entry["registration_serial"] = serial
+    store.path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_render_index_lists_the_current_deck_in_navigation_order(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    a, b, c = [store.register(OpenQuestion(text)) for text in "ABC"]
+    _write_links(store, {a: (b, 2), b: (None, 1), c: (a, 3)})
+    assert store.next_question(store.resolve(b)) == store.resolve(a)
+
+    rendered = server_module._render_index(store)
+
+    assert _index_sections(rendered) == [(None, [b, a, c])]
+@
+
+Such a store can also hold an old question behind a current one.  With
+[[lock=False]] it follows the locked current question before it, so it is
+locked, where the old section on its own would make it a head with nothing
+waiting before it, and open.
+
+<<test functions>>=
+def test_render_index_labels_an_old_question_from_the_whole_store(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    head = store.register(OpenQuestion("Head?"))
+    old = store.register(OpenQuestion("Old?", lock=False))
+    last = store.register(OpenQuestion("Last?"))
+    _write_links(store, {head: (None, 1), last: (head, 2)})
+
+    rendered = server_module._render_index(store, LectureProgress())
+
+    assert _index_sections(rendered) == [
+        ("Current questions", [head, last]),
+        ("Old questions", [old]),
+    ]
+    assert _index_labels(rendered)[old] == "locked"
+@
+
+The two lists come from two reads of the store, and a recompile may write
+between them.  The test stands in for that write at the one place it can
+happen: a question registered after the live deck was read still gets a
+line, and a live hash that has left the store costs nothing.  Stepping down
+to a subclass is the only way to place a write between two reads
+deterministically.
+
+<<test functions>>=
+class _StoreWrittenBetweenReads(Store):
+    def live_hashes(self):
+        live = super().live_hashes()
+        self.register(OpenQuestion("Registered between the reads?"))
+        return ["0" * 64] + live
+
+
+def test_render_index_lists_every_question_when_the_store_changes(tmp_path):
+    store = _StoreWrittenBetweenReads(tmp_path / "mentipy.json", min_prefix=4)
+    store.register(OpenQuestion("First?"))
+    store.register(OpenQuestion("Last?"))
+
+    sections = _index_sections(server_module._render_index(store))
+
+    rows = store.all_questions()
+    assert len(rows) == 3
+    listed = [prefix for _heading, prefixes in sections for prefix in prefixes]
+    assert sorted(listed) == sorted(row["url_prefix"] for row in rows)
+@
+
+Exactly one row is toned, the active question's, wherever it stands: nowhere
+before the lecturer has opened anything, on the first line when the lecture
+is on the deck's first question, and in the old section when it is on an old
+one.  A skip takes the tone along with the label, to the opening before it.
+The style sheet has to define the class, or the markup would tone nothing.
+
+<<test functions>>=
+def test_render_index_tones_only_the_active_row(tmp_path):
+    store, current, old = _rebuilt_without_two_questions(tmp_path)
+    progress = LectureProgress()
+
+    def toned():
+        return _toned_rows(server_module._render_index(store, progress))
+
+    assert toned() == []
+    progress.open(store.resolve(current[0]))
+    assert toned() == [current[0]]
+    progress.open(store.resolve(old[1]))
+    assert toned() == [old[1]]
+    progress.open(store.resolve(current[1]))
+    progress.close(store.resolve(current[1]))
+    assert toned() == [old[1]]
+    assert "index-active" not in server_module._render_index(store)
+    assert re.search(r"\.index-active \{ background: #", STYLE_CSS)
+@
+
+Without the gate the page has no labels, since \enquote{locked} would be false
+for every question, but the tracker follows the lecture as it does for
+[[/active]], so the tone stays.
+
+<<test functions>>=
+def test_render_index_tones_the_active_row_without_labels(tmp_path):
+    store, current, _old = _rebuilt_without_two_questions(tmp_path)
+    progress = LectureProgress()
+    progress.open(store.resolve(current[1]))
+
+    rendered = server_module._render_index(store, progress, labels=False)
+
+    assert _toned_rows(rendered) == [current[1]]
+    assert "status" not in rendered
+@
+
+Each way of building a store has its own idea of a run, so the sections are
+read back from each.  The table lists the builds, one row per build, then the
+sections the page must show.  The first group is PythonTeX, one process per
+build.  The second is [[mentipy render]] with [[--new-run]] on the deck's first
+question, which must behave the same.  The third is [[mentipy render]] without
+it, where a build continues the chain of the build before, so a store that
+holds last term's deck or an edited question reads as one deck with no headings
+at all: those rows pin that, because the manual tells lecturers about it.  The
+last row of that group is the one gap left for a repeat: each render is its own
+process and cannot know it has been asked already in this deck.
+
+<<test functions>>=
+def _pythontex_build(store, texts):
+    _start_registration_run(store)
+    for text in texts.split():
+        store.register(OpenQuestion(text))
+
+
+def _render_build(store, texts, *, new_run=False):
+    for index, text in enumerate(texts.split()):
+        _start_registration_run()
+        if new_run and index == 0:
+            store.start_registration_run()
+        else:
+            store.continue_registration_run()
+        store.register(OpenQuestion(text))
+
+
+def _new_run_build(store, texts):
+    _render_build(store, texts, new_run=True)
+
+
+INDEX_BUILDS = {
+    "pythontex once": (_pythontex_build, ["A B C"], "A B C", ""),
+    "pythontex rebuilt": (_pythontex_build, ["A B C", "A B C"], "A B C", ""),
+    "pythontex edited": (
+        _pythontex_build,
+        ["A B C", "A C2 D"],
+        "A C2 D",
+        "B C",
+    ),
+    "pythontex repeat": (_pythontex_build, ["X Y A B C A"], "X Y B C A", ""),
+    "pythontex repeat rebuilt": (
+        _pythontex_build,
+        ["X Y A B C A", "X Y A B C A"],
+        "X Y B C A",
+        "",
+    ),
+    "pythontex repeat of the first": (
+        _pythontex_build,
+        ["A B C A D"],
+        "B C A D",
+        "",
+    ),
+    "pythontex repeat over an old deck": (
+        _pythontex_build,
+        ["P Q", "X A B A"],
+        "X B A",
+        "P Q",
+    ),
+    "new-run once": (_new_run_build, ["A B C"], "A B C", ""),
+    "new-run rebuilt": (_new_run_build, ["A B C", "A B C"], "A B C", ""),
+    "new-run dropped": (_new_run_build, ["A B C", "A B"], "A B", "C"),
+    "new-run edited": (_new_run_build, ["A B C", "A B C2"], "A B C2", "C"),
+    "new-run last term": (_new_run_build, ["P Q", "A B"], "A B", "P Q"),
+    "render once": (_render_build, ["A B C"], "A B C", ""),
+    "render rebuilt": (_render_build, ["A B C", "A B C"], "A B C", ""),
+    "render last term": (_render_build, ["P Q", "A B"], "P Q A B", ""),
+    "render edited": (_render_build, ["A B C", "A B C2"], "C A B C2", ""),
+    "render dropped": (_render_build, ["A B C", "A B"], "C A B", ""),
+    "render repeat": (_render_build, ["X Y A B C A"], "B C A", "X Y"),
+}
+
+
+@pytest.mark.parametrize("name", list(INDEX_BUILDS))
+def test_render_index_reads_the_sections_of_each_way_of_building(
+    tmp_path, name
+):
+    build, decks, current, old = INDEX_BUILDS[name]
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    for deck in decks:
+        build(store, deck)
+    prefix = {row["text"]: row["url_prefix"] for row in store.all_questions()}
+
+    def prefixes(texts):
+        return [prefix[text] for text in texts.split()]
+
+    expected = [(None, prefixes(current))]
+    if old:
+        expected = [
+            ("Current questions", prefixes(current)),
+            ("Old questions", prefixes(old)),
+        ]
+    assert _index_sections(server_module._render_index(store)) == expected
+
+
+def test_render_index_mixed_build_starts_at_the_new_run(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    _render_build(store, "A B C")
+    _render_build(store, "A B C", new_run=True)
+
+    prefixes = [row["url_prefix"] for row in store.all_questions()]
+
+    assert _index_sections(server_module._render_index(store)) == [
+        (None, prefixes),
+    ]
+@
+
+The headings are catalogue strings, and every catalogue string is escaped
+like any other text.
+
+<<test functions>>=
+def test_render_index_escapes_the_section_headings(tmp_path):
+    store, _current, _old = _rebuilt_without_two_questions(tmp_path)
+    catalogue = Catalogue(
+        "en",
+        {**ENGLISH.messages, "index.current": "A<B", "index.old": "C&D"},
+    )
+
+    rendered = server_module._render_index(store, catalogue=catalogue)
+
+    assert "<h2>A&lt;B</h2>" in rendered
+    assert "<h2>C&amp;D</h2>" in rendered
 @
 
 \subsection{The prompt and its context}
@@ -4289,8 +4697,9 @@ the slide.  A [[lock=False]] question with no predecessor is simply
 open.
 
 \enquote{Before it in the deck} means the store's full registration
-order --- the order the index page lists, orphans from earlier builds
-included --- and not the navigation row's live sequence.  The live
+order --- the order of [[Store.all_questions]], which [[mentipy list]]
+shows, orphans from earlier builds included --- and not the navigation
+row's live sequence.  The live
 sequence exists to keep dropped slides out of the
 \enquote{Next $\rightarrow$} chain; for pacing it would be a liability.
 Re-registering one existing question --- a [[mentipy render]] in a
@@ -4792,7 +5201,7 @@ cached for the server's lifetime.  A lecturer recompiles a deck while
 the server runs, which records new questions, and a cache would need
 the invalidation that the store avoids by reading its file on every
 operation.  It costs one more read of the store, beside the several
-that most requests make anyway (the index makes one, a question's form
+that most requests make anyway (the index makes two, a question's form
 five), and it is a read: a GET still writes nothing.  With the flag set
 it is never computed.
 
@@ -5285,7 +5694,7 @@ def do_GET(self):
                 self.catalogue("index.title"),
                 self.catalogue("index.title"),
                 _render_index(
-                    store, progress if lock else None, catalogue=self.catalogue
+                    store, progress, labels=lock, catalogue=self.catalogue
                 ),
                 catalogue=self.catalogue,
             ),
@@ -6249,6 +6658,9 @@ question, the pin, records nothing, so its pages must take the store's
 language too.  A page that took the server's default catalogue rather
 than the request's would pass the first run and fail the second.
 
+The store holds a question from an earlier build, so the index has both
+of its sections and their headings are walked too.
+
 The walk covers the empty results pages, fetched before the answers,
 and every refusal, requested as a respondent after the lecturer has
 opened the questions, since a closed question shows the waiting page
@@ -6283,6 +6695,8 @@ def _english_leaks(page, *, keep=()):
 def test_a_swedish_server_speaks_swedish_on_every_page(tmp_path, chosen_by):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     digest = store.save_image(b"a,b\n1,2\n")
+    store.register(OpenQuestion("Från en tidigare omgång?"))
+    _start_registration_run(store)
     questions = [
         MCQuestion(
             "Vilken?",
@@ -6367,6 +6781,8 @@ def test_a_swedish_server_speaks_swedish_on_every_page(tmp_path, chosen_by):
         text = SWEDISH(key, n="{n}")
         assert server_module._script_string(text) in pin_form, key
     joined = "".join(pages.values())
+    assert _index_sections(pages["index"])[0][0] == "Aktuella frågor"
+    assert _index_sections(pages["index"])[1][0] == "Gamla frågor"
     for swedish in [
         "Föreläsningen har inte börjat än.",
         "Läraren har inte öppnat frågan än.",
@@ -8252,6 +8668,32 @@ def test_next_is_plain_for_the_lecturer_and_without_lock(tmp_path):
     assert unlocked.getheader("Location") == f"/{second}"
 @
 
+A deck that repeats a question is the same sequence to the route as to the
+Previous and Next links: the question before the first place of the repeat
+leads to the question after it.  Pacing keeps walking the store's order, which
+is the same one here, so a [[lock=False]] question after that step still opens
+with the question before it.
+
+<<test functions>>=
+def test_next_steps_over_the_first_place_of_a_repeat(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    _start_registration_run(store)
+    warm_up = store.register(OpenQuestion("Warm-up?"))
+    store.register(OpenQuestion("Poll?"))
+    follow = store.register(OpenQuestion("Follow-up?", lock=False))
+    store.register(OpenQuestion("Poll?"))
+    client = {"remote": False}
+
+    with _running_server(store, remote=client) as port:
+        _request(port, "GET", f"/{warm_up}/results")
+        client["remote"] = True
+        response, _body = _request(port, "GET", f"/{warm_up}/next")
+        form, _body = _request(port, "GET", f"/{follow}")
+
+    assert response.getheader("Location") == f"/{follow}"
+    assert form.status == 200
+@
+
 The route answers 404 wherever the link would be missing: after the
 last question, and after a [[next=False]] wrap-up question, even when
 the lecturer has moved on.
@@ -8463,6 +8905,90 @@ def test_index_labels_questions_with_their_lock_state(tmp_path):
     assert body.count('class="status status-locked"') == 1
     assert body.count('class="status status-active"') == 1
     assert body.count('class="status status-open"') == 1
+@
+
+The sections are only a way of showing the questions; the gate still walks
+all of them in the store's order.  So an old question opened by the lecturer
+is the active one, under its old heading, and it opens the [[lock=False]]
+question that follows it in the store, even though the two now stand far
+apart on the page.  Before that opening, the same old question is what keeps
+the first current question locked in spite of its [[lock=False]].  Each label
+is compared with what a respondent actually gets, since a label computed from
+the current section alone would disagree with the gate in exactly these two
+states.
+
+<<test functions>>=
+def test_index_labels_old_questions_as_the_gate_treats_them(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    old_first = store.register(MCQuestion("Old 1", ("A", "B")))
+    old_last = store.register(MCQuestion("Old 2", ("A", "B")))
+    _start_registration_run(store)
+    head = store.register(MCQuestion("Now 1", ("A", "B"), lock=False))
+    locked = store.register(MCQuestion("Now 2", ("A", "B")))
+    switch = {"remote": False}
+    waiting = ENGLISH("waiting.question")
+
+    with _running_server(store, remote=switch) as port:
+        fresh = _request(port, "GET", "/")[1]
+        switch["remote"] = True
+        head_when_fresh = _request(port, "GET", f"/{head}")[1]
+        switch["remote"] = False
+        _request(port, "GET", f"/{old_last}/results")
+        opened = _request(port, "GET", "/")[1]
+        switch["remote"] = True
+        head_when_opened = _request(port, "GET", f"/{head}")[1]
+        locked_when_opened = _request(port, "GET", f"/{locked}")[1]
+        active = _request(port, "GET", "/active")[0]
+
+    assert _index_sections(opened) == [
+        ("Current questions", [head, locked]),
+        ("Old questions", [old_first, old_last]),
+    ]
+    assert set(_index_labels(fresh).values()) == {"locked"}
+    assert len(_index_labels(fresh)) == 4
+    assert _toned_rows(fresh) == []
+    assert _toned_rows(opened) == [old_last]
+    assert waiting in head_when_fresh
+    assert _index_labels(opened) == {
+        head: "open",
+        locked: "locked",
+        old_first: "locked",
+        old_last: "active",
+    }
+    assert "<form" in head_when_opened
+    assert waiting in locked_when_opened
+    assert active.getheader("Location").startswith(f"/{old_last}")
+@
+
+Under [[--no-lock]] there are no labels, but a rebuilt deck is just as hard to
+read, so the sections stay, and the row of the question the lecturer opened
+keeps its tone.  The index is the lecturer's page whatever the gate does: a
+respondent is refused it and learns nothing of either section.
+
+<<test functions>>=
+def test_index_has_its_sections_without_the_gate_too(tmp_path):
+    store, current, old = _rebuilt_without_two_questions(tmp_path)
+    switch = {"remote": False}
+
+    with _running_server(store, lock=False, remote=switch) as port:
+        response, body = _request(port, "GET", "/")
+        _request(port, "GET", f"/{current[1]}/results")
+        _reached, opened = _request(port, "GET", "/")
+        switch["remote"] = True
+        refused, refusal = _request(port, "GET", "/")
+
+    assert response.status == 200
+    assert _index_sections(body) == [
+        ("Current questions", current),
+        ("Old questions", old),
+    ]
+    assert "status" not in body.split("</h1>")[1]
+    assert _toned_rows(body) == []
+    assert _toned_rows(opened) == [current[1]]
+    assert "status" not in opened.split("</h1>")[1]
+    assert refused.status == 403
+    assert "Current questions" not in refusal
+    assert "Kept first?" not in refusal
 @
 
 Behind an SSH tunnel the loopback test is meaningless, so we pin the dangerous

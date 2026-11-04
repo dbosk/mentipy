@@ -302,6 +302,8 @@ them, and only the visible word is translated.
     "Inga frågor har registrerats än.",
 ),
 "index.results": ("results", "resultat"),
+"index.current": ("Current questions", "Aktuella frågor"),
+"index.old": ("Old questions", "Gamla frågor"),
 "status.active": ("active", "aktiv"),
 "status.open": ("open", "öppen"),
 "status.locked": ("locked", "låst"),
