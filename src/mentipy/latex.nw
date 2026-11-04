@@ -1333,6 +1333,7 @@ def regenerate_qrs(
 @
 
 \paragraph{Keeping the served address through a rebuild.}
+\label{sec:keep-served-address}
 Two writers share the QR files: the server, which knows the address it
 serves, and the build, which knows only the configuration.  Whichever runs
 last wins, and PythonTeX runs whenever a block changes.  So a lecturer who
@@ -1464,14 +1465,19 @@ run that bound may call it (\cref{sec:server-runners}).  The last server to
 start owns the record, and when it stops an earlier one that still runs is not
 recorded again; a build then falls back until that server restarts.
 
-A server that is killed cannot clean up, so its record stays until the next
-start of a server overwrites it, or the QR directory is removed.  Nothing in
-Mentipy handles [[SIGTERM]] or [[SIGHUP]], so besides [[kill -9]] that also goes
-for a plain [[kill]] and for closing the terminal: only Ctrl-C or an error counts
-as stopping.  We accept that.  A stale record gives the old behaviour of a
-wrong address until the next start, which is no worse than the configuration
-being out of date, and catching those signals would be a decision about how the
-server shuts down that this record does not justify on its own.
+Ctrl-C, a plain [[kill]], a closed terminal and an error all count as stopping
+(\cref{sec:stop-signals}).  Only a server that runs no code on its way out
+leaves its record behind: [[kill -9]], Ctrl-\textbackslash{} or a power cut.
+The deadline on a stop normally does not, as the record goes before the
+exposure, where a stop can hang.  The exception is a first signal that Python
+swallows, after which the deadline ends the server with its record still there
+(\cref{sec:stop-signals}).  The record then stays until the next start of a
+server overwrites it, or the file or the QR directory is removed, and builds
+meanwhile print the dead address without a word about it.  We accept that.  It
+gives the old behaviour of a wrong address until the next start, which is no
+worse than the configuration being out of date, and a build that had to ask
+whether the server is alive would depend on a network that may be down for
+other reasons.
 
 <<test functions>>=
 def _contents_during_writes(monkeypatch, path, write):
