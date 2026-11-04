@@ -4373,9 +4373,13 @@ second thread appending at that moment could be thanked before the directory is 
 that takes a lost power supply within those milliseconds, on a file system without a
 journal, since the journalled ones commit the name along with the file.
 
-If the sync fails, the line is in the file nevertheless.  Some file systems refuse with
-[[EINVAL]], and reporting a failure would make the student send the answer again and count
-it twice, so the answer stands and the lecturer gets one warning per log.
+If the sync fails, the line is in the file nevertheless, and reporting a failure would
+make the student send the answer again and count it twice, so the answer stands.  What the
+lecturer hears depends on the error.  A file system that does not support syncing refuses
+every time with [[EINVAL]] or [[ENOTSUP]], which says nothing new about any one answer, so
+that gets one warning per log.  Any other error, [[EIO]] above all, means that an answer we
+thanked for may not be on the disk, and it is logged every time: a warning that stayed
+silent after the first would leave the lecturer believing the later answers were safe.
 
 <<store methods>>=
 def _append_answer(self, full_hash: str, value: Any):
@@ -4405,15 +4409,18 @@ def _sync_answer_log(descriptor: int, log: Path, *, created: bool):
             finally:
                 os.close(directory)
     except OSError as error:
-        if log not in _UNSYNCED_ANSWER_LOGS:
+        if error.errno in SYNC_REFUSALS:
+            if log in _UNSYNCED_ANSWER_LOGS:
+                return
             _UNSYNCED_ANSWER_LOGS.add(log)
-            LOGGER.warning(
-                "cannot flush %s to the disk (%s): answers are saved but a"
-                " power cut could lose the latest ones",
-                log,
-                error,
-            )
+        LOGGER.warning(
+            "cannot flush %s to the disk (%s): answers are saved but a"
+            " power cut could lose the latest ones",
+            log,
+            error,
+        )
 <<constants>>=
+SYNC_REFUSALS = frozenset({errno.EINVAL, errno.ENOTSUP})
 _UNSYNCED_ANSWER_LOGS: set[Path] = set()
 <<imports>>=
 import errno
@@ -4935,6 +4942,34 @@ def test_a_sync_that_fails_still_counts_the_answer_with_one_warning(
     assert caplog.text.count("cannot flush") == 1
     assert "Invalid argument" in caplog.text
     assert str(_answer_log(tmp_path)) in caplog.text
+    assert "private" not in caplog.text
+
+
+def test_a_refusal_warns_once_but_every_real_sync_error_is_logged(
+    tmp_path, monkeypatch, caplog
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(OpenQuestion("Comment?")))
+    errors = iter(
+        OSError(code, os.strerror(code))
+        for code in (errno.EINVAL, errno.EINVAL, errno.EIO, errno.EIO)
+    )
+
+    def failing_sync(_descriptor):
+        raise next(errors)
+
+    monkeypatch.setattr("mentipy.store.os.fdatasync", failing_sync)
+
+    for number in range(4):
+        store.record(full_hash, f"private text {number}")
+
+    assert _values(store, full_hash) == [
+        f"private text {number}" for number in range(4)
+    ]
+    messages = [record.getMessage() for record in caplog.records]
+    assert sum(os.strerror(errno.EINVAL) in text for text in messages) == 1
+    assert sum(os.strerror(errno.EIO) in text for text in messages) == 2
+    assert all(str(_answer_log(tmp_path)) in text for text in messages)
     assert "private" not in caplog.text
 
 
