@@ -59,7 +59,7 @@ The configuration keys live here because both the LaTeX integration and the CLI
 need the same defaults, and they must agree even when the package is imported
 outside the [[mentipy]] command.  We therefore compute the config file path from
 the fixed application name, not from [[sys.argv[0]]].  The built-in settings
-table also serves as the source for configuration discovery, so keys that
+table is also what [[list_settings]] reports, so keys that
 default to [[None]] still belong there.  In particular,
 [[base_url]] uses [[None]] to mean \enquote{resolve the LAN URL later}.
 
@@ -147,8 +147,9 @@ keywords would invite [[language="python"]] in the configuration and
 [[language="sv"]] in a helper call.  [[locale]] is the conventional
 name for the language of an interface, and it accepts what a system
 locale looks like, [[sv_SE.UTF-8]] included.  The default joins the
-built-in table here, so [[mentipy config]] and [[mentipy latex]] list
-it with the others.
+built-in table here, so [[list_settings]] reports it with the others.
+Of the commands, [[mentipy latex]] is the one that lists the built-in
+keys; [[mentipy config]] shows only what the file holds.
 
 <<constants>>=
 LOCALE_CONFIG = "locale"
@@ -172,9 +173,9 @@ run.
 
 The default is resolved when it is used, by one small function, rather
 than computed into a constant when the module is imported.  The table
-of defaults therefore holds [[None]] for the key, which still lists it
-in [[mentipy config]], and the tests can try every platform by
-changing [[sys.platform]].
+of defaults therefore holds [[None]] for the key, which
+[[list_settings]] still reports, and the tests can try every platform
+by changing [[sys.platform]].
 
 <<imports>>=
 import sys
@@ -962,7 +963,7 @@ def test_a_setting_is_stored_as_a_top_level_key(tmp_path, monkeypatch):
 
 The names are the interface a lecturer writes in a config file, so this test
 spells them out and does not go through the constants: renaming a constant's
-value must fail here.  It also pins the defaults that discovery reports,
+value must fail here.  It also pins the defaults that the helper reports,
 nullable ones included.
 
 <<test functions>>=

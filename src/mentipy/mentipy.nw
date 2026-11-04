@@ -58,7 +58,25 @@ from mentipy.store import (
 from mentipy.venv import activation_script, create_venv, install_package
 @
 
-The version constant keeps the generated package self-describing, while
+The version comes from the installed package's metadata, the one place a
+release changes it.  A constant here had to be remembered at each release, and
+it was not: it went on saying 0.2 while [[pyproject.toml]] moved on.  A source
+tree that is merely on [[sys.path]] has no metadata, and there the version is
+unknown, which we say rather than give a number that nothing vouches for.  The
+lookup asks for the name, not for this copy of the code, so a source tree on the
+path of an environment that has another Mentipy installed reports that one.
+
+<<imports>>=
+from importlib import metadata
+<<constants>>=
+UNKNOWN_VERSION = "unknown"
+
+try:
+    __version__ = metadata.version("mentipy")
+except metadata.PackageNotFoundError:
+    __version__ = UNKNOWN_VERSION
+@
+
 [[__all__]] documents the intended public API explicitly.  The environment
 helpers live here too because the CLI and PythonTeX workflows both benefit from
 one obvious import surface when a course repository needs a local virtual
@@ -69,8 +87,6 @@ the package root, and a book that binds decks sets the base directory
 from its own preamble without knowing which module owns it.
 
 <<constants>>=
-__version__ = "0.2"
-
 __all__ = [
     "ContextDownload",
     "ContextSnippet",
@@ -118,6 +134,10 @@ body is intentionally empty apart from the constants above.
 The facade test makes the public contract explicit.
 
 <<test [[mentipy.py]]>>=
+from importlib import metadata
+import subprocess
+import sys
+
 from mentipy import *
 
 <<test functions>>
@@ -157,5 +177,36 @@ def test_package_facade_reexports_the_public_api():
     assert ContextDownload.__name__ == "ContextDownload"
     assert callable(file_snippet)
     assert callable(file_download)
-    assert __version__ == "0.2"
+    assert __version__ == metadata.version("mentipy")
+@
+
+A source tree on [[sys.path]] has no metadata, and that case cannot run for
+real here: the package's dependencies and its metadata share one
+[[site-packages]], so a process that can import Mentipy can also find the
+metadata.  The test therefore injects the failure.  It needs a process of its
+own because the version is read once, when the package is first imported.
+
+<<test functions>>=
+_WITHOUT_METADATA = """\
+from importlib import metadata
+
+def missing(name):
+    raise metadata.PackageNotFoundError(name)
+
+metadata.version = missing
+import mentipy
+print(mentipy.__version__)
+"""
+
+
+def test_the_version_is_unknown_without_package_metadata():
+    result = subprocess.run(
+        [sys.executable, "-c", _WITHOUT_METADATA],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "unknown"
 @

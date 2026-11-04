@@ -58,7 +58,9 @@ address instead, without a warning, until the value is set again.
 their new names. The old spelling is still accepted by the command, but it only
 writes to the old section. The reverse also holds: a value once stored under a
 short name, which earlier versions ignored, now takes effect, so look through what
-`mentipy config` lists.
+`mentipy config` lists. That command shows only what the file holds, and its tab
+completion offers only keys already set, so a leftover section shows up there as
+`mentipy.base_url`; `mentipy latex` lists the keys that exist.
 
 A deck's `.venv` has its own Mentipy, which reads the same file, and the version
 there decides what a build sees: a venv older than 1.0 reads only the old section,
