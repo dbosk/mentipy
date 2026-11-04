@@ -2131,11 +2131,19 @@ def test_a_real_build_shows_the_warning_where_a_lecturer_reads(tmp_path):
     assert log.count("Package mentipy Warning") == 2
     assert (tmp_path / "mentipy.json").read_bytes() == built
 
+    def poll_has_a_record():
+        data = json.loads((tmp_path / "mentipy.json").read_text())
+        return EARLIER_REGISTRATIONS_KEY in data["questions"][
+            question_hash(OpenQuestion("Poll?"))
+        ]
+
+    assert poll_has_a_record()
     for quiet in ("notes.tex", "calm.tex"):
         python, log = _pythontex_build(tmp_path, quiet)
         assert python.returncode == 0
         assert "twice" not in python.stdout
         assert "Package mentipy Warning" not in log
+        assert not poll_has_a_record()
 @
 
 The multiple-choice wrapper exists for author convenience: slide sources should
