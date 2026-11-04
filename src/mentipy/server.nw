@@ -3993,31 +3993,53 @@ A class scanning a QR code is a burst: everyone connects within a second or
 two.  The server thread accepts one connection at a time, and between two
 [[accept]] calls the kernel holds the finished handshakes in the listen queue,
 whose length the server chooses when it starts listening.  The standard
-library's default, $5$, is far too short for this use.  With a full queue a
-new connection does not simply wait.  The student's browser gets a reset, or a
-delay of a second or more from a retransmitted handshake, and a reset answer
-never reaches the store.
+library's default, $5$, is far too short for this use.  With a full queue the
+kernel drops new handshakes, and what the student sees depends on the client.
+Most clients wait through the retransmissions, for a minute or more, which on
+a phone looks like a page that hangs.  A client that sends its headers and its
+body in two writes, as [[http.client]] does, can get a reset instead, and a
+reset answer never reaches the store.  Chromium sends a form in one piece, so
+the stall is the likely symptom in a lecture hall.  We have not traced why
+only the two writes meet a reset.
 
-We measured this with $150$ simultaneous POSTs from another process against a
-real server on Linux, three rounds each, at a machine load of about $2$:
+We measured this with simultaneous POSTs from another process against a real
+server on Linux, over loopback, at machine loads from about $2$ to about $19$.
+Counts vary between rounds, so these are the ranges seen, per round:
 
 \begin{description}
-\item[A backlog of $5$] gave $244$ resets out of $450$, a median response time
-  of a second, and about $340$ listen overflows per round
-  ([[TcpExtListenOverflows]]).  The $206$ answers that got a redirect were the
-  $206$ in the store.
-\item[A backlog of $128$] gave no resets and no overflows, but [[ss -ltn]]
+\item[A backlog of $5$, $150$ POSTs in two writes] gave $66$ to $114$ resets
+  and hundreds of listen overflows ([[TcpExtListenOverflows]]).  The answers
+  that got a redirect were exactly those in the store.
+\item[A backlog of $5$, $150$ POSTs in one write] gave no resets, but up to
+  $43$ requests were still unanswered when the client gave up after a minute,
+  and the slowest answered one took $89$ seconds.  A burst of GETs and
+  [[curl]]'s parallel POSTs stalled in the same way.
+\item[A backlog of $128$] gave no resets with $150$ POSTs, but [[ss -ltn]]
   showed $124$ waiting connections at the peak, so it had almost no margin.
-  With $500$ POSTs it overflowed and reset $65$ of $1000$.
-\item[A backlog of $1024$] gave no resets and no overflows with $150$ or $500$
-  POSTs.  The longest queue we saw was $453$.
+  With $500$ POSTs it overflowed in every round, with anything from no resets
+  to $189$, so a single round says little about it.
+\item[A backlog of $1024$] gave no resets, no timeouts and no overflows with
+  $150$ or $500$ POSTs, in one write or two.  The slowest response took $3.1$
+  and $6.9$ seconds respectively, and the longest queue we saw was $453$.
 \end{description}
+
+The queue stops the failures but not the waiting.  Each answer rewrites the
+store, so on a large store requests can still queue for a long time:
+[[store.record]] cost $25$ to $70$~ms at $5000$ answers and $100$ to $280$~ms at
+$20000$, and $150$ POSTs on $5000$ answers took a median of $6$ to $22$ seconds,
+depending on the load.
 
 The queue only holds what a client has actually started, so a long one costs
 nothing while the room is quiet.  The kernel silently lowers the value to
 [[net.core.somaxconn]], which is $4096$ on current Linux but was $128$ before
 kernel 5.4.  A machine with the lower cap holds only that many waiting
-connections, and nothing in Mentipy warns about it.
+connections, and nothing in Mentipy warns about it.  The other limit is file
+descriptors, since an accepted connection holds one while it waits for the
+store.  With [[ulimit -n 128]] and $300$ POSTs at a backlog of $1024$, a round
+lost up to $20$ answers: the server hit [[EMFILE]] opening [[mentipy.json]] and
+the clients saw [[RemoteDisconnected]].  A backlog of $5$ lost $176$ to $203$ in
+the same run, to resets.  At the usual limit of $1024$, $1200$ POSTs all
+succeeded.
 
 <<constants>>=
 LISTEN_BACKLOG = 1024
@@ -4033,7 +4055,10 @@ must then fit in the queue, however slow the machine is, and each answer must
 reach the store once the server starts.  Before the fix the seventh connection
 times out.  The number of clients stays below the system's cap, since no choice
 of ours can exceed that, and each one takes two file descriptors in this
-process, which keeps the number well inside the usual limit of $1024$.
+process, which keeps the number well inside the usual limit of $1024$.  Without
+[[/proc]] the cap cannot be read, so the test falls back on $100$, below even
+the $128$ of old Linux kernels: it checks less there, but it cannot fail for
+asking more of the system than the system allows.
 
 <<test functions>>=
 FULL_LECTURE_HALL = 300
