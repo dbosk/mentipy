@@ -40,7 +40,7 @@ from mentipy.catalogue import (
     normalize_locale,
 )
 from mentipy.network import resolve_base_url
-from mentipy.qr import make_qr, sidecar_include_path
+from mentipy.qr import make_qr, sidecar_include_path, write_whole
 from mentipy.questions import (
     ContextDownload,
     ContextSnippet,
@@ -1085,6 +1085,7 @@ def _render_question(
 @
 
 \section{QR target regeneration}
+\label{sec:regenerating-qrs}
 \label{sec:qr-regeneration}
 
 The generic factory performs the side effects once, and the public wrappers only
@@ -1255,6 +1256,15 @@ keeps its date (\cref{sec:qr-sidecar}), so a restart at the same address gives
 an earlier start may have rewritten the files for a PDF that was never rebuilt;
 asking once too often is harmless when [[make]] then finds nothing to do.
 
+A QR code that cannot be written must not stop a lecture.  [[make_qr]] needs to
+write in the directory, even at an unchanged address, because it compares a new
+file with the old one, so a read-only directory or a full disk fails it.  The
+codes may well be right already, and even if not, a stale QR code on one slide
+is a smaller problem than no server at all.  So regeneration names the directory
+in a warning, which the CLI prints among the start-up lines, and goes on.  A
+build calling [[make_qr]] itself still gets the error, since a build has nothing
+better to do with a slide that has no QR code.
+
 <<functions>>=
 def regenerate_qrs(
     store: Store,
@@ -1266,6 +1276,8 @@ def regenerate_qrs(
 
     count = 0
     skipped: list[Path] = []
+    unwritten: dict[Path, str] = {}
+    failures = 0
 
     for entry in store.all_questions():
         full_hash = str(entry["hash"])
@@ -1283,15 +1295,21 @@ def regenerate_qrs(
                 skipped.append(target)
                 continue
             fmt = target.suffix.lstrip(".") or DEFAULT_QR_FORMAT
-            make_qr(
-                url,
-                target,
-                fmt=fmt,
-                include_path=(
-                    sidecar_include_path(target)
-                    or _latex_include_path(target)
-                ),
-            )
+            try:
+                make_qr(
+                    url,
+                    target,
+                    fmt=fmt,
+                    include_path=(
+                        sidecar_include_path(target)
+                        or _latex_include_path(target)
+                    ),
+                )
+            except OSError as error:
+                failures += 1
+                reason = error.strerror or str(error)
+                unwritten.setdefault(target.parent, reason)
+                continue
             count += 1
 
     if skipped:
@@ -1302,10 +1320,20 @@ def regenerate_qrs(
             len(skipped),
             ", ".join(directory.as_posix() for directory in directories),
         )
+    if unwritten:
+        LOGGER.warning(
+            "could not write %d QR codes, so they may keep an old address: %s",
+            failures,
+            ", ".join(
+                f"{directory.as_posix()} ({reason})"
+                for directory, reason in unwritten.items()
+            ),
+        )
     return count
 @
 
 \paragraph{Keeping the served address through a rebuild.}
+\label{sec:keep-served-address}
 Two writers share the QR files: the server, which knows the address it
 serves, and the build, which knows only the configuration.  Whichever runs
 last wins, and PythonTeX runs whenever a block changes.  So a lecturer who
@@ -1368,7 +1396,12 @@ def remember_served_address(store: Store, base_url: str) -> None:
             path.unlink(missing_ok=True)
             return
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"{base_url}\n", encoding="utf-8")
+        write_whole(
+            path,
+            lambda temporary: temporary.write_text(
+                f"{base_url}\n", encoding="utf-8"
+            ),
+        )
     except OSError as error:
         LOGGER.warning(
             "cannot remember the served address, so rebuilding the slides "
@@ -1400,6 +1433,9 @@ def _served_address(store: Store) -> str | None:
     return text.strip() or None
 @
 
+The record is written whole, with the sidecars' helper, since a build reading
+it during a write would otherwise find no address and use its fallbacks.
+
 A failure to write the record is a warning and not an error.  The lecture can
 still go ahead: the server runs and the regenerated QR codes are right; only a
 later rebuild would lose the address.  A record that cannot be read counts as
@@ -1429,16 +1465,39 @@ run that bound may call it (\cref{sec:server-runners}).  The last server to
 start owns the record, and when it stops an earlier one that still runs is not
 recorded again; a build then falls back until that server restarts.
 
-A server that is killed cannot clean up, so its record stays until the next
-start of a server overwrites it, or the QR directory is removed.  Nothing in
-Mentipy handles [[SIGTERM]] or [[SIGHUP]], so besides [[kill -9]] that also goes
-for a plain [[kill]] and for closing the terminal: only Ctrl-C or an error counts
-as stopping.  We accept that.  A stale record gives the old behaviour of a
-wrong address until the next start, which is no worse than the configuration
-being out of date, and catching those signals would be a decision about how the
-server shuts down that this record does not justify on its own.
+Ctrl-C, a plain [[kill]], a closed terminal and an error all count as stopping
+(\cref{sec:stop-signals}).  Only a server that runs no code on its way out
+leaves its record behind: [[kill -9]], Ctrl-\textbackslash{} or a power cut.
+The deadline on a stop normally does not, as the record goes before the
+exposure, where a stop can hang.  The exception is a first signal that Python
+swallows, after which the deadline ends the server with its record still there
+(\cref{sec:stop-signals}).  The record then stays until the next start of a
+server overwrites it, or the file or the QR directory is removed, and builds
+meanwhile print the dead address without a word about it.  We accept that.  It
+gives the old behaviour of a wrong address until the next start, which is no
+worse than the configuration being out of date, and a build that had to ask
+whether the server is alive would depend on a network that may be down for
+other reasons.
 
 <<test functions>>=
+def _contents_during_writes(monkeypatch, path, write):
+    # Opening a file for writing is the moment that empties it, which cannot
+    # be had on demand from real processes, so we look right after each one.
+    real_open = io.open
+    seen = set()
+
+    def open_and_look(file, mode="r", *args, **kwargs):
+        stream = real_open(file, mode, *args, **kwargs)
+        if "w" in mode and isinstance(file, Path):
+            seen.add(path.read_bytes())
+        return stream
+
+    with monkeypatch.context() as patch:
+        patch.setattr(io, "open", open_and_look)
+        write()
+    return seen
+
+
 def _addresses_in_sidecars(directory):
     return [
         sidecar.read_text() for sidecar in Path(directory).glob("*.pdf_tex")
@@ -1459,6 +1518,36 @@ def configured_deck(tmp_path, monkeypatch):
     monkeypatch.setenv("MENTIPY_CONFIG", str(config))
     monkeypatch.chdir(tmp_path)
     return tmp_path
+
+
+def test_a_changing_served_address_is_never_empty(
+    configured_deck, monkeypatch
+):
+    store = Store("mentipy.json")
+    remember_served_address(store, "http://old.example:8080")
+    record = configured_deck / DEFAULT_QR_DIR / SERVED_ADDRESS_FILE
+
+    seen = _contents_during_writes(
+        monkeypatch,
+        record,
+        lambda: remember_served_address(store, "http://new.example:8080"),
+    )
+
+    assert seen == {b"http://old.example:8080\n"}
+    assert record.read_text() == "http://new.example:8080\n"
+
+
+def test_an_unchanged_served_address_stays_the_same_file(configured_deck):
+    store = Store("mentipy.json")
+    remember_served_address(store, "http://served.example:8080")
+    record = configured_deck / DEFAULT_QR_DIR / SERVED_ADDRESS_FILE
+    os.utime(record, (1_000_000_000, 1_000_000_000))
+    earlier = record.stat()
+
+    remember_served_address(store, "http://served.example:8080")
+
+    assert record.stat().st_ino == earlier.st_ino
+    assert record.stat().st_mtime_ns == earlier.st_mtime_ns
 
 
 def test_a_build_without_a_served_address_uses_the_configuration(
@@ -2388,7 +2477,9 @@ like any other, and the returned path is the LaTeX-facing one.
 
 We skip the write when the content is unchanged.  The file's timestamp
 then stays put, so build tools that watch dependencies do not see a
-change on every run.
+change on every run.  A changed snippet is written whole
+(\cref{chap:qr}), like the QR sidecar and for the same reason: [[\input]]
+of an empty file would lose a slide's question without an error.
 
 <<functions>>=
 def write_snippet(
@@ -2411,7 +2502,10 @@ def write_snippet(
     target = resolve_path(snippet)
     if not target.exists() or target.read_text(encoding="utf-8") != latex:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(latex, encoding="utf-8")
+        write_whole(
+            target,
+            lambda temporary: temporary.write_text(latex, encoding="utf-8"),
+        )
     return snippet.as_posix()
 @
 
@@ -3820,15 +3914,10 @@ The sidecar's text cannot vouch for the images.  Every format of a question in o
 directory shares one sidecar, so the first format written makes it match while the
 next format still holds the old address, which would put one address's code above
 another's caption.  The test compares each file with a fresh code for the new
-address.  They are the same bytes for the same URL, except that a PDF carries the
-time it was made, which the comparison strips.  PDF has to be among the formats, as
-it is the default and the one decks use.
+address, which has the same bytes for the same URL.  PDF has to be among the
+formats, as it is the default and the one decks use.
 
 <<test functions>>=
-def _without_the_creation_date(image):
-    return re.sub(rb"/CreationDate\s*\([^)]*\)", b"", image.read_bytes())
-
-
 def test_regenerating_updates_every_format_beside_a_shared_sidecar(
     tmp_path, monkeypatch
 ):
@@ -3843,9 +3932,7 @@ def test_regenerating_updates_every_format_beside_a_shared_sidecar(
     for fmt in ("pdf", "png", "svg"):
         fresh = make_qr(url, tmp_path / f"fresh.{fmt}", fmt=fmt)
         written = sidecar.with_suffix(f".{fmt}")
-        assert _without_the_creation_date(written) == (
-            _without_the_creation_date(fresh)
-        ), fmt
+        assert written.read_bytes() == fresh.read_bytes(), fmt
 
 
 def test_regenerating_repairs_an_image_at_the_same_address(
@@ -4416,6 +4503,22 @@ path LaTeX should use; rewriting identical content leaves the file
 untouched.
 
 <<test functions>>=
+def test_write_snippet_never_empties_a_snippet_that_changes(
+    tmp_path, monkeypatch
+):
+    write_snippet("q1", "old", directory=tmp_path)
+    snippet = tmp_path / "q1.tex"
+
+    seen = _contents_during_writes(
+        monkeypatch,
+        snippet,
+        lambda: write_snippet("q1", "new", directory=tmp_path),
+    )
+
+    assert seen == {b"old"}
+    assert snippet.read_text() == "new"
+
+
 def test_write_snippet_writes_under_the_base_dir(book, tmp_path):
     set_base_dir("../deck")
 
@@ -4432,9 +4535,9 @@ def test_write_snippet_writes_under_the_base_dir(book, tmp_path):
 
 <<test [[latex.py]]>>=
 import hashlib
+import io
 import json
 import os
-import re
 import shutil
 import subprocess
 import unicodedata

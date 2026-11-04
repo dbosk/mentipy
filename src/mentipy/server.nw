@@ -6557,7 +6557,9 @@ def test_standard_library_errors_use_the_server_language(
 
     with _running_server(store, locale=flag) as port:
         response, page = _request(port, "PUT", f"/{prefix}")
-        with socket.create_connection(("127.0.0.1", port), timeout=5) as raw:
+        with socket.create_connection(
+            ("127.0.0.1", port), timeout=CLIENT_LIMIT
+        ) as raw:
             raw.sendall(b"GARBAGE\r\n\r\n")
             garbage = b"".join(iter(lambda: raw.recv(4096), b"")).decode()
 
@@ -6829,7 +6831,7 @@ def test_each_request_on_a_kept_alive_connection_chooses_its_language(
     thread.start()
     try:
         connection = http.client.HTTPConnection(
-            "127.0.0.1", server.server_address[1], timeout=5
+            "127.0.0.1", server.server_address[1], timeout=CLIENT_LIMIT
         )
         pages = []
         for path in [f"/{prefix}", "/ffffffffff", "/nope/a/b",
@@ -7083,10 +7085,25 @@ def live_server_open(tmp_path):
         server.shutdown()
         thread.join()
         server.server_close()
+@
+
+The time limit of this client only keeps a bug from hanging the suite, so no
+test checks how fast a page is any more.  Five seconds failed on a busy machine:
+the first page with a word cloud imports the optional package in the request
+thread, which with 40 busy processes and modules not yet compiled took up to 15
+seconds.  The import stays there, since only word clouds need it and it would
+otherwise slow every server start.  The limit is no longer than that needs,
+because a server that hangs costs the suite this limit about a hundred times
+over.
+
+<<test functions>>=
+CLIENT_LIMIT = 60
 
 
 def _request(port, method, path, body=None, headers=None):
-    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    connection = http.client.HTTPConnection(
+        "127.0.0.1", port, timeout=CLIENT_LIMIT
+    )
     connection.request(method, path, body=body, headers=headers or {})
     response = connection.getresponse()
     payload = response.read().decode("utf-8")
@@ -7137,7 +7154,7 @@ returns the payload untouched.
 <<test functions>>=
 def _request_bytes(port, method, path):
     connection = http.client.HTTPConnection(
-        "127.0.0.1", port, timeout=5
+        "127.0.0.1", port, timeout=CLIENT_LIMIT
     )
     connection.request(method, path)
     response = connection.getresponse()
