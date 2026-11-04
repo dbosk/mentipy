@@ -377,6 +377,13 @@ body, a number that is not one) gets the generic
     "Ingen fråga matchar {prefix}.",
 ),
 "error.invalid": ("Invalid answer", "Ogiltigt svar"),
+"error.not_saved": ("Answer not saved", "Svaret sparades inte"),
+"error.not_saved_body": (
+    "Something went wrong on the server and your answer was not saved."
+    " Please tell your lecturer.",
+    "Något gick fel på servern och ditt svar sparades inte. Säg till din"
+    " lärare.",
+),
 "error.status": ("Error {code}", "Fel {code}"),
 "error.not_found": (
     "There is nothing at this address.",
