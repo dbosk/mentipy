@@ -1416,9 +1416,15 @@ skipped.
 
 The row of the active question, the one [[/active]] goes to, has a toned
 background, so the lecturer finds the lecture's place from across the page.
-It follows the label rather than deciding anything itself, and the label
+It decides nothing itself: the tracker names the question, and the label
 keeps the row readable without colour.  The first question gets no marking,
-since it is already first on the page.
+since where it matters, at the start of a lecture, the first line is enough.
+
+The tone and the labels answer different questions, so they are separate.
+The tracker follows the lecturer whether the gate is on or not, because
+[[/active]] works under [[--no-lock]] too, so the place in the lecture is
+known there as well.  Only the labels depend on the gate: without it every
+question is open to the room, and \enquote{locked} would be false.
 
 <<functions>>=
 
@@ -1427,6 +1433,7 @@ def _render_index(
     store: Store,
     progress: LectureProgress | None = None,
     *,
+    labels: bool = True,
     catalogue: Catalogue = ENGLISH,
 ) -> str:
     live = store.live_hashes()
@@ -1438,7 +1445,9 @@ def _render_index(
     rows = {entry["hash"]: entry for entry in deck}
     current = [rows.pop(full_hash) for full_hash in live if full_hash in rows]
     old = list(rows.values())
-    current_list = _render_index_list(current, deck, progress, catalogue)
+    current_list = _render_index_list(
+        current, deck, progress, labels, catalogue
+    )
 
     if not old:
         return current_list
@@ -1447,7 +1456,7 @@ def _render_index(
         f"<h2>{escape(catalogue('index.current'))}</h2>"
         f"{current_list}"
         f"<h2>{escape(catalogue('index.old'))}</h2>"
-        f"{_render_index_list(old, deck, progress, catalogue)}"
+        f"{_render_index_list(old, deck, progress, labels, catalogue)}"
     )
 
 
@@ -1455,18 +1464,18 @@ def _render_index_list(
     entries: list[dict[str, Any]],
     deck: list[dict[str, Any]],
     progress: LectureProgress | None,
+    labels: bool,
     catalogue: Catalogue,
 ) -> str:
     items = []
     results = escape(catalogue("index.results"))
+    active = progress.active_hash() if progress is not None else None
 
     for entry in entries:
         status = ""
-        row = "<li>"
-        if progress is not None:
+        row = '<li class="index-active">' if entry["hash"] == active else "<li>"
+        if progress is not None and labels:
             label = progress.status(entry["hash"], deck)
-            if label == "active":
-                row = '<li class="index-active">'
             status = (
                 f' <span class="status status-{label}">'
                 f'{escape(catalogue("status." + label))}</span>'
@@ -5424,7 +5433,7 @@ def do_GET(self):
                 self.catalogue("index.title"),
                 self.catalogue("index.title"),
                 _render_index(
-                    store, progress if lock else None, catalogue=self.catalogue
+                    store, progress, labels=lock, catalogue=self.catalogue
                 ),
                 catalogue=self.catalogue,
             ),
@@ -8324,8 +8333,9 @@ def test_index_labels_old_questions_as_the_gate_treats_them(tmp_path):
 @
 
 Under [[--no-lock]] there are no labels, but a rebuilt deck is just as hard to
-read, so the sections stay.  The index is the lecturer's page whatever the
-gate does: a respondent is refused it and learns nothing of either section.
+read, so the sections stay, and the row of the question the lecturer opened
+keeps its tone.  The index is the lecturer's page whatever the gate does: a
+respondent is refused it and learns nothing of either section.
 
 <<test functions>>=
 def test_index_has_its_sections_without_the_gate_too(tmp_path):
@@ -8334,6 +8344,8 @@ def test_index_has_its_sections_without_the_gate_too(tmp_path):
 
     with _running_server(store, lock=False, remote=switch) as port:
         response, body = _request(port, "GET", "/")
+        _request(port, "GET", f"/{current[1]}/results")
+        _reached, opened = _request(port, "GET", "/")
         switch["remote"] = True
         refused, refusal = _request(port, "GET", "/")
 
@@ -8343,6 +8355,9 @@ def test_index_has_its_sections_without_the_gate_too(tmp_path):
         ("Old questions", old),
     ]
     assert "status" not in body.split("</h1>")[1]
+    assert _toned_rows(body) == []
+    assert _toned_rows(opened) == [current[1]]
+    assert "status" not in opened.split("</h1>")[1]
     assert refused.status == 403
     assert "Current questions" not in refusal
     assert "Kept first?" not in refusal
