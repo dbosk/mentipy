@@ -2407,8 +2407,9 @@ in a list rather than echoing them is what makes that possible.
 
 The public branch calls the runner inside the exposure context, so the
 tunnel or port mapping lives exactly as long as the runner does, and
-closes on Ctrl-C as on any other exit.  The local branch passes no
-admin token, as before.
+closes on Ctrl-C as on any other exit, a signal included: a [[kill]] or a
+closed terminal takes the path of Ctrl-C (\cref{sec:stop-signals}).  The
+local branch passes no admin token, as before.
 
 <<functions>>=
 def _run_server(
@@ -2431,41 +2432,44 @@ def _run_server(
         "locale": locale,
         "default_locale": get_setting(LOCALE_CONFIG, DEFAULT_LOCALE),
     }
-    if public is None:
-        lines = [
-            *_local_start_lines(store, host, port, results=results, lock=lock),
-            *_answer_log_warnings(store),
-        ]
-        base = resolve_base_url(_configured_base(None), port)
-        with _recording_served_address(store, base) as on_bound:
-            runner(lines, store, host, port, on_bound=on_bound, **options)
-        return
+    with _stopping_on_signals():
+        if public is None:
+            lines = [
+                *_local_start_lines(
+                    store, host, port, results=results, lock=lock
+                ),
+                *_answer_log_warnings(store),
+            ]
+            base = resolve_base_url(_configured_base(None), port)
+            with _recording_served_address(store, base) as on_bound:
+                runner(lines, store, host, port, on_bound=on_bound, **options)
+            return
 
-    admin_token, require_token = _admin_token_policy(public)
-    with _public_url_context(public, port) as public_url:
-        lines = [
-            *_public_start_lines(
-                store,
-                host,
-                port,
-                public_url,
-                results=results,
-                lock=lock,
-                admin_token=admin_token,
-            ),
-            *_answer_log_warnings(store),
-        ]
-        with _recording_served_address(store, public_url) as on_bound:
-            runner(
-                lines,
-                store,
-                host,
-                port,
-                admin_token=admin_token,
-                require_token=require_token,
-                on_bound=on_bound,
-                **options,
-            )
+        admin_token, require_token = _admin_token_policy(public)
+        with _public_url_context(public, port) as public_url:
+            lines = [
+                *_public_start_lines(
+                    store,
+                    host,
+                    port,
+                    public_url,
+                    results=results,
+                    lock=lock,
+                    admin_token=admin_token,
+                ),
+                *_answer_log_warnings(store),
+            ]
+            with _recording_served_address(store, public_url) as on_bound:
+                runner(
+                    lines,
+                    store,
+                    host,
+                    port,
+                    admin_token=admin_token,
+                    require_token=require_token,
+                    on_bound=on_bound,
+                    **options,
+                )
 
 
 def _serve_runner(
@@ -2514,14 +2518,14 @@ served nothing, so it must not decide what the next build writes: a rewritten QR
 code is repaired by the next rerun of PythonTeX, but a false record would keep
 putting the wrong address back.
 
-The same run removes the record when the runner ends, whether by Ctrl-C, by an
-error or by returning, so [[serve]] and [[present]] need no code of their own for
-it.  That is why it sits here, around the runner, and inside the exposure context:
-the record is gone before the public address closes, also when closing it fails.
-Only a run that reached [[on_bound]] may remove anything.  A start that failed on
-a taken port usually carries the very address of the server holding that port,
-so the comparison in [[forget_served_address]] would not protect that server's
-record.
+The same run removes the record when the runner ends, whether by Ctrl-C, by a
+signal (\cref{sec:stop-signals}), by an error or by returning, so [[serve]]
+and [[present]] need no code of their own for it.  That is why it sits here,
+around the runner, and inside the exposure context: the record is gone before
+the public address closes, also when closing it fails.  Only a run that reached
+[[on_bound]] may remove anything.  A start that failed on a taken port usually
+carries the very address of the server holding that port, so the comparison in
+[[forget_served_address]] would not protect that server's record.
 
 <<functions>>=
 @contextmanager
@@ -3232,9 +3236,10 @@ def test_the_served_address_stays_out_of_the_tracked_store(
 
 The record says what a running server serves, so it ends with that server: a
 build afterwards must not keep putting the lecturer's home address into a PDF.
-That holds however the server stops short of being killed, so the tests stop it
-cleanly, with Ctrl-C and with an error while it serves.  The rebuild shows where
-the address comes from, as the sidecar is rewritten from the configuration.
+That holds however the server stops short of [[SIGKILL]].  The tests here stop
+it with Ctrl-C and with an error while it serves; real signals need real
+processes, in \cref{sec:stop-signals}.  The rebuild shows where the address
+comes from, as the sidecar is rewritten from the configuration.
 
 <<test functions>>=
 def test_a_stopped_server_takes_its_address_back(tmp_path, monkeypatch):
@@ -3453,6 +3458,922 @@ def test_present_keeps_the_warning_in_its_banner(
     assert "cannot remember the served address" in result.stdout
 @
 
+\subsection{Stopping on a signal}
+\label{sec:stop-signals}
+
+A run leaves things behind that outlast the process unless it removes them:
+the record of the served address, an [[ssh]] child, a port mapping on the
+router.  All of them are removed on the way out, in [[finally]] blocks and
+context managers, and that way out exists only if Python unwinds.  Ctrl-C
+unwinds it, because Python turns [[SIGINT]] into [[KeyboardInterrupt]].  A
+plain [[kill]] sends [[SIGTERM]] and closing the terminal sends [[SIGHUP]],
+and the default action of both ends the process on the spot, so the record
+stays and later builds put a dead address in the QR codes.  To the lecturer
+these are all the same act: the lecture is over.  So while a server runs,
+[[_run_server]] treats them alike.
+
+The handler raises [[KeyboardInterrupt]], not an exception of its own, because
+that is the path every cleanup already takes, wherever the interruption lands.
+It passes the [[except Exception]] of [[present]]'s follow loop, as Ctrl-C does,
+and neither [[serve]] nor [[present]] needs code of its own.  The rest of the
+design is about what surrounds that one line.
+
+\begin{description}
+\item[The first signal decides, later ones are ignored.]
+  A second one raising in the middle of a [[finally]] would leave the rest of
+  the cleanup undone: during the wait for [[ssh]] to go, say, it would leave
+  [[ssh]] running.  That is why [[SIGINT]] gets the same handler although
+  Python already raises for it, since an impatient second Ctrl-C, or a Ctrl-C
+  after a [[kill]], would do just that, and so would a closed terminal after a
+  Ctrl-C.
+\item[A cleanup has a deadline.]
+  Ignoring signals means nobody can interrupt a cleanup that hangs, and after
+  a closed terminal nobody is there to try.  The first signal therefore also
+  arms [[signal.alarm]], with [[SIGALRM]] set to its default action, as a
+  process can inherit it ignored.  That action ends the process even inside a
+  C call, where a router that does not answer would hold it and no Python
+  handler could run.  The deadline allows for the five seconds that [[ssh]]
+  gets and for a slow router.  Stopping the server waits for no network and the
+  record goes next, so what a deadline cuts off is normally the exposure, and a
+  mapping may then stay on the router.  Such an end has the status of
+  [[SIGALRM]], since the cleanup did not finish.  [[SIGQUIT]] keeps its default
+  action too, so Ctrl-\textbackslash{} remains the way to leave at once, without
+  any cleanup.
+\item[The process ends by the signal it received.]
+  When the cleanup is over, the handler from before is back and the signal is
+  raised again, so with the default handler the process dies from it, as it
+  always has.  A shell shows 143 or 129, a [[subprocess]] caller sees the
+  negative signal number, and a supervisor such as [[systemd]] counts it as a
+  clean stop, none of which changes for anyone.  Exiting with status 143 would
+  look the same in a shell but would count as a failure to such a supervisor,
+  and status 0 would hide that the process was stopped from outside.  A caller
+  with a handler of its own keeps its say, as that handler runs instead and
+  the block simply ends.  Dying this way skips the interpreter's exit, which
+  nothing needs: everything we print is flushed as it is printed, and no
+  [[atexit]] function is registered.  Ctrl-C keeps its statuses by the same
+  rule, needing no case of its own: with Python's handler back, raising
+  [[SIGINT]] again is simply [[KeyboardInterrupt]], which Typer turns into 130
+  for [[serve]], and which [[present]] catches to return normally.
+\item[A signal that was ignored at the start stays ignored.]
+  That is what [[nohup]] leaves behind, and a lecturer who used it wants the
+  server to survive the terminal; a background job of a script has [[SIGINT]]
+  ignored in the same way.  [[getsignal]] gives [[None]] for a handler not set
+  from Python, which could not be put back, so that one is left in place as
+  well.
+\item[Only the main thread, and only where it means something.]
+  [[signal.signal]] raises on any other thread, where a test or a caller may
+  run a server; such a run simply has no handlers.  Windows has no [[SIGHUP]],
+  no [[signal.alarm]] for the deadline, and a [[SIGTERM]] from outside ends
+  the process without running a handler at all, so there is nothing to gain,
+  and a Windows server stays as it was: only Ctrl-C stops it cleanly.
+\end{description}
+
+After a hang-up the terminal is gone, and every write to it fails with
+[[EIO]].  The cleanup itself writes nothing, except warnings through
+[[logging]], which drops the failure of its stream.  [[present]]'s follow loop
+may hit the error first, in the moment before the signal comes; that is an
+[[Exception]] in a tick, which goes to the banner like any other, and the next
+thing to happen is the signal.  A hang-up reaches the session of the terminal,
+so it stops an [[ssh]] child by itself, but a plain [[kill]] reaches Mentipy
+alone.  The browser that [[present]] opened has a session of its own, and a
+Python handler does not survive [[exec]], so it runs on either way.
+
+A first signal can be lost.  Python swallows an exception raised in a weakref
+callback or a [[__del__]], and prints \enquote{Exception ignored}, so a signal
+that lands there raises nothing, while the handler has already armed the
+deadline and made later signals ignored.  The server then runs on, and the
+deadline ends it with the record and the exposure both left behind.  We accept
+that, as we have only seen it by forcing the moment, and the main thread mostly
+sits waiting, where no such callback runs.
+
+What no handler can catch is [[SIGKILL]] or the power going off, and
+[[SIGQUIT]] is left alone as said.  \Cref{sec:keep-served-address} says what
+that leaves behind.
+
+<<imports>>=
+import signal
+<<constants>>=
+STOP_DEADLINE = 30
+<<functions>>=
+@contextmanager
+def _stopping_on_signals():
+    if (
+        threading.current_thread() is not threading.main_thread()
+        or not hasattr(signal, "SIGHUP")
+    ):
+        yield
+        return
+
+    received = []
+
+    def stop(signum, _frame):
+        if received:
+            return
+        received.append(signum)
+        earlier[signal.SIGALRM] = signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        signal.alarm(STOP_DEADLINE)
+        raise KeyboardInterrupt
+
+    earlier = {}
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        handler = signal.getsignal(signum)
+        if handler not in (signal.SIG_IGN, None):
+            earlier[signum] = handler
+            signal.signal(signum, stop)
+    try:
+        yield
+    except KeyboardInterrupt:
+        if not received:
+            raise
+    finally:
+        if received:
+            signal.alarm(0)
+        for signum, handler in earlier.items():
+            signal.signal(signum, handler)
+    if received:
+        signal.raise_signal(received[0])
+@
+
+\paragraph{Testing with real signals.}
+These tests start the real command line in a process of its own and let the
+kernel deliver the signal, because the things that can go wrong happen outside
+Python's view: what the default action does, whether the status is the one a
+caller sees, and what a closed terminal does to the writes.  Each process begins
+from the default handling of the signals, whatever the test run itself was
+started under, so that [[nohup make test]] tests the same thing.  A
+[[setup]] line changes what a test needs, before Mentipy is imported.  The base
+address is pinned, so no test depends on the network, and it is not a loopback
+address, so a record is written; its content tells the test the socket is bound.
+
+Whatever a test starts ends by itself.  A test run that is killed runs no
+teardown, and a program with a session of its own is not stopped along with it,
+so an endless one would stay behind.  One did, for 41 minutes.  The command has
+a thread that ends it soon after the test run has gone, or at a limit.  It is
+not an alarm, since the deadline under test replaces the alarm, and a test may
+start the command with [[SIGALRM]] ignored.  The programs below run a bounded
+loop, as one of them has to outlive the command.  The limits are far above what
+a test needs on a loaded machine.
+
+<<test functions>>=
+_SERVED = "http://203.0.113.7:8080"
+_CLI_PROCESS = '''\
+import os, signal, threading, time
+signal.signal(signal.SIGINT, signal.default_int_handler)
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
+signal.signal(signal.SIGHUP, signal.SIG_DFL)
+def end_with_the_test_run(limit):
+    while os.getppid() == {test_run} and time.monotonic() < limit:
+        time.sleep(0.5)
+    os._exit(70)
+threading.Thread(
+    target=end_with_the_test_run, args=(time.monotonic() + {limit},), daemon=True
+).start()
+{setup}
+import mentipy.cli
+mentipy.cli.main()
+'''
+_QUIETLY = {"serve": ("serve",), "present": ("present", "--no-open")}
+_LECTURE_LIMIT = 600
+_RUN_FOR_A_WHILE = (
+    'i=0; while [ "$i" -lt 6000 ]; do sleep 0.05; i=$((i + 1)); done\n'
+)
+
+
+def _wait_until(condition, *, timeout=60):
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() > deadline:
+            pytest.fail(f"still waiting after {timeout} s: {condition}")
+        threading.Event().wait(0.02)
+
+
+@contextmanager
+def _lecture(tmp_path, command, *options, setup="", settings=None, **popen):
+    pytest.importorskip("fcntl")
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps({"mentipy": {"base_url": _SERVED, **(settings or {})}})
+    )
+    port = _free_port()
+    with open(tmp_path / "output.log", "wb") as log:
+        process = _REAL_POPEN(
+            [sys.executable, "-c",
+             _CLI_PROCESS.format(
+                 setup=setup, limit=_LECTURE_LIMIT, test_run=os.getpid()
+             ),
+             command,
+             "--host", "127.0.0.1", "--port", str(port),
+             "--store", str(tmp_path / "mentipy.json"), *options],
+            cwd=tmp_path,
+            env={
+                **os.environ,
+                "MENTIPY_CONFIG": str(config),
+                "PATH": f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}",
+            },
+            **{"stdout": log, "stderr": subprocess.STDOUT, **popen},
+        )
+    try:
+        yield SimpleNamespace(process=process, port=port)
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+
+
+def _the_record(tmp_path):
+    return tmp_path / "mentipy-obj" / mentipy.latex.SERVED_ADDRESS_FILE
+
+
+def _await_the_bind(tmp_path, lecture):
+    record = _the_record(tmp_path)
+
+    def bound():
+        assert lecture.process.poll() is None, (
+            tmp_path / "output.log"
+        ).read_text()
+        return record.exists() and record.read_text().strip() == _SERVED
+
+    _wait_until(bound)
+
+
+def _assert_clean_stop(tmp_path, lecture, status):
+    assert lecture.process.wait(timeout=60) == status
+    assert not _the_record(tmp_path).exists()
+    assert "Traceback" not in (tmp_path / "output.log").read_text()
+    with socket.socket() as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind(("127.0.0.1", lecture.port))
+@
+
+The main case is the one the section is about: both commands, both signals, and
+the process ends, by that signal, with the record gone and the port free.
+
+<<test functions>>=
+@pytest.mark.parametrize("command", ["serve", "present"])
+@pytest.mark.parametrize("name", ["SIGTERM", "SIGHUP"])
+def test_a_signal_stops_the_server_as_ctrl_c_does(tmp_path, command, name):
+    with _lecture(tmp_path, *_QUIETLY[command]) as lecture:
+        signum = getattr(signal, name)
+        _await_the_bind(tmp_path, lecture)
+
+        lecture.process.send_signal(signum)
+
+        _assert_clean_stop(tmp_path, lecture, -signum)
+
+
+@pytest.mark.parametrize(
+    "command, status", [("serve", 130), ("present", 0)]
+)
+def test_ctrl_c_keeps_its_exit_status(tmp_path, command, status):
+    with _lecture(tmp_path, *_QUIETLY[command]) as lecture:
+        _await_the_bind(tmp_path, lecture)
+
+        lecture.process.send_signal(signal.SIGINT)
+
+        _assert_clean_stop(tmp_path, lecture, status)
+@
+
+Closing the terminal is what the lecturer does, and nothing replaces it here:
+the test gives the process a real terminal, as its controlling terminal, waits
+until the command has written to it, and closes the other end.  The hang-up
+then comes from the kernel, not from the test.  A terminal that has been
+closed also fails every later write, and [[present]] keeps writing if a
+hang-up is ignored, so a further test lets a lecture move on after the
+terminal has gone.  The display fails, which the log shows, and a later
+[[kill]] still stops everything cleanly.
+
+<<test functions>>=
+def _a_terminal():
+    fcntl = pytest.importorskip("fcntl")
+    pty = pytest.importorskip("pty")
+    termios = pytest.importorskip("termios")
+    master, slave = pty.openpty()
+    return master, {
+        "stdin": slave,
+        "stdout": slave,
+        "stderr": slave,
+        "start_new_session": True,
+        "preexec_fn": lambda: fcntl.ioctl(0, termios.TIOCSCTTY, 0),
+    }
+
+
+def _read_until(master, text):
+    seen = bytearray()
+
+    def shown():
+        if select.select([master], [], [], 0.02)[0]:
+            seen.extend(os.read(master, 4096))
+        return text in seen
+
+    _wait_until(shown)
+
+
+@pytest.mark.parametrize(
+    "command, shown",
+    [("serve", b"Latecomers"), ("present", b"No question is open")],
+)
+def test_closing_the_terminal_stops_the_server(tmp_path, command, shown):
+    master, terminal = _a_terminal()
+    with _lecture(tmp_path, *_QUIETLY[command], **terminal) as lecture:
+        os.close(terminal["stdout"])
+        _await_the_bind(tmp_path, lecture)
+        _read_until(master, shown)
+
+        os.close(master)
+
+        _assert_clean_stop(tmp_path, lecture, -signal.SIGHUP)
+
+
+def test_present_can_be_stopped_after_its_terminal_has_gone(tmp_path):
+    prefix = Store(tmp_path / "mentipy.json").register(
+        MCQuestion("Pick one", ("A", "B"))
+    )
+    watch_log = tmp_path / "watch.log"
+    master, terminal = _a_terminal()
+    setup = (
+        "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+        "import logging\n"
+        "logging.getLogger('mentipy.cli').addHandler(\n"
+        f"    logging.FileHandler({str(watch_log)!r})\n"
+        ")"
+    )
+    with _lecture(
+        tmp_path, "present", "--no-open", "--interval", "0.05",
+        setup=setup, **terminal,
+    ) as lecture:
+        os.close(terminal["stdout"])
+        _await_the_bind(tmp_path, lecture)
+        _read_until(master, b"No question is open")
+
+        os.close(master)
+        _open_for_the_room(f"http://127.0.0.1:{lecture.port}", prefix)
+        _wait_until(
+            lambda: watch_log.exists()
+            and "watch failed" in watch_log.read_text()
+        )
+        lecture.process.terminate()
+
+        _assert_clean_stop(tmp_path, lecture, -signal.SIGTERM)
+@
+
+[[present]] leaves a browser running when the lecture ends, and the terminal
+going away must not change that: the opener has a session of its own, so the
+hang-up never reaches it.  The opener here is a script that notes a hang-up
+and otherwise stays, as a browser would.
+
+<<test functions>>=
+def test_closing_the_terminal_leaves_the_browser_running(tmp_path):
+    hung_up = tmp_path / "opener-got-hup"
+    pid_file = tmp_path / "opener.pid"
+    opener = tmp_path / "opener.sh"
+    opener.write_text(
+        "#!/bin/sh\n"
+        f"trap 'echo hup > {hung_up}; exit' HUP\n"
+        f"echo $$ > {pid_file}\n"
+        f"{_RUN_FOR_A_WHILE}"
+    )
+    opener.chmod(0o755)
+    master, terminal = _a_terminal()
+    try:
+        with _lecture(
+            tmp_path, "present", "--open-with", str(opener), **terminal
+        ) as lecture:
+            os.close(terminal["stdout"])
+            _await_the_bind(tmp_path, lecture)
+            _read_until(master, b"No question is open")
+            _wait_until(lambda: pid_file.exists() and pid_file.read_text())
+
+            os.close(master)
+
+            _assert_clean_stop(tmp_path, lecture, -signal.SIGHUP)
+            threading.Event().wait(0.3)
+            assert not hung_up.exists()
+            assert _running(int(pid_file.read_text()))
+    finally:
+        if pid_file.exists() and _running(int(pid_file.read_text())):
+            os.kill(int(pid_file.read_text()), signal.SIGKILL)
+
+
+def _running(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+@
+
+The tunnel and the port mapping stop on the same path.  A real tunnel needs an
+[[sshd]], and a real mapping needs a router, so these two are the only things
+not real here: an [[ssh]] program on the [[PATH]], which runs until it is
+stopped, and a [[miniupnpc]] module in the process's working directory, which
+notes what it is asked to do.  The address the command reports is replaced
+too, since the real one comes from the network.  Everything between them and
+the signal is the real code.  With a signal sent only to Mentipy, as a plain
+[[kill]] does, nothing else would stop that [[ssh]].  The signal may also come
+while the tunnel or the mapping is being set up, even while the router is
+adding the mapping, before the exposure context has anything to clean up, so
+the set-up has to clean up after itself.  Before the router has been asked
+there is nothing to clean up, and a delete could only hit another program's
+mapping on that port.  A delete that fails, since the router never made the
+mapping, must not change how the stop goes.
+
+<<test functions>>=
+_QUICK_SSH = (
+    "import mentipy.public\n"
+    "mentipy.public.SSH_STARTUP_TIMEOUT = 0.1\n"
+    "mentipy.public.SSH_SHUTDOWN_TIMEOUT = 1"
+)
+
+
+@pytest.fixture
+def fake_ssh(tmp_path):
+    pid_file = tmp_path / "ssh.pid"
+    stopped = tmp_path / "ssh-got-term"
+
+    def install(*, stubborn=False):
+        trap = f"trap 'echo term > {stopped}' TERM\n" if stubborn else ""
+        program = tmp_path / "bin" / "ssh"
+        program.parent.mkdir()
+        program.write_text(
+            f"#!/bin/sh\n{trap}echo $$ > {pid_file}.new\n"
+            f"mv {pid_file}.new {pid_file}\n"
+            f"{_RUN_FOR_A_WHILE}"
+        )
+        program.chmod(0o755)
+
+    def assert_stopped():
+        pid = int(pid_file.read_text())
+        _wait_until(lambda: not _running(pid), timeout=10)
+
+    yield SimpleNamespace(
+        install=install,
+        started=pid_file.exists,
+        stopped=stopped.exists,
+        assert_stopped=assert_stopped,
+    )
+    if pid_file.exists() and _running(int(pid_file.read_text())):
+        os.kill(int(pid_file.read_text()), signal.SIGKILL)
+
+
+def _ssh_settings(tunnel):
+    return {
+        "ssh_tunnel": f"someone@127.0.0.1:{tunnel.getsockname()[1]}",
+        "public_base_url": _SERVED,
+    }
+
+
+def test_a_signal_closes_the_ssh_tunnel(tmp_path, fake_ssh):
+    fake_ssh.install()
+    with socket.create_server(("127.0.0.1", 0)) as tunnel, _lecture(
+        tmp_path, "serve", "--public", "ssh",
+        setup=_QUICK_SSH, settings=_ssh_settings(tunnel),
+    ) as lecture:
+        _await_the_bind(tmp_path, lecture)
+
+        lecture.process.terminate()
+
+        _assert_clean_stop(tmp_path, lecture, -signal.SIGTERM)
+        fake_ssh.assert_stopped()
+
+
+def test_closing_the_terminal_closes_the_ssh_tunnel(tmp_path, fake_ssh):
+    fake_ssh.install()
+    master, terminal = _a_terminal()
+    with socket.create_server(("127.0.0.1", 0)) as tunnel, _lecture(
+        tmp_path, "serve", "--public", "ssh",
+        setup=_QUICK_SSH, settings=_ssh_settings(tunnel), **terminal,
+    ) as lecture:
+        os.close(terminal["stdout"])
+        _await_the_bind(tmp_path, lecture)
+        _read_until(master, b"Latecomers")
+
+        os.close(master)
+
+        _assert_clean_stop(tmp_path, lecture, -signal.SIGHUP)
+        fake_ssh.assert_stopped()
+
+
+def test_a_signal_while_the_tunnel_starts_stops_it(tmp_path, fake_ssh):
+    fake_ssh.install()
+    with socket.create_server(("127.0.0.1", 0)) as tunnel, _lecture(
+        tmp_path, "serve", "--public", "ssh",
+        setup=(
+            "import mentipy.public\n"
+            "mentipy.public.SSH_STARTUP_TIMEOUT = 300"
+        ),
+        settings=_ssh_settings(tunnel),
+    ) as lecture:
+        _wait_until(fake_ssh.started)
+
+        lecture.process.terminate()
+
+        assert lecture.process.wait(timeout=60) == -signal.SIGTERM
+        fake_ssh.assert_stopped()
+
+
+def _fake_router(
+    tmp_path,
+    *,
+    selecting="return None",
+    adding="return True",
+    removing="open('mapping-removed', 'w').close()",
+):
+    (tmp_path / "miniupnpc.py").write_text(
+        "class UPnP:\n"
+        "    lanaddr = '192.0.2.10'\n"
+        "    def discover(self):\n"
+        "        return 1\n"
+        "    def selectigd(self):\n"
+        f"        {selecting}\n"
+        "    def addportmapping(self, *_arguments):\n"
+        f"        {adding}\n"
+        "    def deleteportmapping(self, *_arguments):\n"
+        f"        {removing}\n"
+    )
+
+
+def _noting_and_hanging(note):
+    return f"open({note!r}, 'w').close(); __import__('time').sleep(300)"
+
+
+_KNOWN_PUBLIC_ADDRESS = (
+    "import mentipy.public\n"
+    "mentipy.public.resolve_public_ip = lambda: '203.0.113.7'"
+)
+_PUBLIC_ADDRESS_THAT_TAKES_LONG = '''\
+import mentipy.public, time
+def asking():
+    open('asking-for-the-address', 'w').close()
+    time.sleep(300)
+mentipy.public.resolve_public_ip = asking'''
+
+
+def test_a_signal_removes_the_port_mapping(tmp_path):
+    _fake_router(tmp_path)
+    with _lecture(
+        tmp_path, "serve", "--public", "upnp",
+        setup=_KNOWN_PUBLIC_ADDRESS, settings={"public_base_url": _SERVED},
+    ) as lecture:
+        _await_the_bind(tmp_path, lecture)
+        assert not (tmp_path / "mapping-removed").exists()
+
+        lecture.process.terminate()
+
+        _assert_clean_stop(tmp_path, lecture, -signal.SIGTERM)
+        assert (tmp_path / "mapping-removed").exists()
+
+
+def test_closing_the_terminal_removes_the_port_mapping(tmp_path):
+    _fake_router(tmp_path)
+    master, terminal = _a_terminal()
+    with _lecture(
+        tmp_path, "serve", "--public", "upnp",
+        setup=_KNOWN_PUBLIC_ADDRESS, settings={"public_base_url": _SERVED},
+        **terminal,
+    ) as lecture:
+        os.close(terminal["stdout"])
+        _await_the_bind(tmp_path, lecture)
+        _read_until(master, b"Latecomers")
+
+        os.close(master)
+
+        _assert_clean_stop(tmp_path, lecture, -signal.SIGHUP)
+        assert (tmp_path / "mapping-removed").exists()
+
+
+def test_a_signal_while_the_router_adds_the_mapping_removes_it(tmp_path):
+    _fake_router(tmp_path, adding=_noting_and_hanging("adding-the-mapping"))
+    with _lecture(
+        tmp_path, "serve", "--public", "upnp", setup=_KNOWN_PUBLIC_ADDRESS
+    ) as lecture:
+        _wait_until((tmp_path / "adding-the-mapping").exists)
+
+        lecture.process.terminate()
+
+        assert lecture.process.wait(timeout=60) == -signal.SIGTERM
+        assert (tmp_path / "mapping-removed").exists()
+
+
+def test_a_signal_before_the_router_is_asked_removes_nothing(tmp_path):
+    _fake_router(
+        tmp_path, selecting=_noting_and_hanging("selecting-the-gateway")
+    )
+    with _lecture(
+        tmp_path, "serve", "--public", "upnp", setup=_KNOWN_PUBLIC_ADDRESS
+    ) as lecture:
+        _wait_until((tmp_path / "selecting-the-gateway").exists)
+
+        lecture.process.terminate()
+
+        assert lecture.process.wait(timeout=60) == -signal.SIGTERM
+        assert not (tmp_path / "mapping-removed").exists()
+
+
+def test_a_mapping_the_router_cannot_remove_does_not_change_the_stop(tmp_path):
+    _fake_router(
+        tmp_path,
+        adding=_noting_and_hanging("adding-the-mapping"),
+        removing="raise Exception('no such mapping')",
+    )
+    with _lecture(
+        tmp_path, "serve", "--public", "upnp", setup=_KNOWN_PUBLIC_ADDRESS
+    ) as lecture:
+        _wait_until((tmp_path / "adding-the-mapping").exists)
+
+        lecture.process.terminate()
+
+        _assert_clean_stop(tmp_path, lecture, -signal.SIGTERM)
+
+
+def test_a_signal_while_the_mapping_starts_removes_it(tmp_path):
+    _fake_router(tmp_path)
+    with _lecture(
+        tmp_path, "serve", "--public", "upnp",
+        setup=_PUBLIC_ADDRESS_THAT_TAKES_LONG,
+    ) as lecture:
+        _wait_until((tmp_path / "asking-for-the-address").exists)
+
+        lecture.process.terminate()
+
+        assert lecture.process.wait(timeout=60) == -signal.SIGTERM
+        assert (tmp_path / "mapping-removed").exists()
+@
+
+A second signal must not cut the cleanup short, whichever comes first, and
+that includes a Ctrl-C after a [[kill]] or the reverse.  The tunnel gives the
+test a cleanup that takes its time: this [[ssh]] notes the [[SIGTERM]] and
+stays, so Mentipy waits for it and then kills it, and the second signal comes
+during that wait.  If it broke the wait, the [[ssh]] would be left running.
+The status is that of the first signal, which is the one that decided how the
+process stops.
+
+A cleanup that hangs must not keep the process forever.  With a router that
+never answers and a shorter deadline, the process ends by the alarm, and the
+record is gone by then, as it goes before the exposure.  That also holds for a
+process that was started with [[SIGALRM]] ignored, which it would inherit like
+any other.
+
+With later signals ignored, [[SIGQUIT]] stays the way to leave at once.  It
+runs no cleanup, so it leaves the record, as the manual says.
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    "first, second, status",
+    [
+        ("SIGTERM", "SIGTERM", -signal.SIGTERM),
+        ("SIGTERM", "SIGINT", -signal.SIGTERM),
+        ("SIGHUP", "SIGTERM", -1),
+        ("SIGINT", "SIGHUP", 130),
+    ],
+)
+def test_a_second_signal_cannot_cut_the_cleanup_short(
+    tmp_path, fake_ssh, first, second, status
+):
+    fake_ssh.install(stubborn=True)
+    with socket.create_server(("127.0.0.1", 0)) as tunnel, _lecture(
+        tmp_path, "serve", "--public", "ssh",
+        setup=_QUICK_SSH, settings=_ssh_settings(tunnel),
+    ) as lecture:
+        _await_the_bind(tmp_path, lecture)
+        lecture.process.send_signal(getattr(signal, first))
+        _wait_until(fake_ssh.stopped)
+
+        lecture.process.send_signal(getattr(signal, second))
+
+        _assert_clean_stop(tmp_path, lecture, status)
+        fake_ssh.assert_stopped()
+
+
+def test_ctrl_backslash_leaves_at_once_without_a_cleanup(tmp_path):
+    with _lecture(
+        tmp_path, "serve", setup="import resource\n"
+        "resource.setrlimit(resource.RLIMIT_CORE, (0, 0))"
+    ) as lecture:
+        _await_the_bind(tmp_path, lecture)
+
+        lecture.process.send_signal(signal.SIGQUIT)
+
+        assert lecture.process.wait(timeout=60) == -signal.SIGQUIT
+        assert _the_record(tmp_path).exists()
+
+
+@pytest.mark.parametrize(
+    "alarm", ["", "signal.signal(signal.SIGALRM, signal.SIG_IGN)"]
+)
+def test_a_cleanup_that_hangs_still_ends_the_process(tmp_path, alarm):
+    _fake_router(tmp_path, removing="__import__('time').sleep(300)")
+    with _lecture(
+        tmp_path, "serve", "--public", "upnp",
+        setup=(
+            f"{alarm}\n"
+            f"{_KNOWN_PUBLIC_ADDRESS}\n"
+            "import mentipy.cli\n"
+            "mentipy.cli.STOP_DEADLINE = 1"
+        ),
+        settings={"public_base_url": _SERVED},
+    ) as lecture:
+        _await_the_bind(tmp_path, lecture)
+
+        lecture.process.terminate()
+
+        assert lecture.process.wait(timeout=60) == -signal.SIGALRM
+        assert not _the_record(tmp_path).exists()
+@
+
+A signal that was already ignored when the process started stays ignored:
+that is how [[nohup]] works, and a lecturer who started the server with it means
+it to outlive the terminal.  The other signal still stops the server cleanly.
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    "ignored, stop", [("SIGHUP", "SIGTERM"), ("SIGTERM", "SIGHUP")]
+)
+def test_a_signal_ignored_from_the_start_stays_ignored(
+    tmp_path, ignored, stop
+):
+    setup = f"signal.signal(signal.{ignored}, signal.SIG_IGN)"
+    with _lecture(tmp_path, "serve", setup=setup) as lecture:
+        _await_the_bind(tmp_path, lecture)
+
+        lecture.process.send_signal(getattr(signal, ignored))
+        threading.Event().wait(0.3)
+
+        assert lecture.process.poll() is None
+        assert _the_record(tmp_path).exists()
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", lecture.port, timeout=30
+        )
+        connection.request("GET", "/")
+        assert connection.getresponse().status == 200
+        connection.close()
+        lecture.process.send_signal(getattr(signal, stop))
+        _assert_clean_stop(tmp_path, lecture, -getattr(signal, stop))
+@
+
+The remaining rules are about the handlers themselves, so they run in the test
+process.  A real signal to the test process is safe only when a handler of the
+test will take it in the end, which is what the first test here checks: the
+signal goes on to the handler from before, when the cleanup is over.  A caller
+that keeps a handler keeps its say, and no alarm is left pending.
+
+<<test functions>>=
+_STOP_SIGNALS = ("SIGINT", "SIGTERM", "SIGHUP")
+
+
+@contextmanager
+def _own_handlers(handler):
+    pytest.importorskip("fcntl")
+    signals = [getattr(signal, name) for name in _STOP_SIGNALS]
+    earlier = [signal.signal(signum, handler) for signum in signals]
+    try:
+        yield
+    finally:
+        for signum, previous in zip(signals, earlier):
+            signal.signal(signum, previous)
+
+
+def _handlers():
+    return [
+        signal.getsignal(getattr(signal, name)) for name in _STOP_SIGNALS
+    ]
+
+
+def test_a_signal_goes_on_to_the_handler_from_before(tmp_path, monkeypatch):
+    pytest.importorskip("fcntl")
+    _served_deck(tmp_path, monkeypatch, "auto")
+    calls = []
+
+    def killed_while_serving():
+        assert _record_of_the_deck() == _SERVED
+        os.kill(os.getpid(), signal.SIGTERM)
+        threading.Event().wait(30)
+        pytest.fail("the signal did not stop the server")
+
+    def own_alarm(_signum, _frame):
+        pytest.fail("the deadline should have been cancelled")
+
+    _while_serving(monkeypatch, killed_while_serving)
+    alarm_before = signal.signal(signal.SIGALRM, own_alarm)
+    try:
+        with _own_handlers(lambda signum, _frame: calls.append(signum)):
+            _start_public(monkeypatch, _SERVED)
+        alarm_after = signal.getsignal(signal.SIGALRM)
+    finally:
+        signal.signal(signal.SIGALRM, alarm_before)
+
+    assert calls == [signal.SIGTERM]
+    assert _record_of_the_deck() is None
+    assert signal.alarm(0) == 0
+    assert alarm_after is own_alarm
+
+
+@pytest.mark.parametrize("ending", [None, KeyboardInterrupt, RuntimeError])
+def test_the_handlers_come_back_after_a_run(tmp_path, monkeypatch, ending):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    own = lambda _signum, _frame: None
+    during = []
+
+    def serving():
+        during.extend(_handlers())
+        if ending is not None:
+            raise ending
+
+    _while_serving(monkeypatch, serving)
+    with _own_handlers(own):
+        with pytest.raises(ending) if ending else nullcontext():
+            _start_local()
+        after = _handlers()
+
+    assert own not in during
+    assert after == [own, own, own]
+
+
+def test_a_run_without_a_signal_leaves_an_alarm_alone(tmp_path, monkeypatch):
+    pytest.importorskip("fcntl")
+    _served_deck(tmp_path, monkeypatch, "auto")
+    signal.alarm(600)
+    try:
+        _start_local()
+    finally:
+        remaining = signal.alarm(0)
+
+    assert remaining > 0
+@
+
+A server may run on a thread, as these tests' own servers do, and
+[[signal.signal]] raises there.  A platform without [[SIGHUP]] keeps its
+handlers as well, for the reason given above.  So does a handler not set from
+Python, which [[signal.signal]] could not put back.  Only [[getsignal]] is
+replaced for that one, since a real handler of that kind would need a C
+library of its own.
+
+<<test functions>>=
+def test_a_handler_not_set_from_python_is_left_in_place(tmp_path, monkeypatch):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    pytest.importorskip("fcntl")
+    before = _handlers()
+    real_getsignal = signal.getsignal
+    during = []
+
+    def serving():
+        during.extend(
+            real_getsignal(signum) for signum in (signal.SIGHUP, signal.SIGTERM)
+        )
+
+    _while_serving(monkeypatch, serving)
+    monkeypatch.setattr(
+        signal,
+        "getsignal",
+        lambda signum: (
+            None if signum == signal.SIGHUP else real_getsignal(signum)
+        ),
+    )
+
+    _start_local()
+    monkeypatch.undo()
+
+    assert during[0] == before[2]
+    assert during[1] != before[1]
+    assert _handlers() == before
+
+
+def test_a_server_on_a_thread_leaves_the_handlers_alone(tmp_path, monkeypatch):
+    pytest.importorskip("fcntl")
+    _served_deck(tmp_path, monkeypatch, "auto")
+    before = _handlers()
+    during, failures = [], []
+
+    def lecture():
+        try:
+            _start_local()
+        except BaseException as error:
+            failures.append(error)
+
+    _while_serving(monkeypatch, lambda: during.extend(_handlers()))
+    thread = threading.Thread(target=lecture)
+    thread.start()
+    thread.join()
+
+    assert failures == []
+    assert during == before
+
+
+def test_a_platform_without_hang_ups_keeps_its_handlers(tmp_path, monkeypatch):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    pytest.importorskip("fcntl")
+    before = _handlers()
+    during = []
+    _while_serving(
+        monkeypatch,
+        lambda: during.append(signal.getsignal(signal.SIGTERM)),
+    )
+    monkeypatch.delattr(signal, "SIGHUP")
+
+    _start_local()
+
+    assert during == [before[1]]
+@
+
 \subsection{Presenting: serving and following in one terminal}
 \label{sec:present}
 
@@ -3549,9 +4470,10 @@ foreground is the place for the loop the lecturer interrupts with
 Ctrl-C.  The [[finally]] stops and closes the server however the loop
 ends; Ctrl-C then unwinds through [[_run_server]], whose exposure
 context closes the tunnel or port mapping, and [[present]] returns
-quietly.  The daemon flag is only a backstop for an exit that skips
-the [[finally]].  The server logs no requests, so nothing writes over
-the display.
+quietly.  A [[kill]] or a closed terminal takes the same path, except
+that it ends by its signal instead (\cref{sec:stop-signals}).  The
+daemon flag is only a backstop for an exit that skips the [[finally]].
+The server logs no requests, so nothing writes over the display.
 
 The watch asks the server's own address: the loopback address of a
 wildcard bind, or the bound address itself, in the shared form of
@@ -3661,16 +4583,15 @@ backslashes of a path as escapes and turn [[C:\Users\me]] into
 one pair of quotes around a token is then removed: a path with spaces
 is written in quotes, one without may stand bare.
 
-The process is started and left alone: its input and output go to the
-null device, so it cannot write over the display, and it is detached
-from the terminal, so the terminal's Ctrl-C does not reach it.  On
-POSIX systems it runs in a session of its own; on Windows, where there
-are no sessions, it gets a process group of its own, which Ctrl-C
-does not reach, and no console.  [[present]] never waits for it in its
-own thread, so a browser that stays running cannot hold it up; a
-daemon thread waits for it instead, so that an opener that exits at
-once, as [[xdg-open]] does once it has handed the URL on, is reaped
-rather than left as a zombie for the rest of the lecture.
+The process is started and left alone: its input and output go to the null
+device, so it cannot write over the display, and it is detached from the
+terminal, so neither the terminal's Ctrl-C nor its closing reaches it.  On
+POSIX systems it runs in a session of its own; on Windows, where there are no
+sessions, it gets a process group of its own, which Ctrl-C does not reach, and
+no console.  [[present]] never waits for it in its own thread, so a browser
+that stays running cannot hold it up; a daemon thread waits for it instead, so
+that an opener that exits at once, as [[xdg-open]] does once it has handed the
+URL on, is reaped rather than left as a zombie for the rest of the lecture.
 
 A command that cannot be started, one that does not exist or does not
 parse, is no reason to stop the lecture.  It is logged as a warning,
@@ -5982,7 +6903,8 @@ loop forgets what it showed, so the next tick starts the display
 afresh rather than refreshing a watcher in an unknown state.  A bare
 [[watch]] runs alone and keeps failing loudly, since nothing else
 depends on it.  [[KeyboardInterrupt]] is no [[Exception]], so Ctrl-C
-still ends both.
+still ends both, and so do the signals that raise it
+(\cref{sec:stop-signals}).
 
 An unreachable server is a normal state, not an error.  Starting the
 watcher before the server is the natural order on the lecture morning,
@@ -9597,7 +10519,7 @@ def test_url_help_mentions_the_relevant_config_keys():
 @
 
 <<test [[cli.py]]>>=
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 import errno
 import http.client
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -9608,6 +10530,7 @@ import mentipy.cli
 import os
 import pytest
 import re
+import select
 import shlex
 import signal
 import socket

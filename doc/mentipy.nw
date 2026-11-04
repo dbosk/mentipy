@@ -1667,7 +1667,8 @@ admin link is private, so this terminal must not be the projected
 screen.  If the port is taken, [[present]] stops with one line naming
 the address, as [[serve]] does, before it starts watching.  Ctrl-C
 stops both the watch and the server, closing a tunnel or port mapping
-on the way out.
+on the way out.  Closing the terminal or a plain [[kill]] stops them just
+as cleanly, for [[serve]] too.
 
 Once the server listens, [[present]] also opens its admin index in the
 lecturer's browser and goes straight on to the watch without waiting
@@ -1680,7 +1681,8 @@ carries the admin token, which passes through the opener's command
 line, where other users of a shared machine can read it; on such a
 machine use [[--no-open]].  The opener is detached from the terminal
 (a session of its own on Linux and macOS, a process group of its own
-on Windows), so Ctrl-C in [[present]] does not reach the browser.
+on Windows), so neither Ctrl-C in [[present]] nor closing its terminal
+reaches the browser.
 The command depends on the platform:
 [[xdg-open]] on Linux and the other Unix systems, [[open]] on macOS
 and [[explorer]] on Windows.  The setting [[mentipy.open_command]]
@@ -1767,11 +1769,24 @@ make slides.pdf
 \end{verbatim}
 The file is not part of the store, because a project may track its store in a
 public repository and the address may be the lecturer's home IP.  A server
-removes it on stopping with Ctrl-C or an error, and later builds fall back to
-the configuration, though the QR files keep the served address until PythonTeX
-next rewrites them.  A server that is killed, or whose terminal is closed, leaves
-the file behind until the next start of a server replaces it or the QR directory
-is removed.
+removes it on stopping, and later builds fall back to the configuration,
+though the QR files keep the served address until PythonTeX next rewrites
+them.  Stopping means Ctrl-C, a plain [[kill]], closing the terminal (on
+Windows, only Ctrl-C) or an error.  A server started with [[nohup]] ignores
+the closing of its terminal, as [[nohup]] asks, and keeps running; a plain
+[[kill]] still stops it cleanly.
+
+While a server stops, further signals are ignored, so that they cannot cut the
+cleanup short.  The cleanup has 30 seconds.  A router that does not answer can
+use them up, and the mapping may then stay on the router; the file has normally
+gone by then.
+
+A server stopped by [[kill -9]], Ctrl-\textbackslash{} or a power cut cannot
+clean up.  Later builds then put its dead address in the QR codes, without a
+warning, until the next start of a server replaces the file or you remove it.
+If it ran with [[--public]], the [[ssh]] process may keep running, and a new
+tunnel fails on the taken port until you stop it; a UPnP mapping stays on the
+router until a new server on that port stops, or you remove it there.
 
 The store remembers which QR files each question wrote, so that
 [[mentipy serve]] knows what to rewrite.  A QR file in the store's checkout,
