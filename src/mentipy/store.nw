@@ -4350,8 +4350,12 @@ not atomic across machines either, so two servers on two machines sharing one st
 lose answers; one server, the normal case, cannot.
 
 The file is opened anew for each answer, which costs little and means a log that someone
-moved away is simply started over.  The mode is explicit since [[os.open]] defaults to an
-executable file.
+moved away is simply started over.  It is opened under the lock, because each thread of the
+server holds its socket already.  A room answering at once has hundreds of threads waiting
+for the lock, and if each also held the log open, an ordinary limit on descriptors would
+run out and answers would be refused: at a limit of 1024, 600 answers at once had 92 error
+pages and 78 closed connections that way.  The mode is explicit since [[os.open]] defaults
+to an executable file.
 
 After the write the line is in the system's page cache, safe from anything that happens to
 the server but not from a kernel panic or a dead battery, and the student has not yet been
@@ -4384,9 +4388,10 @@ silent after the first would leave the lecturer believing the later answers were
 <<store methods>>=
 def _append_answer(self, full_hash: str, value: Any):
     log = self.answer_log()
-    descriptor = os.open(log, ANSWER_LOG_FLAGS, 0o666)
+    descriptor = None
     try:
         with _ANSWER_LOG_LOCK:
+            descriptor = os.open(log, ANSWER_LOG_FLAGS, 0o666)
             entry = {"hash": full_hash, "ts": _timestamp(), "value": value}
             line = json.dumps(entry, ensure_ascii=False).encode("utf-8") + b"\n"
             created = os.fstat(descriptor).st_size == 0
@@ -4397,7 +4402,8 @@ def _append_answer(self, full_hash: str, value: Any):
             raise OSError(errno.EIO, "short write", str(log))
         _sync_answer_log(descriptor, log, created=created)
     finally:
-        os.close(descriptor)
+        if descriptor is not None:
+            os.close(descriptor)
 <<functions>>=
 def _sync_answer_log(descriptor: int, log: Path, *, created: bool):
     try:
@@ -4515,8 +4521,9 @@ A log that cannot be written is the server's problem at its start rather than th
 first student's, so [[create_server]] asks.  Opening
 the log as an append would, without [[O_CREAT]], catches a file that is read-only and
 a directory in its place, and it creates nothing, so a server that never gets an answer
-leaves no empty log in the deck.  Without a log we can only ask the system about the
-directory.  One that does not exist is no problem: the store's first write creates it,
+leaves no empty log in the deck.  A directory we cannot search fails that same [[os.open]],
+so without a log what remains to ask the system is whether we can write to the directory.
+One that does not exist is no problem: the store's first write creates it,
 and fails with its own error if it cannot.  Nothing here can notice a disk that is about
 to fill up, which only the failing answer reveals.
 
@@ -4528,9 +4535,7 @@ def check_answer_log(self):
     try:
         os.close(os.open(log, ANSWER_LOG_FLAGS & ~os.O_CREAT))
     except FileNotFoundError:
-        if log.parent.exists() and not os.access(
-            log.parent, os.W_OK | os.X_OK
-        ):
+        if log.parent.exists() and not os.access(log.parent, os.W_OK):
             raise AnswerLogError(
                 f"cannot record answers in {log}:"
                 f" {os.strerror(errno.EACCES)}"
@@ -4945,14 +4950,15 @@ def test_a_sync_that_fails_still_counts_the_answer_with_one_warning(
     assert "private" not in caplog.text
 
 
+@pytest.mark.parametrize("refusal", [errno.EINVAL, errno.ENOTSUP])
 def test_a_refusal_warns_once_but_every_real_sync_error_is_logged(
-    tmp_path, monkeypatch, caplog
+    tmp_path, monkeypatch, caplog, refusal
 ):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     full_hash = store.resolve(store.register(OpenQuestion("Comment?")))
     errors = iter(
         OSError(code, os.strerror(code))
-        for code in (errno.EINVAL, errno.EINVAL, errno.EIO, errno.EIO)
+        for code in (refusal, refusal, errno.EIO, errno.EIO)
     )
 
     def failing_sync(_descriptor):
@@ -4967,7 +4973,7 @@ def test_a_refusal_warns_once_but_every_real_sync_error_is_logged(
         f"private text {number}" for number in range(4)
     ]
     messages = [record.getMessage() for record in caplog.records]
-    assert sum(os.strerror(errno.EINVAL) in text for text in messages) == 1
+    assert sum(os.strerror(refusal) in text for text in messages) == 1
     assert sum(os.strerror(errno.EIO) in text for text in messages) == 2
     assert all(str(_answer_log(tmp_path)) in text for text in messages)
     assert "private" not in caplog.text
@@ -4994,7 +5000,9 @@ A write that stops short never reaches the sync, since it raises.  And one stude
 disk request must not hold up the others: the sync is by far the slowest step of an
 answer, so if it ran under the lock a room answering together would queue for it one at a
 time.  So the first sync waits here while a second answer is recorded from another thread,
-which gets through the lock and into the file.
+which gets through the lock and into the file.  The second answer's limit is much shorter
+than the wait of the first, or the first would let go in time and let this test pass with
+the sync under the lock.
 
 <<test functions>>=
 def test_a_short_write_is_not_synced(tmp_path, monkeypatch):
@@ -5023,28 +5031,110 @@ def test_a_slow_sync_does_not_hold_up_other_answers(tmp_path, monkeypatch):
     syncing = threading.Event()
     go_on = threading.Event()
     first_sync = []
+    failures = []
 
     def slow_first_sync(_descriptor):
         if not first_sync:
             first_sync.append(True)
             syncing.set()
-            assert go_on.wait(timeout=60)
+            go_on.wait(timeout=120)
+
+    def record(value):
+        try:
+            store.record(full_hash, value)
+        except BaseException as failure:
+            failures.append(failure)
 
     monkeypatch.setattr("mentipy.store.os.fdatasync", slow_first_sync)
-    slow = threading.Thread(target=store.record, args=(full_hash, "slow"))
+    slow = threading.Thread(target=record, args=("slow",))
     slow.start()
     try:
         assert syncing.wait(timeout=60)
-        other = threading.Thread(target=store.record, args=(full_hash, "other"))
+        other = threading.Thread(target=record, args=("other",))
         other.start()
-        other.join(timeout=60)
-        assert not other.is_alive()
+        other.join(timeout=20)
+        got_through = not other.is_alive()
     finally:
         go_on.set()
         slow.join(timeout=60)
+        other.join(timeout=60)
 
+    assert got_through
+    assert failures == []
     assert not slow.is_alive()
     assert sorted(_values(store, full_hash)[1:]) == ["other", "slow"]
+
+
+def _descriptors_on(*paths):
+    targets = {os.path.realpath(path) for path in paths}
+    found = []
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            found.append(os.readlink(f"/proc/self/fd/{name}"))
+        except OSError:
+            pass
+    return [target for target in found if target in targets]
+
+
+needs_proc_fd = pytest.mark.skipif(
+    not os.path.isdir("/proc/self/fd"), reason="no /proc/self/fd here"
+)
+@
+
+Each thread of the server holds its socket already, and a room answering at once can have
+hundreds of them waiting for the lock.  If each also held the log open while it waited,
+that room would run out of descriptors on an ordinary limit, and answers would be refused.
+So a thread waiting for the lock holds nothing on the log.  And an answer must give back
+what it took: one descriptor lost per answer would end a long lecture the same way, on
+any path, including the one that creates the log and syncs the directory, and a write
+that fails.
+
+<<test functions>>=
+@needs_proc_fd
+def test_an_answer_waiting_for_the_lock_holds_no_descriptor_on_the_log(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(OpenQuestion("Comment?")))
+    store.record(full_hash, "the file exists")
+    log = _answer_log(tmp_path)
+
+    with _ANSWER_LOG_LOCK:
+        waiting = threading.Thread(target=store.record, args=(full_hash, "next"))
+        waiting.start()
+        threading.Event().wait(0.3)
+        held_while_waiting = _descriptors_on(log)
+
+    waiting.join(timeout=60)
+    assert not waiting.is_alive()
+    assert held_while_waiting == []
+    assert _values(store, full_hash) == ["the file exists", "next"]
+
+
+@needs_proc_fd
+def test_an_answer_gives_back_its_descriptors(tmp_path, monkeypatch):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(OpenQuestion("Comment?")))
+    log = _answer_log(tmp_path)
+
+    store.record(full_hash, "creates the log and syncs the directory")
+    store.record(full_hash, "an ordinary one")
+    assert _descriptors_on(log, tmp_path) == []
+
+    with monkeypatch.context() as patch:
+        real_write = os.write
+        patch.setattr(
+            "mentipy.store.os.write",
+            lambda descriptor, data: real_write(descriptor, data[:1]),
+        )
+        with pytest.raises(OSError):
+            store.record(full_hash, "cut short")
+    assert _descriptors_on(log, tmp_path) == []
+
+    def refuse(_descriptor):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr("mentipy.store.os.fdatasync", refuse)
+    store.record(full_hash, "not synced")
+    assert _descriptors_on(log, tmp_path) == []
 @
 
 A bare [[mentipy watch]] shows an open question's new answers by timestamp, so an
@@ -6369,7 +6459,11 @@ import unittest.mock
 
 from mentipy.questions import *
 from mentipy.store import *
-from mentipy.store import _live_hashes_by_serials, _start_registration_run
+from mentipy.store import (
+    _ANSWER_LOG_LOCK,
+    _live_hashes_by_serials,
+    _start_registration_run,
+)
 
 <<test functions>>
 @

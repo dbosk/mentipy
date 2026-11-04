@@ -5715,8 +5715,8 @@ def do_POST(self):
         )
         return
 
-    <<record the answer or say that it was not saved>>
     prefix = store.metadata(full_hash)["url_prefix"]
+    <<record the answer or say that it was not saved>>
     if _results_public(question, public_results):
         self._redirect(f"/{prefix}/results")
         return
@@ -5728,7 +5728,10 @@ permissions during the lecture.  The respondent must then not be thanked, and mu
 get the closed connection of a failed request either, which looks like a bad network and
 invites nothing but trying again.  The page says what happened and that the lecturer has
 to hear about it, since only the lecturer can do anything.  The file's name and the
-error are for the lecturer's log, which never gets the answer itself.
+error are for the lecturer's log, which never gets the answer itself.  The prefix for the
+redirect is read before this, so that once an answer is saved nothing that reads the store
+stands between it and its reply: a closed connection then would make the respondent send
+a saved answer again.
 
 <<record the answer or say that it was not saved>>=
 try:
@@ -5807,6 +5810,8 @@ def _break_the_log(log, how):
     elif how == "read-only":
         log.touch()
         log.chmod(0o444)
+    elif how == "unsearchable directory":
+        log.parent.chmod(0o600)
     else:
         log.parent.chmod(0o500)
 
@@ -5877,6 +5882,37 @@ def test_an_answer_that_cannot_be_written_is_no_success(
     assert store.results(full_hash)["total"] == 1
 @
 
+An answer that was saved must get its reply, or the respondent sends it again and it
+counts twice.  So everything the reply needs from the store is read before the answer
+is written.  A question that vanishes at that moment is simulated by failing the read,
+as the real window is too short to hit: nothing may be saved, and the retry counts once.
+
+<<test functions>>=
+def test_a_failure_before_the_reply_leaves_nothing_saved(tmp_path, monkeypatch):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    full_hash = store.resolve(prefix)
+    form = {"Content-Type": "application/x-www-form-urlencoded"}
+
+    def vanished(_full_hash):
+        raise KeyError(_full_hash)
+
+    with _running_server(store, lock=False) as port:
+        with monkeypatch.context() as patch:
+            patch.setattr(store, "metadata", vanished)
+            with pytest.raises((http.client.HTTPException, ConnectionError)):
+                _request(
+                    port, "POST", f"/{prefix}", body="value=Twice", headers=form
+                )
+        assert not store.answer_log().exists()
+        retried, _ = _request(
+            port, "POST", f"/{prefix}", body="value=Twice", headers=form
+        )
+
+    assert retried.status == HTTPStatus.SEE_OTHER
+    assert store.results(full_hash)["total"] == 1
+@
+
 The server thanks a respondent only after the answer was sent to the disk.  The sync
 is held back here, with the line already in the file, and no response may arrive until
 it has finished.
@@ -5936,6 +5972,10 @@ as it was.
             "read-only directory",
             marks=pytest.mark.skipif(RUNNING_AS_ROOT, reason="root ignores it"),
         ),
+        pytest.param(
+            "unsearchable directory",
+            marks=pytest.mark.skipif(RUNNING_AS_ROOT, reason="root ignores it"),
+        ),
     ],
 )
 def test_a_server_does_not_start_unable_to_record(tmp_path, how):
@@ -5951,10 +5991,10 @@ def test_a_server_does_not_start_unable_to_record(tmp_path, how):
     try:
         with pytest.raises(AnswerLogError) as failure:
             create_server(store, host="127.0.0.1", port=port)
-        assert store.path.read_bytes() == before
     finally:
         _mend_the_log(store.answer_log(), how)
 
+    assert store.path.read_bytes() == before
     assert str(store.answer_log()) in str(failure.value)
     server = create_server(store, host="127.0.0.1", port=port)
     server.server_close()

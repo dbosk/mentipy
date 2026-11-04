@@ -2422,6 +2422,7 @@ def _run_server(
     locale: str | None,
     runner,
 ):
+    _raise_descriptor_limit()
     options = {
         "public_results": results,
         "allow_images": get_setting(ALLOW_IMAGES_CONFIG),
@@ -2474,6 +2475,36 @@ def _serve_runner(
         typer.echo(line)
     with _reporting_bind_errors(host, port), _reporting_unwritable_log():
         serve_http(store, host, port, **options)
+@
+
+Every respondent waiting for a reply holds a descriptor, so a room answering at once needs
+hundreds, and many systems start a process with a soft limit of 1024 or lower.  The soft
+limit is only a default, which a process may raise up to its hard limit, so the server
+does, at the start of a lecture and not on import, since a build or a library user that
+imports Mentipy has no use for it.  Other limits are capped because the hard limit can be
+huge and a program should not take more than it can use; 8192 leaves room for four times
+the largest class we have heard of.  Nothing in Mentipy calls [[select.select]], the one
+thing a descriptor over 1023 would break: the server's selector is [[poll]]-based.  A limit
+that cannot be raised, on Windows, which has no [[resource]] module, or for any other
+reason, just stays, as the server works without this up to where the limit is reached.
+
+<<constants>>=
+SERVER_DESCRIPTOR_LIMIT = 8192
+<<functions>>=
+def _raise_descriptor_limit():
+    try:
+        import resource
+    except ImportError:
+        return
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        wanted = SERVER_DESCRIPTOR_LIMIT
+        if hard != resource.RLIM_INFINITY:
+            wanted = min(wanted, hard)
+        if soft != resource.RLIM_INFINITY and soft < wanted:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (wanted, hard))
+    except (OSError, ValueError):
+        pass
 @
 
 The start-up lines are built, and the QR codes rewritten, before the bind, but
@@ -2562,6 +2593,112 @@ def _reporting_unwritable_log():
         raise typer.Exit(code=1) from error
 @
 
+The limit on descriptors belongs to the process, so these tests use real ones: Python
+started under the limit, and a real [[mentipy serve]] with more waiting connections than
+its original limit allows, all of them answering at once.  Asking the child for the limit
+with its own [[resource]] also shows that importing Mentipy changes nothing.
+
+<<test functions>>=
+_LIMIT_REPORTER = """
+import resource, sys
+resource.setrlimit(
+    resource.RLIMIT_NOFILE, (int(sys.argv[1]), int(sys.argv[2]))
+)
+import mentipy.cli
+after_import = resource.getrlimit(resource.RLIMIT_NOFILE)
+mentipy.cli._raise_descriptor_limit()
+print(after_import[0], *resource.getrlimit(resource.RLIMIT_NOFILE))
+"""
+
+
+@pytest.mark.parametrize(
+    "soft, hard, raised",
+    [
+        (64, 128, 128),
+        (64, 512, 512),
+        (64, 8192, 8192),
+        (64, 8193, 8192),
+        (9000, 10000, 9000),
+    ],
+)
+def test_a_server_raises_its_descriptor_limit_only_on_request(soft, hard, raised):
+    resource = pytest.importorskip("resource")
+    real_hard = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
+    if real_hard != resource.RLIM_INFINITY and real_hard < hard:
+        pytest.skip(f"the hard limit here is {real_hard}")
+
+    reporter = _REAL_POPEN(
+        [sys.executable, "-c", _LIMIT_REPORTER, str(soft), str(hard)],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    report, _ = reporter.communicate(timeout=120)
+
+    assert reporter.returncode == 0
+    assert report.split() == [str(soft), str(raised), str(hard)]
+
+
+def test_a_real_server_takes_more_answers_at_once_than_its_first_limit(tmp_path):
+    resource = pytest.importorskip("resource")
+    answers, first_limit = 100, 64
+    real_hard = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
+    if real_hard != resource.RLIM_INFINITY and real_hard < 2 * answers:
+        pytest.skip(f"the hard limit here is {real_hard}")
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    (tmp_path / "config.json").write_text("{}")
+    port = _free_port()
+    server = _REAL_POPEN(
+        [
+            sys.executable, "-c", "from mentipy.cli import main; main()",
+            "serve", "--host", "127.0.0.1", "--port", str(port),
+            "--store", str(store.path), "--no-lock",
+        ],
+        env={**os.environ, "MENTIPY_CONFIG": str(tmp_path / "config.json")},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        preexec_fn=lambda: resource.setrlimit(
+            resource.RLIMIT_NOFILE, (first_limit, real_hard)
+        ),
+    )
+    waiting = threading.Event()
+    connections = []
+    try:
+        for _ in range(600):
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=5).close()
+                break
+            except OSError:
+                waiting.wait(0.1)
+        connections = [
+            socket.create_connection(("127.0.0.1", port), timeout=120)
+            for _ in range(answers)
+        ]
+        waiting.wait(0.5)
+        body = "value=An+answer"
+        for connection in connections:
+            connection.sendall(
+                (
+                    f"POST /{prefix} HTTP/1.1\r\nHost: x\r\n"
+                    "Connection: close\r\n"
+                    "Content-Type: application/x-www-form-urlencoded\r\n"
+                    f"Content-Length: {len(body)}\r\n\r\n{body}"
+                ).encode()
+            )
+        replies = [
+            b"".join(iter(lambda: connection.recv(4096), b""))
+            for connection in connections
+        ]
+    finally:
+        for connection in connections:
+            connection.close()
+        server.send_signal(signal.SIGINT)
+        server.wait(timeout=60)
+
+    assert [reply[9:12] for reply in replies] == [b"303"] * answers
+    assert store.results(store.resolve(prefix))["total"] == answers
+@
+
 The local start-up lines keep two behaviours of the old inline code.
 A pinned base URL is trusted as it is, and the warning to recompile
 appears only when QR codes were actually rewritten.  A resolved LAN
@@ -2643,8 +2780,10 @@ tracks or ignores has been decided about, so it gets no warning; [[git clean -fd
 an ignored file alone, too.  Otherwise the store says what the deck wants.  Git answers
 for a path whether the file exists or not, so a tracked store is warned about before its
 first answer, which is when the lecturer can still do something about it; [[git add]]
-does need the file, hence the \enquote{once it exists}.  [[check-ignore]] does not report
-a tracked file, so a store forced past its own [[.gitignore]] counts as tracked.  We only
+does need the file, hence the \enquote{once it exists}.  That advice is a command to
+copy, so it gives the path as [[--store]] did, which works from the directory the lecturer
+is in, unlike the bare name git knows the file by.  [[check-ignore]] does not report a
+tracked file, so a store forced past its own [[.gitignore]] counts as tracked.  We only
 say what to do and write nothing into the repository, not even [[.git/info/exclude]],
 since what goes in it is the lecturer's choice.  Anything else that goes wrong with git,
 no repository or no git at all, says nothing: a lecture must not depend on it.
@@ -2660,7 +2799,8 @@ def _answer_log_warnings(store: Store) -> list[str]:
         return [
             f"Warning: git tracks {name} but not {log}, which holds the "
             "answers, so `git commit -a` leaves them out and `git clean` "
-            f"deletes them: `git add {log}` once it exists."
+            f"deletes them: `git add {shlex.quote(str(store.answer_log()))}` "
+            "once it exists."
         ]
     if _git_ignores(directory, name):
         return [
@@ -2821,13 +2961,38 @@ def test_git_warning_for_a_tracked_store_keeps_the_answers_from_git_clean(
     assert before_the_first_answer == after_it
     assert after_it.startswith("Warning: ")
     assert "git tracks mentipy.json but not mentipy-answers.jsonl" in after_it
-    assert "`git add mentipy-answers.jsonl`" in after_it
+    assert f"`git add {store.answer_log()}`" in after_it
 
-    real_git("add", "mentipy-answers.jsonl")
+    real_git("add", str(store.answer_log()))
     real_git("clean", "-fdq")
 
     assert mentipy.cli._answer_log_warnings(store) == []
     assert store.results(full_hash)["total"] == 1
+
+
+@pytest.mark.parametrize(
+    "directory, command",
+    [
+        ("deck", "git add deck/mentipy-answers.jsonl"),
+        ("my deck", "git add 'my deck/mentipy-answers.jsonl'"),
+    ],
+)
+def test_git_advice_works_from_where_the_store_was_given(
+    tmp_path, real_git, monkeypatch, directory, command
+):
+    real_git("init")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / directory).mkdir()
+    store = Store(f"{directory}/mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(OpenQuestion("Comment?")))
+    real_git("add", f"{directory}/mentipy.json")
+    store.record(full_hash, "an answer")
+
+    [warning] = mentipy.cli._answer_log_warnings(store)
+
+    assert f"`{command}`" in warning
+    subprocess.run(shlex.split(command), check=True, capture_output=True)
+    assert mentipy.cli._answer_log_warnings(store) == []
 
 
 def test_git_warning_for_a_store_tracked_though_its_name_is_ignored(
@@ -3664,13 +3829,13 @@ class _PresentBanner(logging.Handler):
         self.warnings += 1
         self.last = " ".join(record.getMessage().split())
 
+    def warning_line(self) -> str:
+        return f"Warnings: {self.warnings}, the last: {self.last}"
+
     def __str__(self) -> str:
         if not self.warnings:
             return self.text
-        return (
-            f"{self.text}\n"
-            f"Warnings: {self.warnings}, the last: {self.last}"
-        )
+        return f"{self.text}\n{self.warning_line()}"
 
 
 @contextmanager
@@ -5199,6 +5364,7 @@ class _QuestionWatcher:
         self.pin_heat = pin_heat
         self.console = console
         self.banner = banner
+        self.warnings_shown = getattr(banner, "warnings", 0)
         self.open = False
         self.last_seen: datetime | None = None
 
@@ -5231,6 +5397,13 @@ class _QuestionWatcher:
                 start=len(answers) - len(fresh) + 1,
             )
             self.last_seen = _latest_answer_time(fresh)
+        self._show_new_warnings()
+
+    def _show_new_warnings(self):
+        warnings = getattr(self.banner, "warnings", 0)
+        if warnings != self.warnings_shown:
+            self.warnings_shown = warnings
+            typer.echo(self.banner.warning_line())
 
     def _results(self) -> dict:
         return self.store.results(self.full_hash, window=self.window)
@@ -7996,6 +8169,81 @@ def test_present_survives_a_failing_refresh(tmp_path, monkeypatch):
     assert "Comment?" in last_frame
 @
 
+An open question only ever appends, so it never redraws the banner, and a warning
+would wait for the next question.  A sync that failed for real says that thanked answers
+may not be on the disk, which the lecturer has to hear while the question is still up.
+So the refresh prints the warning line when there is something new in it, once per change.
+The failure is injected, as no disk fails on demand; the answers are real requests, and
+they must still be thanked.
+
+<<test functions>>=
+def _answer_from_the_room(server, prefix, value):
+    parts = urllib.parse.urlsplit(server)
+    connection = http.client.HTTPConnection(
+        parts.hostname, parts.port, timeout=60
+    )
+    connection.request(
+        "POST",
+        f"/{prefix}",
+        body=urllib.parse.urlencode({"value": value}),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    status = connection.getresponse().status
+    connection.close()
+    assert status == 303
+
+
+def test_present_tells_the_lecturer_about_a_warning_on_an_open_question(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MENTIPY_CONFIG", str(tmp_path / "config.json"))
+    port = _free_port()
+    server = f"http://127.0.0.1:{port}"
+    set_setting("base_url", server)
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    monkeypatch.setattr("mentipy.cli.CLEAR_SCREEN", "[clear]")
+
+    def failing_sync(_descriptor):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr("mentipy.store.os.fdatasync", failing_sync)
+    _play_the_lecture(
+        monkeypatch,
+        lambda: _open_for_the_room(server, prefix),
+        lambda: _answer_from_the_room(server, prefix, "first"),
+        lambda: None,
+        lambda: None,
+        lambda: _answer_from_the_room(server, prefix, "second"),
+        lambda: None,
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "present",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--store",
+            str(store.path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    last_frame = result.output.split("[clear]")[-1]
+    lines = [
+        line for line in last_frame.splitlines() if line.startswith("Warnings:")
+    ]
+    assert [line.split(",")[0] for line in lines] == [
+        "Warnings: 1", "Warnings: 2"
+    ]
+    assert all("Input/output error" in line for line in lines)
+    assert all(str(store.answer_log()) in line for line in lines)
+    assert "first" in last_frame and "second" in last_frame
+@
+
 A port that is taken ends both [[serve]] and [[present]] with one line
 naming the address, not a traceback, and [[present]] never starts the
 watch.  The holder is a plain listening socket, so the real server's
@@ -9360,6 +9608,8 @@ import mentipy.cli
 import os
 import pytest
 import re
+import shlex
+import signal
 import socket
 import struct
 import subprocess
