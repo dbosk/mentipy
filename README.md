@@ -260,6 +260,21 @@ submitting an answer:
 mentipy serve --store ./mentipy.json --results
 ```
 
+The server's root URL is your index of the questions, on the lecture machine
+or with the admin token. After a rebuild that dropped or edited questions it
+has two sections: `Current questions`, the deck as last built, and `Old
+questions`, which keep their answers, links and QR codes. The row of the
+question the lecture is on has a toned background. A question the deck asks
+twice has one row, at its last place, so a deck A, B, C, A, D lists B first.
+Next and Previous have the same one stop per question: in X, Y, A, B, C, A they
+go from Y straight to B, so for a poll before and after an explanation, open
+its first ask from the index. A deck built with `mentipy render` needs
+`--new-run` on its first question to get the sections: without it a rebuild
+continues the old chain, so old questions are listed as current, often with no
+headings at all. Each render is its own process, so a deck built that way that
+asks a question twice loses the questions before its first place, with or
+without `--new-run`: they have no Next link and are listed as old.
+
 Terminal helpers use question hash prefixes. List registered questions first,
 then watch or export one question by prefix:
 

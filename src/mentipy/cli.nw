@@ -5323,6 +5323,27 @@ def test_render_new_run_starts_the_chain_again(tmp_path):
     assert Store(store_path).next_question(first) is None
 @
 
+The server's index shows the live deck as its current section, so what a
+lecturer who rebuilds a deck with the real command gets there depends on the
+flag: without it last term's questions stay live, and with it they become old.
+The server's tests cover the page; this one shows the command leads there.
+
+<<test functions>>=
+@pytest.mark.parametrize("flag", [(), ("--new-run",)])
+def test_render_decides_whether_a_new_deck_replaces_the_old(tmp_path, flag):
+    store_path = tmp_path / "mentipy.json"
+    last_term = [_render_open(store_path, text) for text in ("P?", "Q?")]
+
+    deck = [
+        _render_open(store_path, "A?", *flag),
+        _render_open(store_path, "B?"),
+    ]
+
+    assert Store(store_path).live_hashes() == (
+        deck if flag else [*last_term, *deck]
+    )
+@
+
 All seven render subcommands take the flag, since a deck may begin with
 any kind of question.
 
