@@ -1307,7 +1307,8 @@ def regenerate_qrs(
                 )
             except OSError as error:
                 failures += 1
-                unwritten.setdefault(target.parent, error.strerror or str(error))
+                reason = error.strerror or str(error)
+                unwritten.setdefault(target.parent, reason)
                 continue
             count += 1
 

@@ -113,11 +113,11 @@ A file whose bytes would not change is left alone: we compare the temporary file
 with it, and remove the temporary file if they match.  A rebuild at the same
 address then keeps the file's number, date, group, ACL and hard links, which a
 new file would lose.  The evidence is the image's own bytes, since a matching
-sidecar says nothing about the image (\cref{sec:qr-sidecar}).  A file that cannot
-be read counts as different and is replaced.  What a changed address still drops
-is what a new file cannot inherit: a group other than the directory's, an ACL
-and a hard link.  A file marked read-only is replaced like any other and keeps
-its mode.
+sidecar says nothing about the image (\cref{sec:qr-sidecar}).  A file that
+cannot be read counts as different and is replaced.  What a changed address
+still drops is what a new file cannot inherit: a group other than the
+directory's, an ACL and a hard link.  A file marked read-only is replaced like
+any other and keeps its mode.
 
 The temporary file is a path rather than an [[io.BytesIO]], for two reasons.
 [[segno]] cannot write EPS, TeX, XBM or XPM to a binary stream.  And since it
@@ -305,19 +305,20 @@ def _sidecar_text(
 A sidecar whose text would not change keeps its file, and so its date.  Deck
 Makefiles depend on the sidecars, so a new date means a rebuild of the slides, and
 both the server and every PythonTeX run write these files with nothing to change
-most of the time.  The image is always made and compared, though, since a matching
-sidecar says nothing about it: [[Q-x.pdf]], [[Q-x.png]] and [[Q-x.svg]] in one
-directory share one sidecar, so it can match while another format still holds an
-old address, and an interrupted call leaves the two disagreeing as well.  Comparing
-on every call repairs that for each target the caller names, and a server start
-names every remembered one.  A rebuild at the same address therefore moves no date,
-so neither [[make]] nor [[latexmk]] sees a change; only the EPS and TeX formats,
-which hold a date, are replaced each time.  The one case it misses is narrow: an image
-repaired at the same address leaves the sidecar's date alone, so [[make]] does not
-rebuild a PDF made from the broken image, though the server still says to
-recompile.  Here a sidecar that cannot be read counts as different and gets
-overwritten, as it always did in [[make_qr]]; a server start still fails on one
-earlier, when [[sidecar_include_path]] reads it.
+most of the time.  The image is always made and compared, though, since a
+matching sidecar says nothing about it: [[Q-x.pdf]], [[Q-x.png]] and [[Q-x.svg]]
+in one directory share one sidecar, so it can match while another format still
+holds an old address, and an interrupted call leaves the two disagreeing as
+well.  Comparing on every call repairs that for each target the caller names,
+and a server start names every remembered one.  A rebuild at the same address
+therefore moves no date, so neither [[make]] nor [[latexmk]] sees a change; only
+the EPS and TeX formats, which hold a date, are replaced each time.  The one case
+it misses is narrow: an image repaired at the same address leaves the sidecar's
+date alone, so [[make]] does not rebuild a PDF made from the broken image, though
+the server still says to recompile.  Here a sidecar that cannot be read counts as
+different and gets overwritten, as it always did in [[make_qr]]; a server start
+still fails on one that is not valid text, earlier, when [[sidecar_include_path]]
+reads it.
 
 A sidecar that does change is written whole, like the image.  An empty sidecar
 is worse than an empty image, because nothing complains: [[\input]] of an empty

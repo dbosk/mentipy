@@ -6677,7 +6677,8 @@ the first page with a word cloud imports the optional package in the request
 thread, which with 40 busy processes and modules not yet compiled took up to 15
 seconds.  The import stays there, since only word clouds need it and it would
 otherwise slow every server start.  The limit is no longer than that needs,
-because a server that hangs costs the suite this limit about a hundred times over.
+because a server that hangs costs the suite this limit about a hundred times
+over.
 
 <<test functions>>=
 CLIENT_LIMIT = 60
