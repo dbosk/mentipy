@@ -2346,7 +2346,7 @@ def test_a_repeat_records_its_earlier_places_in_the_run(tmp_path):
 def test_a_deck_without_repeats_gets_the_file_it_always_got(tmp_path):
     path = tmp_path / "mentipy.json"
     deck = _deck("Q1", "Q2", "Q3")
-    h1, h2, h3 = _hashes(deck)
+    h1, h2, _ = _hashes(deck)
 
     _build(path, deck)
 
@@ -2359,7 +2359,7 @@ def test_a_deck_without_repeats_gets_the_file_it_always_got(tmp_path):
             "registration_serial": serial,
             "registered_after": after,
         }
-    expected = {"questions": questions, "answers": {h1: [], h2: [], h3: []}}
+    expected = {"questions": questions}
     assert path.read_text() == json.dumps(expected, indent=2) + "\n"
 
 
@@ -2749,7 +2749,7 @@ def _as_rebuilt_by_0_17(path, texts):
         entry = questions.pop(full_hash, None)
         if entry is None:
             entry = {**question.to_dict(), "url_prefix": full_hash[:8]}
-            data["answers"][full_hash] = []
+            data.setdefault("answers", {})[full_hash] = []
         serial += 1
         entry[REGISTRATION_SERIAL_KEY] = serial
         entry[REGISTERED_AFTER_KEY] = previous
