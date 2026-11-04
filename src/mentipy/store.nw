@@ -1224,6 +1224,17 @@ question and a known one alike.
 def register(self, question: Question) -> str:
     """Register ``question`` and return its stable URL prefix."""
 
+    prefix, _first_repeat = self.register_noting_repeat(question)
+    return prefix
+
+
+def register_noting_repeat(self, question: Question) -> tuple[str, bool]:
+    """Register ``question``; return its prefix and if the run came back to it.
+
+    The second value is true when this registration is the second place
+    this run has given the question, so once per question and run.
+    """
+
     with self._lock:
         data = self._data()
         full_hash = question_hash(question)
@@ -1253,7 +1264,7 @@ def register(self, question: Question) -> str:
         data["questions"][full_hash] = entry
         self._write(data)
         _REGISTERED_THIS_RUN[self._resolved_path] = [*run, full_hash]
-        return prefix
+        return prefix, first_repeat
 @
 
 The registration is added to the run's memory only after the write
@@ -1552,7 +1563,8 @@ registered, so nothing in the new chain points to it; and since
 [[register]] never touches an entry it is not registering, the orphan's
 keys and answers stay exactly as they were.  A question asked twice in one
 run has one entry but two places in the chain, so its entry also records
-the place it gives up; the chain runs through that record.
+the place it gives up; the chain runs through that record, and the live deck
+stops at the question once, at its first place.
 
 The links replace a registration serial drawn from an ever-growing counter
 in the store, whose live sequence was the run of consecutive serials at
@@ -1705,6 +1717,7 @@ run = _REGISTERED_THIS_RUN.get(self._resolved_path, [])
 previous = run[-1] if run else None
 known = questions.get(full_hash)
 earlier = []
+first_repeat = False
 if previous == full_hash and known is not None:
     previous = known.get(REGISTERED_AFTER_KEY)
     serial = int(known.get(REGISTRATION_SERIAL_KEY, 1))
@@ -1712,6 +1725,7 @@ if previous == full_hash and known is not None:
 elif previous in questions:
     serial = int(questions[previous].get(REGISTRATION_SERIAL_KEY, 0)) + 1
     if known is not None and full_hash in run:
+        first_repeat = not _earlier_registrations(known)
         earlier = [
             *_earlier_registrations(known),
             {
@@ -1723,6 +1737,82 @@ else:
     previous = None
     serial = 1
     run = []
+@
+
+\paragraph{Noticing a repeat.}
+\label{sec:a-repeat-warns}
+A repeat is rarely what the lecturer has in mind for its answers: both asks
+share one pool, and the results page shows them together.  So Mentipy says so,
+during the build and when the server starts.  The two warnings read different
+things, because they run at different times.  The build's comes from the
+registration, the one moment the run's memory is at hand, and
+[[register_noting_repeat]] hands it to the helper at the second place only: an
+empty record there means that no earlier repeat has spoken for this question,
+and a question registered twice in a row takes the branch before it and has come
+back to nothing.  The memory is also what keeps out the false alarms.  A rebuild
+is a new process, and so is the notes build of a deck that shares its slides'
+store; two decks in one process keep apart by their stores; a question repeated
+across separate runs is in no run twice.  A book with one store whose single
+process meets a question twice does warn, and rightly.
+
+A [[mentipy render]] can't tell.  Each is a process of its own that knows only
+the store's last entry, so a second render of a question may be a repeat in the
+deck or a question rendered again from a terminal, and it records nothing and
+warns of nothing rather than guess.
+
+The server has no memory of a run, so its line asks what the walk used, in
+[[repeated_questions]] below.
+
+<<constants>>=
+REPEAT_ADVICE = (
+    "A question asked twice is one question: one pool of answers, and one stop "
+    "on Next and the index, at its first place. To get two, make the texts "
+    'differ, for example by adding "pretest" and "posttest" to the question; '
+    "a title or a label around it changes nothing."
+)
+REPEAT_NAME_LIMIT = 60
+<<functions>>=
+def repeat_warning(text: str, prefix: str, *, count: int = 1) -> str:
+    """Return the warning that this deck asks a question twice.
+
+    `text` and `prefix` name the question, and `count` says how many
+    questions the deck asks twice, of which this is the first.
+    """
+
+    name = " ".join(text.split())
+    if len(name) > REPEAT_NAME_LIMIT:
+        name = name[: REPEAT_NAME_LIMIT - 3] + "..."
+    name = f'"{name}" (prefix {prefix})'
+    if count == 1:
+        return f"this deck asks {name} twice. {REPEAT_ADVICE}"
+    return (
+        f"this deck asks {count} questions twice, the first {name}. "
+        f"{REPEAT_ADVICE}"
+    )
+@
+
+The advice says the text must change because only the premises enter the hash:
+an exercise title or a label around the question is not part of it, so a pretest
+and a posttest that differ only there are still one question.
+
+A prompt can be a paragraph, and the warning is one line in a terminal or a log,
+so it names the prompt rather than quoting it.
+
+<<test functions>>=
+def test_repeat_warning_names_a_long_prompt_on_one_line():
+    warning = repeat_warning("first\nsecond " + "x" * 200, "abcd")
+
+    assert "\n" not in warning
+    assert warning.startswith('this deck asks "first second xxx')
+    name = warning[warning.index('"') : warning.index(" (prefix abcd)")]
+    assert name.endswith('..."')
+    assert len(name) == REPEAT_NAME_LIMIT + 2
+
+
+def test_repeat_warning_quotes_a_short_prompt_whole():
+    text = "x" * REPEAT_NAME_LIMIT
+
+    assert f'"{text}" (prefix abcd)' in repeat_warning(text, "abcd")
 @
 
 The record is data in a file people edit, like the links, so whatever
@@ -1752,7 +1842,7 @@ and its serial is missing: for X, Y, A, B, C, A it shows B, C and A where
 the links show all five.  And it can walk on past the head as long as the
 serials keep falling by one: building [Dropped?] and then [A?, B?, A?]
 leaves Dropped?, B? and A? with serials 1, 2 and 3 in that order, and an
-old reader shows all three where the links show B? and A?.  The second
+old reader shows all three where the links show A? and B?.  The second
 also happens where a chain ends at a repeat, which a continued
 [[mentipy render]] of a question already in the deck does
 (\cref{sec:what-counts-as-a-run}): after a build of
@@ -1818,11 +1908,12 @@ It writes correct links and positions as serials, and copies the record,
 so a place in the record can agree with the serials although it describes
 the build before: over X, Y, A, B, C, A, a build of Q, R, A, B, C, A leaves
 A's record saying that A followed Y at serial~3, and the walk would show X,
-Y, B, C, A.  The store's order gives that away.  Every version pops a
+Y, A, B, C.  The store's order gives that away.  Every version pops a
 registered question and appends it, so the questions of a true run stand
-at the end of the store, in the order of the run, whichever process
+at the end of the store, each at its last place in the run, whichever process
 registered them; here Q and R stand between Y and B.  So a live deck with
-a record among it must be a suffix of the store's order, and otherwise the
+a record among it, taken at those last places, must be a suffix of the store's
+order, and otherwise the
 store is read by the serial rule, which here gives B, C and A as 0.17
 does.  The check is limited to a deck with a record because that is the
 only thing it has to catch, and a store without one should read as it did.
@@ -1851,11 +1942,27 @@ The walk starts at the store's last entry, which is always live: whatever
 registered last ran last.  Each step goes to the place of the predecessor
 whose serial is one less: the entry itself, or one of the places in its
 record.  So it follows the run backwards, position by position, through
-every repeat, and a question goes into the result the first time the walk
-meets it.  That is its last place: one row per hash, because the index and
-the navigation have one prefix per hash.  X, Y, A, B, C, A gives X, Y, B, C,
-A, while A, B, C, A, D gives B, C, A, D, in which the deck's first question
-is not the first line.
+every repeat, and what it collects is the run as it was registered, a repeat at
+each of its places.
+
+The index and the navigation have one prefix per hash, so the live deck has one
+stop per question, and the place that matters is the first.  Take X, Y, A, B, C,
+A, a poll before and after an explanation.  With the stop at the last place, as
+this code once had it, stepping through results pages goes from Y to B: the
+lecturer never opens A for its first ask, so the room scans its QR code and waits
+on a locked question.  With the stop at the first place the lecturer opens A on
+the way, and by the second ask it is simply open, so a lecturer who forgets to
+go back to it loses nothing but the tally.  So X, Y, A, B, C, A gives X, Y, A,
+B, C, and A, B, C, A, D gives A, B, C, D, where the deck's first question is the
+first line.  The question registered last is still live, as the index relies on,
+but it no longer has to be the last stop.
+
+The store's order does not follow.  A registration pops and appends, which is
+what the pacing walks and what every older reader relies on, so a repeat stands
+at its last place there.  That is why the walk returns the places rather than
+the stops: the check against the store's order below needs each question at its
+last place, the live deck at its first, and the start-up warning the ones that
+occur twice.
 
 The walk ends at a [[null]], at a hash the store does not hold and at
 anything that is not a hash.  Serials fall on every step and a store holds
@@ -1869,14 +1976,21 @@ whatever came before its first, as the serials did.
 <<functions>>=
 def _live_hashes(data: dict[str, Any]) -> list[str]:
     questions = data["questions"]
+    places = _places_of_the_run(questions)
+    if places is None:
+        return _live_hashes_by_serials(questions)
+    return list(dict.fromkeys(places))
+
+
+def _places_of_the_run(questions: dict[str, Any]) -> list[str] | None:
     if not questions:
         return []
 
     last = next(reversed(questions))
     if REGISTERED_AFTER_KEY not in questions[last]:
-        return _live_hashes_by_serials(questions)
+        return None
 
-    live = [last]
+    places = [last]
     place = questions[last]
     while (
         isinstance(previous := place.get(REGISTERED_AFTER_KEY), str)
@@ -1884,23 +1998,23 @@ def _live_hashes(data: dict[str, Any]) -> list[str]:
     ):
         before = _place_before(questions[previous], place)
         if before is None:
-            if previous in live and EARLIER_REGISTRATIONS_KEY not in place:
+            if previous in places and EARLIER_REGISTRATIONS_KEY not in place:
                 break
-            return _live_hashes_by_serials(questions)
-        if previous not in live:
-            live.append(previous)
+            return None
+        places.append(previous)
         place = before
 
     if previous is None and place.get(REGISTRATION_SERIAL_KEY) != 1:
-        return _live_hashes_by_serials(questions)
+        return None
 
-    live.reverse()
+    at_last_places = list(dict.fromkeys(places))[::-1]
+    places.reverse()
     if (
-        any(EARLIER_REGISTRATIONS_KEY in questions[each] for each in live)
-        and list(questions)[-len(live) :] != live
+        any(EARLIER_REGISTRATIONS_KEY in questions[each] for each in places)
+        and list(questions)[-len(at_last_places) :] != at_last_places
     ):
-        return _live_hashes_by_serials(questions)
-    return live
+        return None
+    return places
 
 
 def _place_before(
@@ -1920,8 +2034,11 @@ def _serial_follows(before: dict[str, Any], after: dict[str, Any]) -> bool:
     )
 @
 
-The membership test on the list is linear, which is fine for a lecture's
-worth of questions and keeps the walk's state to the one list it returns.
+The walk collects its places from the back, so before it reverses them the
+first occurrence of a hash is its last place, and that is the order the check
+against the store needs.  The membership test on the list is linear, which is
+fine for a lecture's worth of questions and keeps the walk's state to the one
+list it returns.
 A serial that is missing or not a number fails the check, so a
 hand-edited chain is read by the serial rule rather than trusted.
 
@@ -1990,9 +2107,10 @@ A render-built deck that asks a question twice has one more gap, with
 [[--new-run]] or without.  Its second render of the question is a process
 that knows only the store's last entry, so it cannot record a repeat, and
 the walk stops at that repeat as it did before the record: X, Y, A, B, C, A
-gives B, C, A.  Telling the repeat from a question rendered again from a
-terminal would take a memory of the run in the store, which a rebuild would
-then have to clear.  Such a deck can register through PythonTeX instead.
+gives B, C, A, which has A at its last place, and no warning fires
+(\cref{sec:a-repeat-warns}).  Telling the repeat from a question rendered again
+from a terminal would take a memory of the run in the store, which a rebuild
+would then have to clear.  Such a deck can register through PythonTeX instead.
 
 Renders that run in parallel, as [[make -j]] starts them, race between
 continuing the run and registering, so their chain depends on timing,
@@ -2245,7 +2363,7 @@ serial~1.
 def _repeat_in_the_deck(path):
     _build(path, _deck("Dropped?"))
     _build(path, _deck("A?", "B?", "A?"))
-    return _deck("B?", "A?"), _deck("Dropped?", "B?", "A?")
+    return _deck("A?", "B?"), _deck("Dropped?", "B?", "A?")
 
 
 def _render_of_a_deck_question(path):
@@ -2354,7 +2472,7 @@ def test_a_chain_with_a_missing_serial_is_read_by_the_serials(tmp_path):
 
 A deck may ask a question more than once, typically the same poll before and
 after an explanation.  Its live sequence is the whole deck with one row per
-question, at the question's last position: the questions before a repeat must
+question, at the question's first position: the questions before a repeat must
 stay live, or a deck's warm-up would read as left over from an older build.
 The table reads as a deck and the sequence it must give.  Overlapping repeats
 and a question asked three times are the cases that a single remembered
@@ -2363,21 +2481,21 @@ an orphan, which must stay out, and a rebuild must leave the file alone.
 
 <<test functions>>=
 REPEATING_DECKS = {
-    "a warm-up, then a pre and post poll": ("X Y A B C A", "X Y B C A"),
-    "a repeat in the middle": ("W X Y Z Y V", "W X Z Y V"),
-    "a repeat followed by more": ("A B C A D", "B C A D"),
-    "the deck's first question repeated": ("A B C A", "B C A"),
-    "asked three times": ("X A Y A Z A", "X Y Z A"),
-    "overlapping repeats": ("A B A C B D", "A C B D"),
+    "a warm-up, then a pre and post poll": ("X Y A B C A", "X Y A B C"),
+    "a repeat in the middle": ("W X Y Z Y V", "W X Y Z V"),
+    "a repeat followed by more": ("A B C A D", "A B C D"),
+    "the deck's first question repeated": ("A B C A", "A B C"),
+    "asked three times": ("X A Y A Z A", "X A Y Z"),
+    "overlapping repeats": ("A B A C B D", "A B C D"),
     "a pair asked twice": ("A B A B", "A B"),
     "the whole deck twice": ("A B C A B C", "A B C"),
-    "a duplicate in a row in a repeat": ("A B A A C", "B A C"),
+    "a duplicate in a row in a repeat": ("A B A A C", "A B C"),
 }
 
 
 @pytest.mark.parametrize("runs", [1, 2])
 @pytest.mark.parametrize("name", list(REPEATING_DECKS))
-def test_a_repeated_question_is_live_at_its_last_position(
+def test_a_repeated_question_is_live_at_its_first_position(
     tmp_path, name, runs
 ):
     path = tmp_path / "mentipy.json"
@@ -2393,20 +2511,201 @@ def test_a_repeated_question_is_live_at_its_last_position(
     assert path.read_bytes() == built
 @
 
-Next and Previous follow the same order across the place where the repeat was
-first asked, which is the step the walk has to make through the record.
+Next and Previous stop at the repeat's first place and step over its second,
+and the deck ends at the last question that is not a repeat.
 
 <<test functions>>=
-def test_navigation_steps_over_the_first_place_of_a_repeat(tmp_path):
+def test_navigation_stops_once_at_the_first_place_of_a_repeat(tmp_path):
     store = _build(tmp_path / "mentipy.json", _deck(*"XYABCA"))
     x, y, a, b, c, _ = _hashes(_deck(*"XYABCA"))
 
     assert store.next_question(x) == y
-    assert store.next_question(y) == b
-    assert store.prev_question(b) == y
+    assert store.next_question(y) == a
+    assert store.next_question(a) == b
+    assert store.prev_question(b) == a
+    assert store.prev_question(a) == y
     assert store.prev_question(x) is None
-    assert store.next_question(a) is None
-    assert store.prev_question(a) == c
+    assert store.next_question(c) is None
+@
+
+The order of the walk itself is what the suffix check compares with the store,
+so a true repeat must get past that check whatever it returns.  A deck that goes
+on after the repeat is the case where the first place and the store's order
+differ the most, and a fall-back to the serials would show B, C, A and D.
+
+<<test functions>>=
+def test_a_true_repeat_passes_the_check_against_the_stores_order(tmp_path):
+    store = _build(tmp_path / "mentipy.json", _deck(*"ABCAD"))
+
+    assert list(store._data()["questions"]) == _hashes(_deck(*"BCAD"))
+    assert store.live_hashes() == _hashes(_deck(*"ABCD"))
+@
+
+Whether the deck repeats anything is read from the same walk.  A question counts
+when the walk stood at it twice, so what the table above calls a repeat is what
+the warnings of \cref{sec:a-repeat-warns} call one.
+
+<<test functions>>=
+REPEATED_IN_A_DECK = {
+    "X Y A B C A": "A",
+    "A B C A D": "A",
+    "X A Y A Z A": "A",
+    "A B A C B D": "A B",
+    "A B A B": "A B",
+    "A B C": "",
+    "A A B": "",
+    "A B B": "",
+}
+
+
+@pytest.mark.parametrize("deck, repeated", list(REPEATED_IN_A_DECK.items()))
+def test_repeated_questions_are_those_the_walk_stood_at_twice(
+    tmp_path, deck, repeated
+):
+    store = _build(tmp_path / "mentipy.json", _deck(*deck.split()))
+
+    rows = store.repeated_questions()
+
+    assert [row["text"] for row in rows] == repeated.split()
+    for row in rows:
+        assert row["url_prefix"] == store.metadata(row["hash"])["url_prefix"]
+@
+
+An older writer copies the record, so the record alone proves nothing, and the
+start-up line of \cref{sec:a-repeat-warns} would fire on a store whose deck
+repeats nothing.  In the first row the walk rejects the links and reads the
+serials.  In the second that version's deck has A only once, so the walk reaches
+A's entry and never its record.  In the third the record happens to be true, and
+the deck does ask A twice.  A render-built deck is a cycle without a record, so
+it stays quiet as the manual says, and a deck that stops repeating leaves
+nothing.
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    "old, repeated",
+    [("QRABCA", ""), ("QRABC", ""), ("ZYABCA", "A")],
+)
+def test_repeated_questions_ignore_a_record_the_walk_did_not_use(
+    tmp_path, old, repeated
+):
+    path = tmp_path / "mentipy.json"
+    store = _build(path, _deck(*"XYABCA"))
+
+    _as_rebuilt_by_0_17(path, list(old))
+
+    assert EARLIER_REGISTRATIONS_KEY in store._data()["questions"][
+        question_hash(OpenQuestion("A"))
+    ]
+    assert [row["text"] for row in store.repeated_questions()] == (
+        repeated.split()
+    )
+
+
+def test_repeated_questions_ignore_an_older_writer_over_a_repeat(tmp_path):
+    path = tmp_path / "mentipy.json"
+    store = _build(path, _deck(*"XYABCA"))
+
+    _as_rebuilt_by_0_16(path, list("XYABCA"))
+
+    assert store.repeated_questions() == []
+
+
+def test_a_render_built_deck_records_no_repeat(tmp_path):
+    path = tmp_path / "mentipy.json"
+    for question in _deck(*"XYABCA"):
+        store = _render(path, question)
+
+    assert store.repeated_questions() == []
+
+
+def test_a_deck_that_stops_repeating_repeats_nothing(tmp_path):
+    path = tmp_path / "mentipy.json"
+    _build(path, _deck(*"XABA"))
+
+    store = _build(path, _deck(*"XAB"))
+
+    assert store.repeated_questions() == []
+
+
+def test_an_empty_store_repeats_nothing(tmp_path):
+    assert Store(tmp_path / "mentipy.json").repeated_questions() == []
+@
+
+The build's warning comes from the registration itself, so it says exactly once
+per run that a run has come back to a question.  A question registered twice in
+a row has not come back to anything, and neither has a new run or a continued
+render, which is why neither a rebuild nor a slide and notes pair is a repeat.
+
+<<test functions>>=
+def _repeats_noted(store, texts):
+    return "".join(
+        "!" if store.register_noting_repeat(OpenQuestion(text))[1] else "."
+        for text in texts
+    )
+
+
+@pytest.mark.parametrize(
+    "deck, noted",
+    [
+        ("AB", ".."),
+        ("ABA", "..!"),
+        ("ABAB", "..!!"),
+        ("ABACA", "..!.."),
+        ("AAB", "..."),
+        ("ABAA", "..!."),
+        ("ABAAC", "..!.."),
+    ],
+)
+def test_a_registration_notes_a_repeat_once_per_question(
+    tmp_path, deck, noted
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    _start_registration_run(store)
+
+    assert _repeats_noted(store, deck) == noted
+
+
+def test_register_noting_repeat_gives_the_prefix_register_gives(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    _start_registration_run(store)
+
+    prefix, _ = store.register_noting_repeat(OpenQuestion("A"))
+
+    assert store.register(OpenQuestion("A")) == prefix
+
+
+def test_a_new_run_starts_counting_repeats_again(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    _start_registration_run(store)
+    assert _repeats_noted(store, "ABC") == "..."
+
+    _start_registration_run(store)
+
+    assert _repeats_noted(store, "ABC") == "..."
+    _start_registration_run(store)
+    assert _repeats_noted(store, "ABA") == "..!"
+    _start_registration_run(store)
+    assert _repeats_noted(store, "ABA") == "..!"
+
+
+def test_a_continued_run_never_notes_a_repeat(tmp_path):
+    store = _build(tmp_path / "mentipy.json", _deck(*"ABC"))
+
+    for text in "ABCCA":
+        _start_registration_run()
+        store.continue_registration_run()
+        assert _repeats_noted(store, text) == "."
+
+
+def test_stores_in_one_process_note_their_repeats_apart(tmp_path):
+    first = Store(tmp_path / "first" / "mentipy.json", min_prefix=4)
+    second = Store(tmp_path / "second" / "mentipy.json", min_prefix=4)
+    _start_registration_run()
+
+    assert _repeats_noted(first, "AB") == ".."
+    assert _repeats_noted(second, "AB") == ".."
+    assert _repeats_noted(first, "C") == "."
+    assert _repeats_noted(second, "A") == "!"
 @
 
 The record itself is a list on the repeated question's entry, one item per
@@ -2506,7 +2805,7 @@ def test_rendering_the_last_question_of_a_repeating_deck_changes_nothing(
     store = _render(path, deck[3])
 
     assert path.read_bytes() == built
-    assert _live_sequence(store) == _hashes(_deck(*"XBA"))
+    assert _live_sequence(store) == _hashes(_deck(*"XAB"))
 @
 
 The memory of a run is as careful as the link.  A run that restarts because its
@@ -2589,7 +2888,7 @@ a [[null]] on an entry does.
         ("nonsense", "BA"),
         (["nonsense"], "BA"),
         ([{REGISTERED_AFTER_KEY: "x"}], "BA"),
-        ([{REGISTERED_AFTER_KEY: "f" * 64, REGISTRATION_SERIAL_KEY: 2}], "BA"),
+        ([{REGISTERED_AFTER_KEY: "f" * 64, REGISTRATION_SERIAL_KEY: 2}], "AB"),
         ([{REGISTERED_AFTER_KEY: None, REGISTRATION_SERIAL_KEY: 2}], "BA"),
     ],
     ids=[
@@ -2722,7 +3021,7 @@ def test_a_deck_that_repeats_a_question_keeps_out_an_earlier_orphan(
 
     store = _build(path, _deck("A?", "B?", "A?"))
 
-    assert _live_sequence(store) == _hashes(_deck("B?", "A?"))
+    assert _live_sequence(store) == _hashes(_deck("A?", "B?"))
 @
 
 An older Mentipy that builds into a store with links copies every link
@@ -2850,8 +3149,8 @@ def _as_rebuilt_by_0_17(path, texts):
     [
         ("XYABCA", "QRABCA", "BCA"),
         ("XYABCA", "QRABCAD", "BCAD"),
-        ("XYABCA", "ZYABCA", "ZYBCA"),
-        ("XYABCA", "QYABCA", "QYBCA"),
+        ("XYABCA", "ZYABCA", "ZYABC"),
+        ("XYABCA", "QYABCA", "QYABC"),
         ("XYABCA", "QRABC", "QRABC"),
         ("WXYACA", "XYXAC", "YXAC"),
     ],
@@ -2898,11 +3197,11 @@ moves its question to the end, so a true run is a suffix of the store.
 
 <<test functions>>=
 RUNS_OVER_A_RECORD = {
-    "a new question rendered after": (["XABA"], ["N"], "XBAN"),
-    "two new questions rendered after": (["XABA"], ["N", "M"], "XBANM"),
-    "the last question rendered again": (["XABA"], ["A"], "XBA"),
-    "an orphan before the deck": (["PQ", "XABA"], ["N"], "XBAN"),
-    "a deck and a rendered repeat": (["XYABCA"], ["N", "X"], "YBCANX"),
+    "a new question rendered after": (["XABA"], ["N"], "XABN"),
+    "two new questions rendered after": (["XABA"], ["N", "M"], "XABNM"),
+    "the last question rendered again": (["XABA"], ["A"], "XAB"),
+    "an orphan before the deck": (["PQ", "XABA"], ["N"], "XABN"),
+    "a deck and a rendered repeat": (["XYABCA"], ["N", "X"], "YABCNX"),
 }
 
 
@@ -3156,6 +3455,26 @@ def live_hashes(self) -> list[str]:
     """Return the hashes of the live deck, in deck order."""
 
     return _live_hashes(self._data())
+@
+
+The questions the deck repeats come from the same walk, because an entry that
+holds a record proves nothing: an older writer copies the record along with
+everything else, so the record of a deck built two versions ago can sit on a
+question of a deck that asks it once.  A question counts only if the walk really
+stood at it twice, and a store the walk rejected, which is read by the serials,
+has no repeats to report.
+
+<<store methods>>=
+def repeated_questions(self) -> list[dict[str, Any]]:
+    """Return the live questions that the deck asks more than once."""
+
+    questions = self._data()["questions"]
+    places = _places_of_the_run(questions) or []
+    return [
+        {**_public_question_metadata(questions[full_hash]), "hash": full_hash}
+        for full_hash in dict.fromkeys(places)
+        if places.count(full_hash) > 1
+    ]
 @
 
 The public view of the live deck has to agree with the navigation, including

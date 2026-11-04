@@ -32,7 +32,7 @@ import sys
 import threading
 from socketserver import ThreadingMixIn
 from string import Template
-from typing import Any
+from typing import Any, Sequence
 import unicodedata
 from urllib.parse import (
     parse_qs,
@@ -1400,8 +1400,8 @@ Previous and Next links cannot disagree.  That makes \enquote{old} mean
 brings.  A cut-down build, or one question rendered again from a terminal,
 moves questions under the old heading until the next full build, just as it
 takes them off the navigation row.  A question the deck asks again has one
-row, at its last place, so a deck that repeats its first question does not
-open with it.  And a deck rebuilt with [[mentipy render]] without
+row, at its first place, so a deck that repeats its first question still
+opens with it.  And a deck rebuilt with [[mentipy render]] without
 [[--new-run]] continues its old chain
 (\cref{sec:what-counts-as-a-run}), so what it no longer asks reads as
 current and the page may have no headings at all.
@@ -1555,8 +1555,7 @@ assertion that a prefix is present somewhere would pass with every question
 under the wrong heading.  A deck rebuilt without two of its questions is the
 case that was hard to read.  Its dropped questions come first in the store,
 one of them even between two kept ones, and the deck's real first question
-must still be the first thing on the page, as it is unless the deck asks that
-question again.
+must still be the first thing on the page.
 
 <<test functions>>=
 def _index_sections(page):
@@ -1632,9 +1631,10 @@ def test_render_index_has_no_headings_without_old_questions(tmp_path):
 @
 
 The current section is in the order of the Previous and Next links, not in
-the store's.  The two agree unless an older version of Mentipy copied links
-that no longer fit, so this store is written by hand: its links and serials
-are consistent, and they read B, A, C where the store holds A, B, C.
+the store's.  The two agree unless the deck repeats a question or an older
+version of Mentipy copied links that no longer fit, so this store is written by
+hand: its links and serials are consistent, and they read B, A, C where the
+store holds A, B, C.
 
 <<test functions>>=
 def _write_links(store, links):
@@ -1790,23 +1790,23 @@ INDEX_BUILDS = {
         "A C2 D",
         "B C",
     ),
-    "pythontex repeat": (_pythontex_build, ["X Y A B C A"], "X Y B C A", ""),
+    "pythontex repeat": (_pythontex_build, ["X Y A B C A"], "X Y A B C", ""),
     "pythontex repeat rebuilt": (
         _pythontex_build,
         ["X Y A B C A", "X Y A B C A"],
-        "X Y B C A",
+        "X Y A B C",
         "",
     ),
     "pythontex repeat of the first": (
         _pythontex_build,
         ["A B C A D"],
-        "B C A D",
+        "A B C D",
         "",
     ),
     "pythontex repeat over an old deck": (
         _pythontex_build,
         ["P Q", "X A B A"],
-        "X B A",
+        "X A B",
         "P Q",
     ),
     "new-run once": (_new_run_build, ["A B C"], "A B C", ""),
@@ -4717,6 +4717,21 @@ a [[lock=False]] block whose opened predecessor was the question moved.
 A question from an earlier build that is on no slide any more is simply
 a locked question nobody opens.
 
+A deck that asks a question twice is where the two orders part: the store has
+it at its last place, the live sequence at its first
+(\cref{sec:live-deck}).  The gate keeps the store's order, so what is open is
+what it was.  That leaves a [[lock=False]] question right after a first ask
+following the wrong question: in X, Y, A, B, C, A with [[lock=False]] on B, B
+stands after Y in the store, so it opens with Y and not with A, and with
+[[lock=False]] on A, the first ask opens only with C.  Neither lets a respondent
+reach a form through the deck: Next from Y leads to A, which waits, and the
+lecturer's Next from Y opens A by visiting it.  A respondent who has B's address
+does get its form.  Moving the walk to the live order would fix the follow-on
+question and take with it the property above, that a re-render never opens a
+question the lecturer has not reached, because a re-render changes the live
+sequence wholesale.  The deck's way out is to make the two asks two questions,
+which the warning tells it to.
+
 The tracker takes that sequence as data rather than a [[Store]].  Every
 locked request already resolves its prefix through the store; the gate
 must not add a JSON read per step of a [[lock=False]] chain on top of
@@ -4867,14 +4882,38 @@ The waiting page needs to know whether the lecture has moved
 the active question.  Before any opening nothing is past anything, and
 an active question that is no longer in the deck is past nothing either.
 
+Unlike the gate, this is a question about where the lecture is, and the live
+deck says that better than the store's order wherever the two differ, which is
+at a repeat.  In X, Y, A, B, C, A the store holds X, Y, B, C, A, so a lecturer on
+the first ask of A would be past B and C by the store's order: a respondent who
+answers A and follows Next would reach B, be told the lecture has passed it, and
+land on A's form again, and so would one who scans B's QR code early.  So the
+comparison uses the live order when both questions are live, and the store's
+order for a question outside the live deck, which an orphan is.  It only decides
+between a redirect and a waiting page, never what is open: both routes ask
+[[is_open]] first or send to the active question, which is open.  Without a
+repeat the two orders agree, unless an older version copied links that no longer
+fit, so a deck that repeats nothing behaves as it did.
+
 <<lecture progress methods>>=
-def moved_past(self, full_hash: str, deck: list[dict[str, Any]]) -> bool:
-    """Return whether a later question than ``full_hash`` is active."""
+def moved_past(
+    self,
+    full_hash: str,
+    deck: list[dict[str, Any]],
+    live: Sequence[str] = (),
+) -> bool:
+    """Return whether a later question than ``full_hash`` is active.
+
+    The order is ``live`` where it holds both questions, otherwise
+    ``deck``, the rows of ``Store.all_questions()``.
+    """
 
     with self._lock:
         active = self._active
     if active is None:
         return False
+    if active in live and full_hash in live:
+        return live.index(active) > live.index(full_hash)
     active_index = _deck_index(deck, active)
     index = _deck_index(deck, full_hash)
     if active_index is None or index is None:
@@ -5077,6 +5116,30 @@ def test_lecture_progress_close_of_the_only_opening_clears_active():
 and the status labels are the rule seen from the index.
 
 <<test functions>>=
+def test_lecture_progress_moved_past_reads_the_live_order():
+    progress = LectureProgress()
+    store_order = _deck(
+        ("old", True), ("x", True), ("b", True), ("a", True), ("d", True)
+    )
+    live = ["x", "a", "b", "d"]
+
+    progress.open("a")
+    assert progress.moved_past("b", store_order) is True
+    assert progress.moved_past("b", store_order, live) is False
+    assert progress.moved_past("d", store_order, live) is False
+    assert progress.moved_past("x", store_order, live) is True
+    assert progress.moved_past("a", store_order, live) is False
+    assert progress.moved_past("old", store_order, live) is True
+
+    progress.open("b")
+    assert progress.moved_past("a", store_order, live) is True
+    assert progress.moved_past("d", store_order, live) is False
+
+    progress.open("old")
+    assert progress.moved_past("b", store_order, live) is False
+    assert progress.moved_past("missing", store_order, live) is False
+
+
 def test_lecture_progress_moved_past_means_a_later_question_is_active():
     progress = LectureProgress()
     deck = _deck(("q1", True), ("q2", True), ("q3", True))
@@ -5610,7 +5673,7 @@ def _resolve_for_respondent(
     if progress.is_open(full_hash, deck):
         return full_hash
 
-    if follow and progress.moved_past(full_hash, deck):
+    if follow and progress.moved_past(full_hash, deck, store.live_hashes()):
         parsed = urlparse(self.path)
         rest = [segment for segment in parsed.path.split("/") if segment]
         location = _active_location(store, progress, rest[1:], parsed.query)
@@ -5921,7 +5984,9 @@ location = None
 if (
     lock
     and not self._admin_allowed()
-    and progress.moved_past(full_hash, store.all_questions())
+    and progress.moved_past(
+        full_hash, store.all_questions(), store.live_hashes()
+    )
 ):
     location = _active_location(store, progress, [], "")
 if location is None:
@@ -8688,16 +8753,18 @@ def test_next_is_plain_for_the_lecturer_and_without_lock(tmp_path):
 
 A deck that repeats a question is the same sequence to the route as to the
 Previous and Next links: the question before the first place of the repeat
-leads to the question after it.  Pacing keeps walking the store's order, which
-is the same one here, so a [[lock=False]] question after that step still opens
-with the question before it.
+leads to that place.  Pacing keeps walking the store's order, where the repeat
+stands at its last place, so a [[lock=False]] question right after the first ask
+opens with the question before that ask.  The test pins that as it stands: the
+form is there for a respondent who has the address, and the route does not lead
+to it, because it leads to the repeat, which waits for the lecturer.
 
 <<test functions>>=
-def test_next_steps_over_the_first_place_of_a_repeat(tmp_path):
+def test_next_stops_at_the_first_place_of_a_repeat(tmp_path):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     _start_registration_run(store)
     warm_up = store.register(OpenQuestion("Warm-up?"))
-    store.register(OpenQuestion("Poll?"))
+    poll = store.register(OpenQuestion("Poll?"))
     follow = store.register(OpenQuestion("Follow-up?", lock=False))
     store.register(OpenQuestion("Poll?"))
     client = {"remote": False}
@@ -8706,10 +8773,176 @@ def test_next_steps_over_the_first_place_of_a_repeat(tmp_path):
         _request(port, "GET", f"/{warm_up}/results")
         client["remote"] = True
         response, _body = _request(port, "GET", f"/{warm_up}/next")
-        form, _body = _request(port, "GET", f"/{follow}")
+        waiting, waiting_page = _request(port, "GET", f"/{poll}")
+        form, form_page = _request(port, "GET", f"/{follow}")
 
-    assert response.getheader("Location") == f"/{follow}"
-    assert form.status == 200
+    assert response.getheader("Location") == f"/{poll}"
+    assert waiting.status == 200 and "<form" not in waiting_page
+    assert form.status == 200 and "<form" in form_page
+@
+
+With [[lock=False]] on the repeat itself, the first ask follows the question
+before the repeat's last place in the store.  It stays locked for the room when
+the warm-up opens, and the lecturer opens it by stepping to it.
+
+<<test functions>>=
+def test_a_repeat_with_lock_false_opens_when_the_lecturer_steps_to_it(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    _start_registration_run(store)
+    warm_up = store.register(OpenQuestion("Warm-up?"))
+    poll = store.register(OpenQuestion("Poll?", lock=False))
+    store.register(OpenQuestion("Between?"))
+    store.register(OpenQuestion("Poll?", lock=False))
+    client = {"remote": False}
+
+    with _running_server(store, remote=client) as port:
+        _request(port, "GET", f"/{warm_up}/results")
+        client["remote"] = True
+        waiting, waiting_page = _request(port, "GET", f"/{poll}")
+        client["remote"] = False
+        _request(port, "GET", f"/{poll}/results")
+        client["remote"] = True
+        form, form_page = _request(port, "GET", f"/{poll}")
+
+    assert waiting.status == 200 and "<form" not in waiting_page
+    assert form.status == 200 and "<form" in form_page
+@
+
+The rest of a repeating deck goes through a real server, with the lecturer on
+one side and a respondent on the other.  In X, Y, A, B, C, A, D the store holds
+X, Y, B, C, A, D, so the lecturer's first ask of A stands after B and C there.
+The comparison of \enquote{moved past} must not read that as the lecture being
+past B: a respondent who answers A and follows Next would be sent back to A's
+form, and so would one who scans B's QR code early.
+
+<<test functions>>=
+def _repeating_lecture(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    _start_registration_run(store)
+    prefixes = {}
+    for text in "XYABCAD":
+        prefixes[text] = store.register(OpenQuestion(text))
+    return store, prefixes
+
+
+def test_the_lecturer_steps_through_a_repeat_at_its_first_place(tmp_path):
+    store, q = _repeating_lecture(tmp_path)
+
+    with _running_server(store) as port:
+        pages = {
+            text: _request(port, "GET", f"/{q[text]}/results")[1]
+            for text in "XYABCD"
+        }
+
+    def links(text):
+        return (
+            re.findall(r'class="prev-link" href="/(\w+)/results', pages[text]),
+            re.findall(r'class="next-link" href="/(\w+)/results', pages[text]),
+        )
+
+    assert links("X") == ([], [q["Y"]])
+    assert links("Y") == ([q["X"]], [q["A"]])
+    assert links("A") == ([q["Y"]], [q["B"]])
+    assert links("B") == ([q["A"]], [q["C"]])
+    assert links("C") == ([q["B"]], [q["D"]])
+    assert links("D") == ([q["C"]], [])
+
+
+def test_a_respondent_after_the_first_ask_waits_for_the_next_question(tmp_path):
+    store, q = _repeating_lecture(tmp_path)
+    client = {"remote": False}
+
+    with _running_server(store, remote=client) as port:
+        _request(port, "GET", f"/{q['A']}/results")
+        client["remote"] = True
+        next_step, _ = _request(port, "GET", f"/{q['A']}/next")
+        form_of_a, form_page = _request(port, "GET", f"/{q['A']}")
+        later = {
+            text: _request(port, "GET", f"/{q[text]}")
+            for text in "BCD"
+        }
+        earlier = {
+            text: _request(port, "GET", f"/{q[text]}")
+            for text in "XY"
+        }
+
+    assert next_step.getheader("Location") == f"/{q['B']}"
+    assert form_of_a.status == 200 and "<form" in form_page
+    for response, page in later.values():
+        assert response.status == 200
+        assert "<form" not in page
+    for response, _page in earlier.values():
+        assert response.status == 303
+        assert response.getheader("Location") == f"/{q['A']}"
+
+
+def test_the_lecture_moves_on_past_a_repeat_as_it_does_past_any_question(
+    tmp_path,
+):
+    store, q = _repeating_lecture(tmp_path)
+    client = {"remote": False}
+
+    with _running_server(store, remote=client) as port:
+        for text in "AB":
+            _request(port, "GET", f"/{q[text]}/results")
+        client["remote"] = True
+        form_of_b, form_page = _request(port, "GET", f"/{q['B']}")
+        behind, _ = _request(port, "GET", f"/{q['A']}/next")
+        ahead, ahead_page = _request(port, "GET", f"/{q['C']}")
+        client["remote"] = False
+        _request(port, "POST", f"/{q['C']}/skip")
+        _request(port, "GET", f"/{q['D']}/results")
+        client["remote"] = True
+        skipped, _ = _request(port, "GET", f"/{q['C']}")
+
+    assert form_of_b.status == 200 and "<form" in form_page
+    assert behind.getheader("Location") == f"/{q['B']}"
+    assert ahead.status == 200 and "<form" not in ahead_page
+    assert skipped.status == 303
+    assert skipped.getheader("Location") == f"/{q['D']}"
+
+
+def test_the_index_labels_a_repeating_deck_at_the_first_place(tmp_path):
+    store, q = _repeating_lecture(tmp_path)
+    client = {"remote": False}
+
+    with _running_server(store, remote=client) as port:
+        _request(port, "GET", f"/{q['A']}/results")
+        _response, page = _request(port, "GET", "/")
+
+    assert _index_sections(page) == [(None, [q[text] for text in "XYABCD"])]
+    assert _index_labels(page) == {
+        q["X"]: "locked",
+        q["Y"]: "locked",
+        q["A"]: "active",
+        q["B"]: "locked",
+        q["C"]: "locked",
+        q["D"]: "locked",
+    }
+@
+
+The second ask opens nothing new, because the question is open already, so
+[[/active]] stays where the lecture was.  A respondent who answers the second
+ask and follows Next is therefore behind the active question as far as the
+server can tell, and gets it, as a slow respondent on the first ask would.  The
+server cannot tell those two apart, which is one more reason for the warning.
+
+<<test functions>>=
+def test_the_second_ask_leaves_the_active_question_where_it_was(tmp_path):
+    store, q = _repeating_lecture(tmp_path)
+    client = {"remote": False}
+
+    with _running_server(store, remote=client) as port:
+        for text in "ABCA":
+            _request(port, "GET", f"/{q[text]}/results")
+        client["remote"] = True
+        active, _ = _request(port, "GET", "/active")
+        form, form_page = _request(port, "GET", f"/{q['A']}")
+        next_step, _ = _request(port, "GET", f"/{q['A']}/next")
+
+    assert active.getheader("Location") == f"/{q['C']}"
+    assert form.status == 200 and "<form" in form_page
+    assert next_step.getheader("Location") == f"/{q['C']}"
 @
 
 The route answers 404 wherever the link would be missing: after the
