@@ -10463,7 +10463,8 @@ def test_slides_command_runs_with_the_server_up_and_its_address_recorded(
 The shell needs a moment to reach its [[cp]], so that test passes even with the
 record written just after the command starts.  The promise is about the moment of
 the hand-over, so the next test reads the record there, from a wrapper around the
-real [[Popen]].
+real [[Popen]].  [[present]] runs other programs too, such as [[git]] about the
+answer log, and the slides command is the one that goes through a shell.
 
 <<test functions>>=
 def test_the_address_is_on_record_when_the_slides_command_starts(
@@ -10476,7 +10477,8 @@ def test_the_address_is_on_record_when_the_slides_command_starts(
     at_the_hand_over = []
 
     def popen(*args, **kwargs):
-        at_the_hand_over.append(_record_of_the_deck())
+        if kwargs.get("shell"):
+            at_the_hand_over.append(_record_of_the_deck())
         return _REAL_POPEN(*args, **kwargs)
 
     monkeypatch.setattr("mentipy.cli.subprocess.Popen", popen)
@@ -10779,7 +10781,8 @@ def test_present_writes_the_log_heading_first_and_keeps_no_copy_of_the_file(
     handed = []
 
     def popen(*args, **kwargs):
-        handed.append((kwargs["stdout"], log.read_text()))
+        if kwargs.get("shell"):
+            handed.append((kwargs["stdout"], log.read_text()))
         return _REAL_POPEN(*args, **kwargs)
 
     monkeypatch.setattr("mentipy.cli.subprocess.Popen", popen)
@@ -10806,7 +10809,8 @@ def test_present_closes_the_log_when_the_slides_command_cannot_start(
     handed = []
 
     def popen(*args, **kwargs):
-        handed.append(kwargs["stdout"])
+        if kwargs.get("shell"):
+            handed.append(kwargs["stdout"])
         return _REAL_POPEN(*args, **kwargs)
 
     monkeypatch.setattr("mentipy.cli.subprocess.Popen", popen)
