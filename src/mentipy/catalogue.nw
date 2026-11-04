@@ -10,7 +10,7 @@ ships, and nothing else.
 
 \section{Overview}
 
-One setting, [[mentipy.locale]] (\cref{sec:locale-setting}), chooses the
+One setting, [[locale]] (\cref{sec:locale-setting}), chooses the
 language for both surfaces.  The two surfaces read it at different
 times, which is why the words live in a module of their own rather than
 in either of them:

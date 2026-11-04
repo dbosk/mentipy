@@ -49,6 +49,7 @@ from pygments.formatters import HtmlFormatter as _HtmlFormatter
 from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
 
+import mentipy
 from mentipy.catalogue import (
     CATALOGUES,
     ENGLISH,
@@ -4098,7 +4099,7 @@ floor of the peak are skipped --- the kernel tails would otherwise
 emit thousands of imperceptible rects.
 
 The grid resolution is the one knob a lecturer may want to turn, so it
-is a configuration setting ([[mentipy.heatmap_bins]], threaded in from
+is a configuration setting ([[heatmap_bins]], threaded in from
 the CLI) rather than a constant.  Because the kernel width is fixed in
 \emph{cells}, the resolution controls blob size and smoothing
 together: fewer bins make each hotspot larger and chunkier relative to
@@ -5166,7 +5167,7 @@ the GET routes are where it enters the rendering call.
 The page language comes in two parts that rank differently, which is
 why the CLI does not merge them.  [[locale]] is the [[--locale]] the
 lecturer gave, or [[None]], and it beats everything.
-[[default_locale]] is the configured [[mentipy.locale]], and it gives
+[[default_locale]] is the configured [[locale]], and it gives
 way to what the slides recorded (\cref{sec:recorded-locale}): a deck
 was compiled in that language, perhaps on another machine, and its
 questions should be answered in it.  Between the two lie the
@@ -5262,6 +5263,11 @@ def catalogue(self) -> Catalogue:
     return self._catalogue
 @
 
+The handler gives the package version in its [[Server]] header.  It reads
+[[mentipy.__version__]] when a handler is built, not when this module is
+imported, because the package's [[__init__.py]] imports this module before it
+sets the version.
+
 <<functions>>=
 def _build_handler(
     store: Store,
@@ -5279,7 +5285,7 @@ def _build_handler(
     <<question catalogue>>
 
     class MentipyHandler(BaseHTTPRequestHandler):
-        server_version = "mentipy/0.1"
+        server_version = f"mentipy/{mentipy.__version__}"
 
         <<mentipy handler catalogue>>
         <<mentipy handler helpers>>
@@ -7491,6 +7497,18 @@ def _request_bytes(port, method, path):
     return response, payload
 @
 
+A real request shows the version the server gives, in the header that the
+standard library builds from [[server_version]].
+
+<<test functions>>=
+def test_the_server_header_names_the_package_version(tmp_path):
+    with _running_server(Store(tmp_path / "mentipy.json")) as port:
+        response, _body = _request_bytes(port, "GET", "/")
+
+    product = response.getheader("Server").split()[0]
+    assert product == f"mentipy/{metadata.version('mentipy')}"
+@
+
 The image route must hand back the registered bytes with the sniffed
 content type and the [[nosniff]] header --- byte-for-byte, since a
 browser will paint them.
@@ -9542,6 +9560,7 @@ def test_ambiguous_prefix_returns_multiple_choices(tmp_path, monkeypatch):
 
 <<test [[server.py]]>>=
 from contextlib import contextmanager
+from importlib import metadata
 from datetime import datetime, timedelta, timezone
 import errno
 import hashlib

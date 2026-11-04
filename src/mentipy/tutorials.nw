@@ -143,7 +143,7 @@ snippet.  That is the \enquote{after} half of the contrast.
 
 ```tutorial-step
 required_patterns:
-  - eval $(mentipy activate)
+  - eval "$(mentipy activate)"
   - python3 -c 'import mentipy'
   - python3 -c 'import mentipy; print(mentipy.__version__)'
 hint: "Evaluate the activation snippet in your current shell and then make
@@ -153,7 +153,7 @@ hint: "Evaluate the activation snippet in your current shell and then make
 Activate the environment and prove that `python3` now imports `mentipy`:
 
 ```sh
-eval $(mentipy activate)
+eval "$(mentipy activate)"
 python3 -c 'import mentipy; print(mentipy.__version__)'
 ```
 
@@ -170,12 +170,12 @@ workflow.
 ```tutorial-step
 kind: multi_select
 options:
-  - The activation lasts only for the shell where you ran eval $(mentipy activate).
+  - The activation lasts only for the shell where you ran eval "$(mentipy activate)".
   - Opening a new shell means you need to activate again unless another tool does it for you.
   - A Makefile target or direnv can automate repeated activation for a project.
   - mentipy activate permanently modifies every future shell on the machine.
 answers:
-  - The activation lasts only for the shell where you ran eval $(mentipy activate).
+  - The activation lasts only for the shell where you ran eval "$(mentipy activate)".
   - Opening a new shell means you need to activate again unless another tool does it for you.
   - A Makefile target or direnv can automate repeated activation for a project.
 ```
@@ -888,7 +888,7 @@ learner's normal [[mentipy]] defaults.
 
 ```tutorial-step
 required_patterns:
-  - MENTIPY_CONFIG=./mentipy-config.json mentipy config mentipy.base_url --set http://config.example
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config base_url --set http://config.example
   - "PREFIX=$(mentipy list --store ./respondent-urls.json | cut -d' ' -f1)"
   - 'MENTIPY_CONFIG=./mentipy-config.json mentipy url "$PREFIX" --store ./respondent-urls.json'
   - http://config.example/
@@ -900,7 +900,7 @@ Store a configured base URL and reuse it:
 
 ```sh
 MENTIPY_CONFIG=./mentipy-config.json \
-  mentipy config mentipy.base_url --set http://config.example
+  mentipy config base_url --set http://config.example
 PREFIX=$(mentipy list --store ./respondent-urls.json | cut -d' ' -f1)
 MENTIPY_CONFIG=./mentipy-config.json \
   mentipy url "$PREFIX" --store ./respondent-urls.json
@@ -917,7 +917,7 @@ at a chosen port.
 
 ```tutorial-step
 required_patterns:
-  - MENTIPY_CONFIG=./mentipy-config.json mentipy config mentipy.base_url --set auto
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config base_url --set auto
   - "PREFIX=$(mentipy list --store ./respondent-urls.json | cut -d' ' -f1)"
   - 'MENTIPY_CONFIG=./mentipy-config.json mentipy url "$PREFIX" --store ./respondent-urls.json --port 9123'
   - mode: regex
@@ -930,7 +930,7 @@ Ask mentipy to resolve the current LAN address automatically:
 
 ```sh
 MENTIPY_CONFIG=./mentipy-config.json \
-  mentipy config mentipy.base_url --set auto
+  mentipy config base_url --set auto
 PREFIX=$(mentipy list --store ./respondent-urls.json | cut -d' ' -f1)
 MENTIPY_CONFIG=./mentipy-config.json \
   mentipy url "$PREFIX" --store ./respondent-urls.json --port 9123
@@ -1039,7 +1039,7 @@ will trigger URL resolution at runtime.
 
 ```tutorial-step
 required_patterns:
-  - MENTIPY_CONFIG=./mentipy-config.json mentipy config mentipy.base_url --set auto
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config base_url --set auto
   - mentipy render mc
   - --store ./mentipy.json
   - How confident do you feel about the course goals?
@@ -1051,7 +1051,7 @@ Prepare one stored question and an auto-resolved base URL:
 
 ```sh
 MENTIPY_CONFIG=./mentipy-config.json \
-  mentipy config mentipy.base_url --set auto
+  mentipy config base_url --set auto
 MENTIPY_CONFIG=./mentipy-config.json \
   mentipy render mc "How confident do you feel about the course goals?" \
   "Very confident" "Somewhat confident" "Not yet" \
@@ -1070,10 +1070,10 @@ between local serving and the extra settings public exposure needs.
 
 ```tutorial-step
 required_patterns:
-  - MENTIPY_CONFIG=./mentipy-config.json mentipy config mentipy.ssh_tunnel --set alice@example.test:2222
-  - MENTIPY_CONFIG=./mentipy-config.json mentipy config mentipy.public_base_url --set https://polls.example
-  - MENTIPY_CONFIG=./mentipy-config.json mentipy config mentipy.ssh_tunnel
-  - MENTIPY_CONFIG=./mentipy-config.json mentipy config mentipy.public_base_url
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config ssh_tunnel --set alice@example.test:2222
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config public_base_url --set https://polls.example
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config ssh_tunnel
+  - MENTIPY_CONFIG=./mentipy-config.json mentipy config public_base_url
   - alice@example.test:2222
   - https://polls.example
 hint: "Store the SSH endpoint and the public base URL, then read them back so the
@@ -1084,11 +1084,11 @@ Record the two public-exposure settings that the help text mentioned:
 
 ```sh
 MENTIPY_CONFIG=./mentipy-config.json \
-  mentipy config mentipy.ssh_tunnel --set alice@example.test:2222
+  mentipy config ssh_tunnel --set alice@example.test:2222
 MENTIPY_CONFIG=./mentipy-config.json \
-  mentipy config mentipy.public_base_url --set https://polls.example
-MENTIPY_CONFIG=./mentipy-config.json mentipy config mentipy.ssh_tunnel
-MENTIPY_CONFIG=./mentipy-config.json mentipy config mentipy.public_base_url
+  mentipy config public_base_url --set https://polls.example
+MENTIPY_CONFIG=./mentipy-config.json mentipy config ssh_tunnel
+MENTIPY_CONFIG=./mentipy-config.json mentipy config public_base_url
 ```
 
 These settings are inert by themselves, but they matter once you choose a public

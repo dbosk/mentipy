@@ -244,6 +244,49 @@ uv venv --seed --python 3.11 .venv
 uv pip install --python .venv/bin/python mentipy
 \end{minted}
 
+\subsection{Upgrading from a version before 1.0}
+\label{sec:upgrading}
+
+Mentipy~1.0 keeps each setting as a key of its own in the config file:
+[[mentipy config base_url --set ...]] stores [[base_url]].  Earlier versions
+kept them in a [[mentipy]] section, written [[mentipy.base_url]], and 1.0
+neither reads nor converts that section.  So a deck that relied on a configured
+address gets the LAN address instead, without a warning, until the value is set
+again.
+
+Take these steps in order, because a [[venv]] setting in the old section decides
+which environment the third step reaches:
+\begin{enumerate}
+\item Upgrade the tool with [[uv tool upgrade mentipy]], and check that
+  [[uv tool list]] shows 1.0 or newer.  A tool on a Python older than 3.11 stays
+  where it is and reports nothing to upgrade, since 1.0 needs 3.11; for that
+  one, run [[uv tool upgrade --python 3.11 mentipy]].
+\item Run [[mentipy config mentipy]] to see the old values, and set the ones you
+  still want under their new names.  Without an old section it prints a
+  [[KeyError]] traceback, as it does for any key that is not set, which is
+  harmless.
+\item In each deck, run [[mentipy init]], and check the result with
+  [[.venv/bin/python -m pip show mentipy]], because [[init]] reports success
+  even when the version did not change: an environment on a Python older than
+  3.11 stays on 0.17.  Delete such an environment and run [[mentipy init]] again.
+  If the deck's Makefile has a [[MENTIPY_VERSION]] line, raise it to 1.0 first,
+  because [[>=0.17]] leaves an environment on 0.17.
+\item Once no deck needs the old section, remove it with
+  [[mentipy config mentipy --set ""]].
+\end{enumerate}
+
+A deck's environment has its own Mentipy, which reads the same config file, so
+this is not a change to make gradually.  Until the third step, that deck reads
+only the old section and misses the answers 1.0 records, as
+\cref{sec:where-answers-are} explains.
+
+The old spelling is still accepted by [[mentipy config]], but it only writes to
+the old section.  The reverse also holds: a value once stored under a short
+name, which earlier versions ignored, now takes effect, so look through what
+[[mentipy config]] lists.  That command shows only what the file holds, and its
+tab completion offers only keys already set, so a leftover section shows up
+there as [[mentipy.base_url]]; [[mentipy latex]] lists the keys that exist.
+
 \section{Choosing an Authoring Path}
 
 \subsection{A Single-Choice Poll}
@@ -574,7 +617,7 @@ Included in the document, that output compiles to:
 At serve time, the matching tunnel setup is:
 
 \begin{minted}{text}
-mentipy config mentipy.ssh_tunnel --set dbosk@faculty-shell.sys.kth.se:8080
+mentipy config ssh_tunnel --set dbosk@faculty-shell.sys.kth.se:8080
 mentipy serve --public ssh
 \end{minted}
 
@@ -1456,9 +1499,9 @@ Rendered in the document, that call becomes:
   layout.
 
   \textbf{What this reveals}: When [[base_url]] is omitted and no server has
-  run on this store, the helper reads the [[mentipy.base_url]] setting.  If
+  run on this store, the helper reads the [[base_url]] setting.  If
   that setting is absent, it resolves
-  the current LAN address together with [[mentipy.port]], so the QR is a
+  the current LAN address together with the [[port]] setting, so the QR is a
   compile-time placeholder that [[mentipy serve]] can refresh later.  We use a
   fresh poll here because mentipy keys QR files by content-derived hash;
   re-rendering the first example with a different [[base_url]] would overwrite
@@ -1490,7 +1533,7 @@ When respondents must reach the poll from outside the local network,
 The SSH mode needs one extra configuration value:
 
 \begin{minted}{text}
-mentipy config mentipy.ssh_tunnel --set danielb@server.tld:8080
+mentipy config ssh_tunnel --set danielb@server.tld:8080
 mentipy serve --store ./mentipy.json --public ssh
 \end{minted}
 
@@ -1675,7 +1718,7 @@ mentipy watch --store ./mentipy.json --server http://localhost:9000
 The watcher asks the server for [[/active]], just as a latecomer's
 phone does, and reads the answers from the store, so it must be given
 the same store as the server.  The server is the one
-[[mentipy serve]] would start, [[mentipy.host]] at [[mentipy.port]]
+[[mentipy serve]] would start, at the [[host]] and [[port]] settings
 (the loopback address when it binds every interface), unless
 [[--server]] names another address, for a server started with
 [[--port]] or one on another machine.  Asking needs
@@ -1727,18 +1770,18 @@ on Windows), so neither Ctrl-C in [[present]] nor closing its terminal
 reaches the browser.
 The command depends on the platform:
 [[xdg-open]] on Linux and the other Unix systems, [[open]] on macOS
-and [[explorer]] on Windows.  The setting [[mentipy.open_command]]
+and [[explorer]] on Windows.  The setting [[open_command]]
 names another, split as a shell would split it; a [[{url}]] in it marks
 where the URL goes, and without one the URL is appended.
 On Windows a path in the command keeps its backslashes, and one written
 in quotes may contain spaces.  [[--open-with]] overrides the setting
-for one run, and [[--no-open]] skips the step; an empty setting, or
-[[none]], skips it for good on that machine.  [[--open-with]] with
+for one run, and [[--no-open]] skips the step; the setting [[none]]
+skips it for good on that machine.  [[--open-with]] with
 [[--no-open]] is ignored with a warning, and a command that cannot be
 started only adds a warning to the status line.
 
 \begin{minted}{text}
-mentipy config mentipy.open_command --set "firefox --new-window"
+mentipy config open_command --set "firefox --new-window"
 mentipy present --store ./mentipy.json --open-with "chromium --app={url}"
 mentipy present --store ./mentipy.json --no-open
 \end{minted}
@@ -1746,11 +1789,11 @@ mentipy present --store ./mentipy.json --no-open
 The QR codes carry the server's address, so the slides are best built once the
 server is up.  [[--slides-command]] makes that part of the same command: a shell
 command that [[present]] runs after the server has started, typically one that
-builds the slides and then opens them.  The setting [[mentipy.slides_command]]
+builds the slides and then opens them.  The setting [[slides_command]]
 gives a default for your machine, and nothing runs if neither is set.
 
 \begin{minted}{text}
-mentipy config mentipy.slides_command \
+mentipy config slides_command \
     --set "make slides.pdf && pdfpc -w both slides.pdf"
 mentipy present --slides-command \
     "make slides-intro.pdf && pdfpc -w both slides-intro.pdf"
@@ -1764,7 +1807,7 @@ slides.pdf: $(wildcard mentipy-obj/Q-*.pdf_tex)
 \end{minted}
 The Mentipy in the deck's own [[.venv]] must also be 1.0 or newer, because that
 is the one writing the QR codes in a build.  An older one writes the configured
-address whatever the server serves.  [[mentipy init]] in the deck upgrades it.
+address whatever the server serves.  See \cref{sec:upgrading}.
 
 The command runs in the directory you started [[present]] in, and [[present]]
 goes straight on to the watch without waiting for it.  Its output goes to
@@ -1882,18 +1925,18 @@ mentipy serve --store ./mentipy.json --no-lock
 }
 
 QR codes are generated when the document compiles, not when the server starts.
-If [[mentipy.base_url]] is unset, the compile-time pass uses the current LAN
+If the [[base_url]] setting is unset, the compile-time pass uses the current LAN
 address as a placeholder.  Then [[mentipy serve]] resolves the address it will
 actually serve, rewrites the remembered QR images, and tells the lecturer to
 recompile the slides so the PDF embeds the new codes.  If the public endpoint
-is fronted by HTTPS, [[mentipy.public_base_url]] can override the derived URL so
-the regenerated QR codes point at the externally visible address.
+is fronted by HTTPS, the [[public_base_url]] setting can override the derived
+URL so the regenerated QR codes point at the externally visible address.
 
 That recompile keeps the address even when PythonTeX reruns the render helper,
 say after an edit to a prompt.  While it runs, the server leaves the address it
 serves in [[mentipy-obj/.served-base-url]], beside the QR codes, and a build
-without an explicit [[base_url]] uses that before [[mentipy.base_url]].  So the
-workflow for any lecture is to start the server and then compile while it runs,
+without an explicit [[base_url]] uses that before the [[base_url]] setting.  So
+the workflow for any lecture is to start the server and then compile while it runs,
 in any network, without changing the configuration:
 \begin{verbatim}
 mentipy present --public upnp
@@ -2001,10 +2044,11 @@ repository.
 
 Answers recorded by an older version stay in [[mentipy.json]] and are read from there,
 so such a store needs nothing done to it.  An older Mentipy cannot read the log, so
-upgrade it everywhere, the [[.venv]] of each deck included.  On a newer store an older
-[[mentipy serve]], [[view]] and [[watch]] show none of the answers in the log, so
-[[Responses: 0]] on a new store, and an older [[mentipy export]] writes only a CSV
-header, which overwrites a good export if sent to the same file.  No answer is harmed:
+upgrade it everywhere, the [[.venv]] of each deck included (\cref{sec:upgrading}).  On
+a newer store an older [[mentipy serve]], [[view]] and [[watch]] show none of the
+answers in the log, so [[Responses: 0]] on a new store, and an older [[mentipy export]]
+writes an empty list or only a CSV header, which overwrites a good export if sent to
+the same file.  No answer is harmed:
 what an older [[serve]] records goes to [[mentipy.json]], and the new version reads both.
 
 If a build was stopped with Ctrl-Z and goes on later, it writes back the store as it
@@ -2035,7 +2079,7 @@ English still answers in Swedish.  A deck that says nothing uses the
 configured default, then English:
 
 \begin{minted}{text}
-mentipy config mentipy.locale --set sv
+mentipy config locale --set sv
 \end{minted}
 
 Only a language someone chose, by the keyword or the configured

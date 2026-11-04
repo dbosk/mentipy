@@ -132,10 +132,12 @@ def test_install_package_uses_the_venv_python(monkeypatch, tmp_path):
 \section{Generating activation commands}
 
 The activation output is a shell snippet rather than a shell script file.  That
-keeps [[mentipy activate]] easy to compose with [[eval $(mentipy activate)]]
+keeps [[mentipy activate]] easy to compose with [[eval "$(mentipy activate)"]]
 and avoids assuming that users want the standard activation script's prompt
-customisation.  We emit absolute paths and POSIX shell quoting so the result is
-safe even when the virtual environment lives under a directory with spaces.
+customisation.  The quotes are needed: the snippet has several lines, and an
+unquoted substitution joins them into one, which the shell rejects.  We emit
+absolute paths and POSIX shell quoting so the result is safe even when the
+virtual environment lives under a directory with spaces.
 
 The [[PATH]] update is guarded by a [[case]] check so that repeated
 activation in the same shell is a no-op rather than an accumulator.  The
