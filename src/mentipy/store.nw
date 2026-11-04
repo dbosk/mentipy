@@ -1705,15 +1705,8 @@ step back from a repeat with a record cannot fail unless the store was
 rewritten since, and the walk reads such a store by the serial rule rather
 than stopping there.  A continued render leaves no record, so its cycle
 stays out of reach.  A simulation of random histories, with decks that
-repeat questions, found the walk and the older version disagreeing after 7
-of about 2200 older builds.  A version with links but no record,
-0.17 say, is another case the checks cannot see.  It writes correct links
-and serials and copies the record, which goes stale without a trace when
-that version builds a different deck that asks the same question again at
-the same position: over X, Y, A, B, C, A a build of Q, R, A, B, C, A makes
-the walk show X, Y, B, C, A, the questions of the build before.  Only the
-index and the links are affected, and the next build repairs it.  When a
-check fails, the serial rule is exactly what the older version shows
+repeat questions, found the walk and the older version disagreeing after 2
+of about 1100 older builds.  When a check fails, the serial rule is exactly what the older version shows
 itself.  The next PythonTeX build, or a render-built deck that starts
 with [[--new-run]], writes links that agree again, because its chain
 starts at a [[null]] of its own.  A continued render does not: it links
@@ -1722,6 +1715,31 @@ place, and where their serials happen to agree the walk follows them.
 After a render-built deck A, B, F, E, C, a 0.16 build of A, C, B and
 continued renders of D and A, the walk shows B, D and A, where 0.16
 shows C, B, D and A.
+
+A version with links but no record, 0.17 and 0.18, gets past both checks.
+It writes correct links and positions as serials, and copies the record,
+so a place in the record can agree with the serials although it describes
+the build before: over X, Y, A, B, C, A, a build of Q, R, A, B, C, A leaves
+A's record saying that A followed Y at serial~3, and the walk would show X,
+Y, B, C, A.  The store's order gives that away.  Every version pops a
+registered question and appends it, so the questions of a true run stand
+at the end of the store, in the order of the run, whichever process
+registered them; here Q and R stand between Y and B.  So a live deck with
+a record among it must be a suffix of the store's order, and otherwise the
+store is read by the serial rule, which here gives B, C and A as 0.17
+does.  The check is limited to a deck with a record because that is the
+only thing it has to catch, and a store without one should read as it did.
+It leaves a record that happens to be true alone: a build of Z, Y, A, B,
+C, A really has Y before A.  The same simulation had such a version build
+about 1100 times, and twice the fall-back to the serials let in a question
+outside its deck, an orphan whose serial happened to continue.  The next
+build repairs that.
+
+The walk also reads a question's entry before its record.  Where a build
+by that version gave the entry the same serial as a place in the old
+record, the entry is what it wrote and the record is what it copied, and
+reading the record first would show the old deck or fall back to the
+serials without need.
 
 The head check is limited to a chain that ends at a [[null]] on
 purpose.  A chain that ends at a repeat has a head that is not its run's
@@ -1780,6 +1798,11 @@ def _live_hashes(data: dict[str, Any]) -> list[str]:
         return _live_hashes_by_serials(questions)
 
     live.reverse()
+    if (
+        any(EARLIER_REGISTRATIONS_KEY in questions[each] for each in live)
+        and list(questions)[-len(live) :] != live
+    ):
+        return _live_hashes_by_serials(questions)
     return live
 
 
@@ -2433,6 +2456,29 @@ def test_a_failed_write_is_not_a_place_in_the_run(tmp_path):
     assert EARLIER_REGISTRATIONS_KEY not in entry
 @
 
+The memory can also hold a question that has left the store while the question
+after it stayed, when the file was edited between two code blocks.  There is
+nothing to keep then, so the question is simply new.
+
+<<test functions>>=
+def test_a_remembered_question_gone_from_the_store_is_not_a_repeat(tmp_path):
+    path = tmp_path / "mentipy.json"
+    q1, q2 = _deck("Q1", "Q2")
+    store = Store(path, min_prefix=4)
+    _start_registration_run(store)
+    store.register(q1)
+    store.register(q2)
+    data = json.loads(path.read_text())
+    del data["questions"][question_hash(q1)]
+    path.write_text(json.dumps(data, indent=2) + "\n")
+
+    store.register(q1)
+
+    entry = json.loads(path.read_text())["questions"][question_hash(q1)]
+    assert EARLIER_REGISTRATIONS_KEY not in entry
+    assert entry[REGISTERED_AFTER_KEY] == question_hash(q2)
+@
+
 The record is data in a file people edit, like the links.  A value that cannot
 be read is no record, a place with a link to nowhere ends the walk there, and a
 place claiming to start a run with a serial above one fails the head check, as
@@ -2449,7 +2495,14 @@ a [[null]] on an entry does.
         ([{REGISTERED_AFTER_KEY: "f" * 64, REGISTRATION_SERIAL_KEY: 2}], "BA"),
         ([{REGISTERED_AFTER_KEY: None, REGISTRATION_SERIAL_KEY: 2}], "BA"),
     ],
-    ids=["number", "text", "list of text", "no serial", "dangling", "stale head"],
+    ids=[
+        "number",
+        "text",
+        "list of text",
+        "no serial",
+        "dangling",
+        "stale head",
+    ],
 )
 def test_a_damaged_record_cannot_break_the_walk(tmp_path, record, live):
     path = tmp_path / "mentipy.json"
@@ -2656,6 +2709,95 @@ def test_an_older_writer_over_a_repeating_deck_is_read_by_the_serials(
         data["questions"][question_hash(OpenQuestion("A"))]
     )
     assert _live_sequence(store) == (_live_hashes_by_serials(data["questions"]))
+@
+
+A version with links but no record, 0.17 and 0.18, is harder to catch.  Its
+serials are positions in the run, like ours, so a place in the copied record
+can agree with them although it describes the build before.  The helper does
+to the file what 0.17's [[register]] did: a link and a serial for each question,
+in one run, with the other keys kept, the record included.
+
+Each row reads as a deck built here, a deck built by that version over it, and
+the sequence to read.  In the first row the stale record says that A followed
+Y, and the serials agree, so the walk reaches the questions of the build before;
+only the store's order gives that away.  In the next two the record happens to
+be true, because that deck really has Y there, and the walk may keep it.  The
+last two stand for the entry being read before the record.  With both at serial
+3, the record would lead to X and Y again; and where the record's target does
+not agree, falling back to the serials would bring in W, the first question of
+the build before, which that version's own walk leaves out because it stops at
+the repeat of X.
+
+<<test functions>>=
+def _as_rebuilt_by_0_17(path, texts):
+    data = json.loads(path.read_text())
+    questions = data["questions"]
+    previous, serial = None, 0
+    for text in texts:
+        question = OpenQuestion(text)
+        full_hash = question_hash(question)
+        entry = questions.pop(full_hash, None)
+        if entry is None:
+            entry = {**question.to_dict(), "url_prefix": full_hash[:8]}
+            data["answers"][full_hash] = []
+        serial += 1
+        entry[REGISTRATION_SERIAL_KEY] = serial
+        entry[REGISTERED_AFTER_KEY] = previous
+        questions[full_hash] = entry
+        previous = full_hash
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
+@pytest.mark.parametrize(
+    "built, old, live",
+    [
+        ("XYABCA", "QRABCA", "BCA"),
+        ("XYABCA", "ZYABCA", "ZYBCA"),
+        ("XYABCA", "QYABCA", "QYBCA"),
+        ("XYABCA", "QRABC", "QRABC"),
+        ("WXYACA", "XYXAC", "YXAC"),
+    ],
+)
+def test_a_stale_record_under_links_of_an_older_writer(
+    tmp_path, built, old, live
+):
+    path = tmp_path / "mentipy.json"
+    store = _build(path, _deck(*built))
+
+    _as_rebuilt_by_0_17(path, list(old))
+
+    assert EARLIER_REGISTRATIONS_KEY in (
+        json.loads(path.read_text())["questions"][
+            question_hash(OpenQuestion("A"))
+        ]
+    )
+    assert _live_sequence(store) == _hashes(_deck(*live))
+@
+
+That check reads the store's order, so it must never trip on what this version
+writes itself, however PythonTeX and renders are mixed: a registration always
+moves its question to the end, so a true run is a suffix of the store.
+
+<<test functions>>=
+RUNS_OVER_A_RECORD = {
+    "a new question rendered after": (["XABA"], ["N"], "XBAN"),
+    "two new questions rendered after": (["XABA"], ["N", "M"], "XBANM"),
+    "the last question rendered again": (["XABA"], ["A"], "XBA"),
+    "an orphan before the deck": (["PQ", "XABA"], ["N"], "XBAN"),
+    "a deck and a rendered repeat": (["XYABCA"], ["N", "X"], "YBCANX"),
+}
+
+
+@pytest.mark.parametrize("name", list(RUNS_OVER_A_RECORD))
+def test_renders_after_a_repeating_deck_keep_its_record(tmp_path, name):
+    path = tmp_path / "mentipy.json"
+    builds, renders, live = RUNS_OVER_A_RECORD[name]
+    for deck in builds:
+        _build(path, _deck(*deck))
+    for text in renders:
+        store = _render(path, OpenQuestion(text))
+
+    assert _live_sequence(store) == _hashes(_deck(*live))
 @
 
 A deck built with [[mentipy render]] is one process per question.  Each
