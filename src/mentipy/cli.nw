@@ -11437,7 +11437,9 @@ The other kinds of failure need no real terminal.  The process here is a
 stand-in, since all the function asks of one is whether it still runs, and that
 is what the test wants to fix.  The encoding is Latin-1 and the command holds a
 letter outside it, because Click rewraps an ASCII stream in UTF-8, so ASCII
-cannot fail.  A closed stream cannot take any line at all.  The platform is a
+cannot fail.  The warning line is checked by itself, as a question that is open
+prints it without the rest of the banner.  A closed stream cannot take any line
+at all.  The platform is a
 stand-in too: only Windows can show that the line leaves out a [[kill]] that
 Windows does not have.
 
@@ -11454,6 +11456,21 @@ def test_the_line_on_the_way_out_survives_a_terminal_that_cannot_show_it(
     mentipy.cli._say_if_slides_still_run(_STILL_RUNNING, "pdfpc \u03c0.pdf")
 
     assert b"pdfpc \\u03c0.pdf" in latin1.buffer.getvalue()
+
+
+def test_the_warning_line_fits_a_terminal_that_cannot_show_the_warning(
+    monkeypatch,
+):
+    latin1 = io.TextIOWrapper(io.BytesIO(), encoding="latin-1")
+    monkeypatch.setattr(sys, "stdout", latin1)
+    banner = mentipy.cli._PresentBanner([])
+    banner.handle(
+        logging.LogRecord(
+            "mentipy", logging.WARNING, "", 0, "pdfpc \u03c0.pdf", (), None
+        )
+    )
+
+    assert "pdfpc \\u03c0.pdf" in banner.warning_line()
 
 
 def test_the_line_on_the_way_out_survives_a_closed_stream(monkeypatch):
