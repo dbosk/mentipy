@@ -2675,6 +2675,32 @@ def _start_public(monkeypatch, url):
     )
 
 
+def test_a_read_only_qr_directory_does_not_stop_the_server(
+    tmp_path, monkeypatch
+):
+    _served_deck(tmp_path, monkeypatch, "auto")
+    _rebuild()
+    qr_directory = tmp_path / "mentipy-obj"
+    served = []
+    _while_serving(monkeypatch, lambda: served.append(True))
+    qr_directory.chmod(0o555)
+    try:
+        if os.access(qr_directory, os.W_OK):
+            pytest.skip("this user can write in a read-only directory")
+        result = CliRunner().invoke(
+            cli,
+            ["serve", "--host", "127.0.0.1", "--port", str(_free_port()),
+             "--store", "mentipy.json"],
+        )
+    finally:
+        qr_directory.chmod(0o755)
+
+    assert result.exit_code == 0, result.output
+    assert served == [True]
+    assert "Warning: could not write 1 QR codes" in result.output
+    assert "mentipy-obj (Permission denied)" in result.output
+
+
 def test_a_rebuild_keeps_the_public_address_of_the_server(
     tmp_path, monkeypatch
 ):

@@ -1,4 +1,5 @@
 \chapter{QR Codes}
+\label{chap:qr}
 
 The QR module is intentionally thin.  The interesting design decision happened
 earlier: we chose [[segno]] because it stays in pure Python and writes PDF files
@@ -135,8 +136,10 @@ let a later process recognise it.  That window is short, and the file is small
 and harmless.
 
 The target's symbolic links are resolved first, as [[os.replace]] would replace
-the link instead of writing through it.  Replacing does need one permission that
-writing in place did not, namely to write in the directory.
+the link instead of writing through it.  All this does need one permission that
+writing in place did not, namely to write in the directory, even when the bytes
+turn out the same.  A build then gets the error; a server start only warns,
+since that must not stop a lecture (\cref{sec:regenerating-qrs}).
 
 The route does not depend on what is written, so [[write_whole]] takes that as
 a function, and the sidecar uses it too (\cref{sec:qr-sidecar}).
@@ -871,7 +874,7 @@ def test_make_qr_sidecar_can_keep_a_relative_include_path(tmp_path):
 An image whose bytes would not change stays the same file, not merely the same
 content.  So a rebuild at the same address keeps everything about it that a new
 file would lose, and the file's number stands for those here: its group, an ACL
-and its hard links.  The tests date the file back, because two writes within one
+and its hard links.  The test dates the file back, because two writes within one
 test can share a timestamp.
 
 <<test functions>>=
