@@ -301,9 +301,12 @@ the serving port. Because QR codes are generated when the document compiles,
 slides so the PDF embeds the updated codes.
 While the server runs, builds use its address, so you can start the server and
 then compile, even after editing a question, without changing the configuration.
-An explicit `base_url=` in the deck still wins. Stopping the server with Ctrl-C
-ends this: the QR codes keep its address until PythonTeX next regenerates them,
-which then uses the configuration again.
+An explicit `base_url=` in the deck still wins. Stopping the server ends this,
+whether with Ctrl-C, a plain `kill` or by closing its terminal (on Windows, only
+Ctrl-C): the QR codes keep its address until PythonTeX next regenerates them, which
+then uses the configuration again. After `kill -9`, Ctrl-\ or a power cut, builds
+keep using the dead address, without a warning, until a server starts again or you
+remove `mentipy-obj/.served-base-url`.
 
 For public access, `mentipy serve` can expose the local server in two modes:
 
