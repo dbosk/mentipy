@@ -1233,7 +1233,11 @@ build.  It also keeps what the deck no longer asks in the chain, and so in
 the navigation and among the index's current questions: A, B, C rebuilt
 without its last question reads C, A, B; rebuilt with the last one edited
 into C2 it reads C, A, B, C2; and a new deck A, B in a store that holds last
-term's P, Q reads P, Q, A, B.  Passing [[--new-run]] to the deck's first
+term's P, Q reads P, Q, A, B.  A deck that asks a question twice loses the
+questions before its first place, with [[--new-run]] or without, because each
+render is a process of its own: in X, Y, A, B, C, A, the questions X and Y have
+no \enquote{Next $\rightarrow$} link and are listed as old.  Passing
+[[--new-run]] to the deck's first
 question starts the chain afresh, so the rebuilt deck replaces the old one,
 what it no longer asks becomes an old question, and an unchanged deck leaves
 the store as it was:
@@ -1577,7 +1581,14 @@ stands.
 The current questions are in deck order with one row per question, at the
 question's last place in the deck.  So the first line is the deck's first
 question unless the deck asks that question again: X, Y, A, B, C, A lists X,
-Y, B, C, A, and A, B, C, A, D lists B first.  Building a cut-down deck or
+Y, B, C, A, and A, B, C, A, D lists B first.  \enquote{Next $\rightarrow$}
+and \enquote{$\leftarrow$ Previous} have the same one stop per question: from
+Y they go straight to B, so stepping through results pages never opens A for
+its first ask, and a respondent who scans A's QR code on that slide waits.
+When you plan a poll before and after an explanation, open its first ask from
+the index, before you show the slide.  It then stays open, so its second ask
+opens nothing new, and the toned row and [[/active]] stay on the question before
+it until the next new question opens.  Building a cut-down deck or
 rendering one question again from a terminal moves the others under the old
 heading until the next full build, as it does on the navigation row.  A
 PythonTeX build always replaces the current questions.  A deck built with
@@ -1601,7 +1612,7 @@ form appears on its own once the lecturer moves on.
 Skipping is honoured: opening the third question and then the sixth
 leaves the fourth and fifth locked, so respondents never see their
 forms.  Stepping through results pages with \enquote{Next
-$\rightarrow$} opens every question on the way, though, so the
+$\rightarrow$} opens every stop on the way, though, so the
 lecturer's navigation row on a results page also has a \enquote{Skip}
 button.  It is for the moment the lecturer looks at a question and
 decides there is no time for it: Skip locks that question again and
@@ -1738,8 +1749,15 @@ open together with the first rather than wait for their own results
 pages.  Every helper accepts a [[lock]] keyword for this: [[lock=False]]
 opens the question as soon as the question before it in the deck is
 open, while the next slide's question keeps the default [[lock=True]]
-and waits for the lecturer.  The follow-on questions typically use the
-QR-less layout from \cref{sec:layout-no-url}:
+and waits for the lecturer.  In a deck that asks a question again,
+\enquote{before it} counts each question at its last place only, so a follow-on
+question travels with the wrong one when it comes right after a first ask: in
+X, Y, A, B, C, A with [[lock=False]] on B, opening Y opens B, and Y's
+\enquote{Next $\rightarrow$} leads a respondent there, although B's slide comes
+after A's.  With [[lock=False]] on A, the first ask stays locked until C, the
+question before its last place, is open.  Open such a first ask from the index.
+The follow-on questions typically use the QR-less layout from
+\cref{sec:layout-no-url}:
 
 \begin{minted}{python}
 from mentipy.latex import mc, scale
