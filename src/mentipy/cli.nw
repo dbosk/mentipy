@@ -5610,11 +5610,14 @@ does, by a local request for its results page.  The clock is the only
 thing replaced: the sleep stub plays the lecture, one step per tick,
 and interrupts the watcher once the steps run out.
 
-The tests' clients get a long time limit, because it only keeps a bug from
-hanging the suite and says nothing about how fast the server should be.
+The tests' clients get a time limit that only keeps a bug from hanging the
+suite, so no test checks how fast a page is any more.  It has two sides.  The
+slowest page we measured took 15 seconds, on a machine with 40 busy processes.
+And a server that hangs costs the suite this limit about a hundred times over,
+so 60 seconds means under two hours where 300 would mean almost nine.
 
 <<test functions>>=
-CLIENT_LIMIT = 300
+CLIENT_LIMIT = 60
 
 
 @contextmanager
@@ -7494,9 +7497,13 @@ slower machine, so [[_drop_connections]] waits for the threads themselves.
 The server accepts connections in order and starts each thread as it accepts,
 so once a complete request made after the dropped ones has been answered,
 every dropped request that will ever get a thread has one.  We can then join
-those threads, by comparing with the threads running at the start.
+those threads, by comparing with the threads running at the start.  This wait
+covers all 40 renders rather than one page, so it has a limit of its own.
 
 <<test functions>>=
+REQUEST_THREADS_LIMIT = 300
+
+
 def _drop_connections(server, path, *, attempts=40):
     parts = urllib.parse.urlsplit(server)
     running_before = set(threading.enumerate())
@@ -7512,13 +7519,13 @@ def _drop_connections(server, path, *, attempts=40):
         )
         connection.close()
     last = http.client.HTTPConnection(
-        parts.hostname, parts.port, timeout=CLIENT_LIMIT
+        parts.hostname, parts.port, timeout=REQUEST_THREADS_LIMIT
     )
     last.request("GET", "/")
     last.getresponse().read()
     last.close()
     for thread in set(threading.enumerate()) - running_before:
-        thread.join(CLIENT_LIMIT)
+        thread.join(REQUEST_THREADS_LIMIT)
         assert not thread.is_alive()
 
 
@@ -8028,7 +8035,7 @@ def test_present_reaps_the_opener_in_another_thread(
     result, _port = _run_present(tmp_path, monkeypatch)
 
     assert result.exit_code == 0, result.output
-    assert _BrowserSpy.waited.wait(timeout=CLIENT_LIMIT)
+    assert _BrowserSpy.waited.wait(timeout=30)
     assert len(_BrowserSpy.waiters) == 1
     assert _BrowserSpy.waiters[0] is not threading.main_thread()
     assert _BrowserSpy.waiters[0].daemon

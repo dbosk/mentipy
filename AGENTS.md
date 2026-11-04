@@ -40,7 +40,7 @@
 - PythonTeX caches per-block stdout in `doc/pythontex-files-*/`. Adding or removing `pycode`/`pyblock` blocks shifts block numbering and can leave stale cached outputs bound to the wrong `\saveprintpythontex{...}` names, which usually surfaces as a "Missing $ inserted" error on an underscore identifier in some unrelated block. Run `make -C doc clean` before `make -C doc mentipy.pdf` whenever you insert or delete a Python block in `doc/mentipy.nw`.
 - `make test` depends on `compile`, so root-level tests regenerate package outputs before running `pytest`.
 - `server.shutdown()` doesn't wait for request threads (they are daemon threads), and the `mentipy` logger is global. A test whose request thread logs after the test has ended raises the next test's banner warning count. `_drop_connections` in `cli.nw` shows how to wait for the threads themselves instead of sleeping.
-- A test client's time limit (`CLIENT_LIMIT` in `cli.nw` and `server.nw`) only keeps a bug from hanging the suite, so it is long: the first word-cloud results page imports the optional package in the request thread, and a five-second client failed on that on a busy machine.
+- A test client's time limit (`CLIENT_LIMIT` in `cli.nw` and `server.nw`) only keeps a bug from hanging the suite, so no test checks page latency any more. The first word-cloud results page imports the optional package in the request thread, and a five-second client failed on that on a busy machine. It stays at 60 s because a hung server costs the suite that limit about a hundred times over.
 - Runtime state file `mentipy.json` is ignored at the repo root. Do not commit it.
 
 ## Cross-cutting touchpoints when adding a question type or helper

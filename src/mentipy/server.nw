@@ -6671,15 +6671,16 @@ def live_server_open(tmp_path):
         server.server_close()
 @
 
-The time limit of this client only keeps a bug from hanging the suite.  It says
-nothing about how fast a page should be, so it is long.  Five seconds failed on
-a busy machine: the first page with a word cloud imports the optional package
-in the request thread, which with 40 busy processes and modules not yet compiled
-took longer than that.  The import stays there, since only word clouds need it
-and it would otherwise slow every server start.
+The time limit of this client only keeps a bug from hanging the suite, so no
+test checks how fast a page is any more.  Five seconds failed on a busy machine:
+the first page with a word cloud imports the optional package in the request
+thread, which with 40 busy processes and modules not yet compiled took up to 15
+seconds.  The import stays there, since only word clouds need it and it would
+otherwise slow every server start.  The limit is no longer than that needs,
+because a server that hangs costs the suite this limit about a hundred times over.
 
 <<test functions>>=
-CLIENT_LIMIT = 300
+CLIENT_LIMIT = 60
 
 
 def _request(port, method, path, body=None, headers=None):
