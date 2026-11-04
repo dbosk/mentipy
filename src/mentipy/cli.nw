@@ -2323,9 +2323,9 @@ def activate(
 ):
     """Print shell code that activates Mentipy's local virtual environment.
 
-    Use it from your current shell with `eval $(mentipy activate)`. The printed
-    commands affect only that shell session, which is exactly what makes them
-    safe to embed in a Makefile, shell alias, or direnv rule.
+    Use it from your current shell with `eval "$(mentipy activate)"`. The
+    printed commands affect only that shell session, which is exactly what makes
+    them safe to embed in a Makefile, shell alias, or direnv rule.
     """
 
     venv_path = _configured_venv(venv)
@@ -8300,8 +8300,73 @@ def test_environment_command_help_mentions_the_virtualenv_workflow():
     result = runner.invoke(cli, ["activate", "--help"])
 
     assert result.exit_code == 0
-    assert "eval $(mentipy activate)" in result.output
+    assert 'eval "$(mentipy activate)"' in _wide_help("activate")
     assert f"config setting {VENV_CONFIG}" in _wide_help("activate")
+@
+
+The line we tell people to type has to work, so this test takes it from where
+they read it, the help and the tutorial, and runs each spelling it finds in a
+real [[bash]] and a real virtual environment.  Without the quotes the shell joins
+the multi-line script into one line, which is a syntax error, and nothing is
+activated.  The script in [[bin]] is the real command under its installed name,
+so that the test does not depend on this environment's console script.
+[[create_venv]] runs [[ensurepip]], which needs the real [[subprocess.Popen]]
+that this file replaces.
+
+<<test functions>>=
+def test_the_documented_activation_line_activates_the_environment(
+    tmp_path, monkeypatch
+):
+    if shutil.which("bash") is None:
+        pytest.skip("needs bash")
+    monkeypatch.setattr("mentipy.cli.subprocess.Popen", _REAL_POPEN)
+    active = (tmp_path / ".venv").resolve()
+    create_venv(active)
+    command = tmp_path / "bin" / "mentipy"
+    command.parent.mkdir()
+    command.write_text(
+        f"#!/bin/sh\nexec {shlex.quote(sys.executable)}"
+        ' -c "from mentipy.cli import main; main()" "$@"\n'
+    )
+    command.chmod(0o755)
+    tutorial = mentipy.cli._tutorial_dir() / TUTORIAL_FILENAMES[0]
+    lines = set(
+        re.findall(
+            r'eval "?\$\(mentipy activate\)"?',
+            _wide_help("activate") + tutorial.read_text(),
+        )
+    )
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name != "VIRTUAL_ENV"
+    }
+    environment["PATH"] = f"{command.parent}{os.pathsep}{os.environ['PATH']}"
+    environment["MENTIPY_CONFIG"] = str(tmp_path / "config.json")
+
+    assert lines
+    for line in lines:
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"{line}\n"
+                'printf "%s\\n" "$VIRTUAL_ENV"\n'
+                "command -v python3\n"
+                "python3 -c 'import sys; print(sys.prefix)'\n",
+            ],
+            cwd=tmp_path,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.stderr == "", line
+        assert result.stdout.splitlines() == [
+            str(active),
+            str(active / "bin" / "python3"),
+            str(active),
+        ], line
 @
 
 The behaviour tests stay at the CLI boundary: no real virtual environment or
