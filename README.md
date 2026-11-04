@@ -56,8 +56,8 @@ uv pip install --python .venv/bin/python mentipy
 5. Watch or export answers with `mentipy watch`, `mentipy export`, or the live
    results page.
 
-The examples below keep state in `./mentipy.json` and write QR artifacts in
-`mentipy-obj/`.
+The examples below keep the questions in `./mentipy.json`, the answers beside it
+in `./mentipy-answers.jsonl`, and write QR artifacts in `mentipy-obj/`.
 
 ## Authoring a Poll
 
@@ -256,6 +256,49 @@ the remote SSH server must allow the forwarded port to be reached publicly.
 The polling server is intentionally simple. Anyone with the URL can submit
 answers, and with `--results` they can view the live tally. Treat a public poll
 URL like a shared room link, not like a private admin interface.
+
+## Where the Answers Are
+
+The answers go in a log beside the store, named after it: `mentipy.json` gets
+`mentipy-answers.jsonl`, one answer per line. Nothing ever rewrites the log, so
+a build running during a lecture cannot lose an answer, whichever Mentipy the
+build uses, and a stopped build cannot delay one. The server thanks a student
+only after the answer was sent to the disk. A server that cannot write the log
+does not start, and if writing fails during a lecture the student is told the
+answer was not saved and to tell you. To move a store to another machine,
+copy the store, its log and `mentipy-images/`. To start a deck over, delete the
+store and its log: with the log left behind, a question registered again gets
+its old answers back.
+
+The names of the log and the images directory follow the store's, so rename them
+together: `lecture1.json` needs `lecture1-answers.jsonl` and `lecture1-images/`.
+With only the store renamed, it shows none of the answers in the old log, with no
+warning, and the next answer starts a second log. Moving the log back to its
+name recovers them, though the two logs have to be joined by hand.
+
+The log holds what students wrote, so decide what git does with it:
+
+- A repository that ignores its store should ignore the log too: add
+  `mentipy-answers.jsonl` to `.gitignore`. `mentipy serve` and `mentipy present`
+  warn when git ignores the store but not the log, since `git add .` would
+  otherwise commit the answers.
+- A repository that commits its store to keep the answers now commits two files:
+  `git add mentipy-answers.jsonl`. Until then `git commit -a` leaves the answers
+  out and `git clean -fd` deletes the only copy, so `mentipy serve` and
+  `mentipy present` warn at the start when git tracks the store but not the log.
+  The log is well suited to being committed, as a lecture shows up as added lines
+  and the store's bytes no longer change with the answers. Set
+  `mentipy-answers.jsonl merge=union` in `.gitattributes` so that answers added on
+  two branches merge without a conflict. That line covers only the default name:
+  a store called `lecture1.json` needs its own, or `*-answers.jsonl merge=union`.
+
+Answers recorded by an older version stay in `mentipy.json` and are read from there.
+An older Mentipy cannot read the log, so upgrade it everywhere, the `.venv` of each
+deck included. On a newer store an older `mentipy serve`, `view` and `watch` show
+none of the answers in the log, so `Responses: 0` on a new store, and an older
+`mentipy export` writes only a CSV header, which overwrites a good export if sent
+to the same file. No answer is harmed: what an older `serve` records goes in
+`mentipy.json`, and the new version reads both.
 
 ## Discovering Commands
 

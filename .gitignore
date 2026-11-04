@@ -110,6 +110,7 @@ ipython_config.py
 
 # mentipy runtime state
 mentipy.json
+mentipy-answers.jsonl
 mentipy-images/
 mentipy-obj/
 
