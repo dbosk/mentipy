@@ -56,7 +56,9 @@ converts that section. So a deck that relied on a configured address gets the LA
 address instead, without a warning, until the value is set again.
 `mentipy config mentipy` lists the old values; set the ones you still want under
 their new names. The old spelling is still accepted by the command, but it only
-writes to the old section.
+writes to the old section. The reverse also holds: a value once stored under a
+short name, which earlier versions ignored, now takes effect, so look through what
+`mentipy config` lists.
 
 A deck's `.venv` has its own Mentipy, which reads the same file, and the version
 there decides what a build sees: a venv older than 1.0 reads only the old section,
