@@ -419,7 +419,7 @@ def test_make_qr_blanks_the_date_whatever_the_extension_looks_like(tmp_path):
     assert b"CreationDate" not in pdf
 @
 
-\subsection{Writing the image whole}
+\subsection{A whole file, whatever the timing}
 
 Each test below holds one property of the replacement.  The first two are the
 race itself.  Its timing cannot be had on demand from real processes, so the
