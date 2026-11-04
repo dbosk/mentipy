@@ -2485,12 +2485,12 @@ Every respondent waiting for a reply holds a descriptor, so a room answering at 
 hundreds, and many systems start a process with a soft limit of 1024 or lower.  The soft
 limit is only a default, which a process may raise up to its hard limit, so the server
 does, at the start of a lecture and not on import, since a build or a library user that
-imports Mentipy has no use for it.  Other limits are capped because the hard limit can be
-huge and a program should not take more than it can use; 8192 leaves room for four times
-the largest class we have heard of.  Nothing in Mentipy calls [[select.select]], the one
-thing a descriptor over 1023 would break: the server's selector is [[poll]]-based.  A limit
-that cannot be raised, on Windows, which has no [[resource]] module, or for any other
-reason, just stays, as the server works without this up to where the limit is reached.
+imports Mentipy has no use for it.  The cap is there because the hard limit can be huge
+and the room is not: 8192 leaves room for thousands waiting at once.  Nothing the server
+runs calls [[select.select]], the one thing a descriptor over 1023 would break: its selector
+is [[poll]]-based.  A limit that cannot be raised, on Windows, which has no [[resource]]
+module, or for any other reason, just stays, as the server works without this up to where
+the limit is reached.
 
 <<constants>>=
 SERVER_DESCRIPTOR_LIMIT = 8192
