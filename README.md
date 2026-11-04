@@ -205,22 +205,50 @@ For this to pick up a new address, two things must hold:
   and the viewer shows the old ones. A deck's Makefile says so with
   `slides.pdf: $(wildcard mentipy-obj/Q-*.pdf_tex)`.
 - The Mentipy in the deck's own `.venv` must be 1.0 or newer, because that is the
-  one writing the QR codes in a build. An older one writes `mentipy.base_url`
+  one writing the QR codes in a build. An older one writes the configured address
   whatever the server serves. `mentipy init` in the deck upgrades it.
 
 `present` knows only the command's exit status. A non-zero status shows in the
 status line, under an open question only at the next question. Join the steps with
-`&&`, since `make x; pdfpc x` or a trailing `&` hides the status. A zero doesn't
-mean the build worked. The rule in the shared `makefiles/tex.mk` succeeds whenever
-a PDF exists, and one from an earlier build counts. So after a LaTeX error or an
-exception in a `pycode` block no failure shows, and the viewer opens that PDF. If
-the slides look out of date, read `slides-command.log`, where the errors are.
+`&&`, since `make x; pdfpc x` or a trailing `&` hides the status.
+
+A zero means the command finished and, with the shared `makefiles/tex.mk`, that a
+PDF exists. It doesn't mean the PDF is right. In a Beamer deck:
+
+- A fatal LaTeX error, such as a missing package or `\input`, normally shows as a
+  failure and the viewer doesn't open. **It also deletes the PDF, including a good
+  one from an earlier build, so `present` rebuilding minutes before class can leave
+  you with no slides. Keep a copy.**
+- A `pycode` exception, or an undefined macro under `-interaction=nonstopmode`,
+  shows no failure. The viewer opens a rewritten PDF whose poll frames come from an
+  earlier PythonTeX run, or are empty.
+- A missing `\documentclass` shows no failure, and the viewer opens the old PDF.
+
+While the command runs, `present` also reads this run's part of the log. At a line
+starting `Latexmk: Errors` it adds `Slides may have failed` to the status line,
+even with the viewer open. That is an extra warning keyed to one string, never a
+verdict: without it the build may still have failed. So if the slides look wrong,
+read `slides-command.log`, where the errors are and where each run has a heading
+with the time.
+
+A deck's Makefile can get `latexmk`'s real status, by setting this before its
+`include`:
+
+```make
+COMPILE.tex = ${PDFLATEX} ${LATEXFLAGS} -output-directory=${TEX_OUTDIR} $<
+```
+
+A `pycode` exception or a missing `\documentclass` then shows as a failure and the
+viewer doesn't open. The failed build still rewrites the PDF after a `pycode`
+exception, so a restart on the same port finds `make` up to date, gets a zero and
+opens that PDF, until you change a source or `touch` it. Don't add
+`.DELETE_ON_ERROR:`, which deletes both the PDF and its link.
 
 Ctrl-C leaves the command running, so the viewer stays open. The status line names
 its pid, and `present` says on its way out if it's still running. That's normal
 with a viewer open. A build that's still running is another matter: the served
-address goes when `present` stops, so that build writes `mentipy.base_url` into
-the QR codes. To recover, stop it with `kill -- -PID`, since a plain `kill` leaves
+address goes when `present` stops, so that build writes the configured address
+into the QR codes. To recover, stop it with `kill -- -PID`, since a plain `kill` leaves
 `make` running, and start `present` again with the command. `--no-slides` corrects
 the QR files but not the PDF on the screen, and starting the command again without
 stopping the old one gives two builds and two viewers.
