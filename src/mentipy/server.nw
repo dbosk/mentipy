@@ -1548,7 +1548,8 @@ assertion that a prefix is present somewhere would pass with every question
 under the wrong heading.  A deck rebuilt without two of its questions is the
 case that was hard to read.  Its dropped questions come first in the store,
 one of them even between two kept ones, and the deck's real first question
-must still be the first thing on the page.
+must still be the first thing on the page, as it is unless the deck asks that
+question again.
 
 <<test functions>>=
 def _index_sections(page):
@@ -1723,6 +1724,130 @@ def test_render_index_tones_only_the_active_row(tmp_path):
     assert toned() == [old[1]]
     assert "index-active" not in server_module._render_index(store)
     assert re.search(r"\.index-active \{ background: #", STYLE_CSS)
+@
+
+Without the gate the page has no labels, since \enquote{locked} would be false
+for every question, but the tracker follows the lecture as it does for
+[[/active]], so the tone stays.
+
+<<test functions>>=
+def test_render_index_tones_the_active_row_without_labels(tmp_path):
+    store, current, _old = _rebuilt_without_two_questions(tmp_path)
+    progress = LectureProgress()
+    progress.open(store.resolve(current[1]))
+
+    rendered = server_module._render_index(store, progress, labels=False)
+
+    assert _toned_rows(rendered) == [current[1]]
+    assert "status" not in rendered
+@
+
+Each way of building a store has its own idea of a run, so the sections are
+read back from each.  The table lists the builds, one row per build, then the
+sections the page must show.  The first group is PythonTeX, one process per
+build.  The second is [[mentipy render]] with [[--new-run]] on the deck's first
+question, which must behave the same.  The third is [[mentipy render]] without
+it, where a build continues the chain of the build before, so a store that
+holds last term's deck or an edited question reads as one deck with no headings
+at all: those rows pin that, because the manual tells lecturers about it.  The
+last row of that group is the one gap left for a repeat: each render is its own
+process and cannot know it has been asked already in this deck.
+
+<<test functions>>=
+def _pythontex_build(store, texts):
+    _start_registration_run(store)
+    for text in texts.split():
+        store.register(OpenQuestion(text))
+
+
+def _render_build(store, texts, *, new_run=False):
+    for index, text in enumerate(texts.split()):
+        _start_registration_run()
+        if new_run and index == 0:
+            store.start_registration_run()
+        else:
+            store.continue_registration_run()
+        store.register(OpenQuestion(text))
+
+
+def _new_run_build(store, texts):
+    _render_build(store, texts, new_run=True)
+
+
+INDEX_BUILDS = {
+    "pythontex once": (_pythontex_build, ["A B C"], "A B C", ""),
+    "pythontex rebuilt": (_pythontex_build, ["A B C", "A B C"], "A B C", ""),
+    "pythontex edited": (
+        _pythontex_build,
+        ["A B C", "A C2 D"],
+        "A C2 D",
+        "B C",
+    ),
+    "pythontex repeat": (_pythontex_build, ["X Y A B C A"], "X Y B C A", ""),
+    "pythontex repeat rebuilt": (
+        _pythontex_build,
+        ["X Y A B C A", "X Y A B C A"],
+        "X Y B C A",
+        "",
+    ),
+    "pythontex repeat of the first": (
+        _pythontex_build,
+        ["A B C A D"],
+        "B C A D",
+        "",
+    ),
+    "pythontex repeat over an old deck": (
+        _pythontex_build,
+        ["P Q", "X A B A"],
+        "X B A",
+        "P Q",
+    ),
+    "new-run once": (_new_run_build, ["A B C"], "A B C", ""),
+    "new-run rebuilt": (_new_run_build, ["A B C", "A B C"], "A B C", ""),
+    "new-run dropped": (_new_run_build, ["A B C", "A B"], "A B", "C"),
+    "new-run edited": (_new_run_build, ["A B C", "A B C2"], "A B C2", "C"),
+    "new-run last term": (_new_run_build, ["P Q", "A B"], "A B", "P Q"),
+    "render once": (_render_build, ["A B C"], "A B C", ""),
+    "render rebuilt": (_render_build, ["A B C", "A B C"], "A B C", ""),
+    "render last term": (_render_build, ["P Q", "A B"], "P Q A B", ""),
+    "render edited": (_render_build, ["A B C", "A B C2"], "C A B C2", ""),
+    "render dropped": (_render_build, ["A B C", "A B"], "C A B", ""),
+    "render repeat": (_render_build, ["X Y A B C A"], "B C A", "X Y"),
+}
+
+
+@pytest.mark.parametrize("name", list(INDEX_BUILDS))
+def test_render_index_reads_the_sections_of_each_way_of_building(
+    tmp_path, name
+):
+    build, decks, current, old = INDEX_BUILDS[name]
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    for deck in decks:
+        build(store, deck)
+    prefix = {row["text"]: row["url_prefix"] for row in store.all_questions()}
+
+    def prefixes(texts):
+        return [prefix[text] for text in texts.split()]
+
+    expected = [(None, prefixes(current))]
+    if old:
+        expected = [
+            ("Current questions", prefixes(current)),
+            ("Old questions", prefixes(old)),
+        ]
+    assert _index_sections(server_module._render_index(store)) == expected
+
+
+def test_render_index_mixed_build_starts_at_the_new_run(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    _render_build(store, "A B C")
+    _render_build(store, "A B C", new_run=True)
+
+    prefixes = [row["url_prefix"] for row in store.all_questions()]
+
+    assert _index_sections(server_module._render_index(store)) == [
+        (None, prefixes),
+    ]
 @
 
 The headings are catalogue strings, and every catalogue string is escaped
@@ -8064,6 +8189,32 @@ def test_next_is_plain_for_the_lecturer_and_without_lock(tmp_path):
 
     assert lecturer.getheader("Location") == f"/{second}"
     assert unlocked.getheader("Location") == f"/{second}"
+@
+
+A deck that repeats a question is the same sequence to the route as to the
+Previous and Next links: the question before the first place of the repeat
+leads to the question after it.  Pacing keeps walking the store's order, which
+is the same one here, so a [[lock=False]] question after that step still opens
+with the question before it.
+
+<<test functions>>=
+def test_next_steps_over_the_first_place_of_a_repeat(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    _start_registration_run(store)
+    warm_up = store.register(OpenQuestion("Warm-up?"))
+    store.register(OpenQuestion("Poll?"))
+    follow = store.register(OpenQuestion("Follow-up?", lock=False))
+    store.register(OpenQuestion("Poll?"))
+    client = {"remote": False}
+
+    with _running_server(store, remote=client) as port:
+        _request(port, "GET", f"/{warm_up}/results")
+        client["remote"] = True
+        response, _body = _request(port, "GET", f"/{warm_up}/next")
+        form, _body = _request(port, "GET", f"/{follow}")
+
+    assert response.getheader("Location") == f"/{follow}"
+    assert form.status == 200
 @
 
 The route answers 404 wherever the link would be missing: after the
