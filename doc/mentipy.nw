@@ -1819,7 +1819,9 @@ The answers go in a log beside the store, named after it: [[mentipy.json]] gets
 [[mentipy-answers.jsonl]], one answer per line.  Nothing ever rewrites the log, so
 you can recompile a deck during a lecture without risking an answer, whichever
 version of Mentipy the deck's environment has, and a stopped build cannot delay one.
-The server thanks a student only after the answer was sent to the disk.
+The server thanks a student only after the answer was sent to the disk.  A server that
+cannot write the log does not start, and if writing fails during a lecture the student
+is told the answer was not saved and to tell you.
 Once [[mentipy serve]] has started it does not write the store either, except that
 starting a second server marks a new session.  To move a store to another machine,
 copy the store, its log and [[mentipy-images/]].  To start a deck over, delete the

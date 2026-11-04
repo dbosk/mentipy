@@ -256,7 +256,9 @@ The answers go in a log beside the store, named after it: `mentipy.json` gets
 `mentipy-answers.jsonl`, one answer per line. Nothing ever rewrites the log, so
 a build running during a lecture cannot lose an answer, whichever Mentipy the
 build uses, and a stopped build cannot delay one. The server thanks a student
-only after the answer was sent to the disk. To move a store to another machine,
+only after the answer was sent to the disk. A server that cannot write the log
+does not start, and if writing fails during a lecture the student is told the
+answer was not saved and to tell you. To move a store to another machine,
 copy the store, its log and `mentipy-images/`. To start a deck over, delete the
 store and its log: with the log left behind, a question registered again gets
 its old answers back.

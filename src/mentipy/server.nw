@@ -5667,8 +5667,10 @@ def test_a_lecture_leaves_the_store_file_alone(tmp_path):
 An answer that could not be written must not look like one that was.  The log breaks
 for real while the server runs, in the two ways that are easy to come by, and the
 respondent has to get the page instead of a thank-you or a results page, also where
-results are public.  Once the log is mended, sending the answer again counts it once.
-A read-only file means nothing to root, so that case needs another user.
+results are public.  A client stops reading at the first response, so the redirect could
+still follow the page unseen; the test reads the connection to its end and counts the
+responses.  Once the log is mended, sending the answer again counts it once.  A read-only
+file means nothing to root, so that case needs another user.
 
 <<test functions>>=
 RUNNING_AS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
@@ -5682,6 +5684,17 @@ def _break_the_log(log, how):
         log.chmod(0o444)
     else:
         log.parent.chmod(0o500)
+
+
+def _whole_reply_to_an_answer(port, prefix):
+    body = b"value=Private+text"
+    with socket.create_connection(("127.0.0.1", port), timeout=60) as raw:
+        raw.sendall(
+            f"POST /{prefix} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n"
+            "Content-Type: application/x-www-form-urlencoded\r\n"
+            f"Content-Length: {len(body)}\r\n\r\n".encode() + body
+        )
+        return b"".join(iter(lambda: raw.recv(4096), b""))
 
 
 def _mend_the_log(log, how):
@@ -5719,6 +5732,7 @@ def test_an_answer_that_cannot_be_written_is_no_success(
         response, page = _request(
             port, "POST", f"/{prefix}", body="value=Private+text", headers=form
         )
+        whole_reply = _whole_reply_to_an_answer(port, prefix)
         _mend_the_log(store.answer_log(), how)
         retried, _ = _request(
             port, "POST", f"/{prefix}", body="value=Private+text", headers=form
@@ -5726,6 +5740,8 @@ def test_an_answer_that_cannot_be_written_is_no_success(
 
     assert response.status == HTTPStatus.INTERNAL_SERVER_ERROR
     assert response.getheader("Location") is None
+    assert whole_reply.count(b"HTTP/1.") == 1
+    assert b"Location:" not in whole_reply
     assert "Answer not saved" in page
     assert "tell your lecturer" in page
     assert str(tmp_path) not in page
