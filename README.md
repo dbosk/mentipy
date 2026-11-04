@@ -54,19 +54,37 @@ Mentipy 1.0 keeps each setting as a key of its own in the config file:
 in a `mentipy` section, written `mentipy.base_url`, and 1.0 neither reads nor
 converts that section. So a deck that relied on a configured address gets the LAN
 address instead, without a warning, until the value is set again.
-`mentipy config mentipy` lists the old values; set the ones you still want under
-their new names. The old spelling is still accepted by the command, but it only
-writes to the old section. The reverse also holds: a value once stored under a
-short name, which earlier versions ignored, now takes effect, so look through what
-`mentipy config` lists. That command shows only what the file holds, and its tab
-completion offers only keys already set, so a leftover section shows up there as
-`mentipy.base_url`; `mentipy latex` lists the keys that exist.
 
-A deck's `.venv` has its own Mentipy, which reads the same file, and the version
-there decides what a build sees: a venv older than 1.0 reads only the old section,
-and 1.0 reads only the new keys. Writing a new key leaves the old section as it
-was, so keep the section until every deck is on 1.0, which `mentipy init` in the
-deck does. `mentipy config mentipy --set ""` removes it afterwards.
+Take these steps in order, because a `venv` setting in the old section decides
+which environment step 3 reaches:
+
+1. Upgrade the tool with `uv tool upgrade mentipy`, and check that `uv tool list`
+   shows 1.0 or newer. A tool on a Python older than 3.11 stays where it is and
+   reports nothing to upgrade, since 1.0 needs 3.11; for that one, run
+   `uv tool upgrade --python 3.11 mentipy`.
+2. Run `mentipy config mentipy` to see the old values, and set the ones you still
+   want under their new names. Without an old section it prints a `KeyError`
+   traceback, as it does for any key that is not set, which is harmless.
+3. In each deck, run `mentipy init`, and check the result with
+   `.venv/bin/python -m pip show mentipy`, because `init` reports success even
+   when the version did not change: a `.venv` on a Python older than 3.11 stays on
+   0.17. Delete such a `.venv` and run `mentipy init` again. If the deck's Makefile
+   has a `MENTIPY_VERSION` line, raise it to 1.0 first, because `>=0.17` leaves a
+   venv on 0.17.
+4. Once no deck needs the old section, remove it with
+   `mentipy config mentipy --set ""`.
+
+A deck's `.venv` has its own Mentipy, which reads the same config file, so this is
+not a change to make gradually. Until step 3, that deck reads only the old section
+and misses the answers 1.0 records, as [Where the Answers Are](#where-the-answers-are)
+explains.
+
+The old spelling is still accepted by `mentipy config`, but it only writes to the
+old section. The reverse also holds: a value once stored under a short name, which
+earlier versions ignored, now takes effect, so look through what `mentipy config`
+lists. That command shows only what the file holds, and its tab completion offers
+only keys already set, so a leftover section shows up there as `mentipy.base_url`;
+`mentipy latex` lists the keys that exist.
 
 ## Basic Workflow
 
@@ -196,7 +214,7 @@ command depends on the platform: `xdg-open` on Linux and other Unix
 systems, `open` on macOS and `explorer` on Windows. Set
 `open_command` to use another (a `{url}` in it marks where the
 URL goes, otherwise it is appended; on Windows a path may be quoted),
-or to an empty value or `none` to never open the browser on that
+or to `none` to never open the browser on that
 machine. Pass `--open-with CMD` for one run, or `--no-open` to skip
 the step. Under `--public ssh` the URL with the admin token passes
 through the opener's command line, so on a shared machine use
@@ -227,7 +245,8 @@ For this to pick up a new address, two things must hold:
   `slides.pdf: $(wildcard mentipy-obj/Q-*.pdf_tex)`.
 - The Mentipy in the deck's own `.venv` must be 1.0 or newer, because that is the
   one writing the QR codes in a build. An older one writes the configured address
-  whatever the server serves. `mentipy init` in the deck upgrades it.
+  whatever the server serves. See
+  [Upgrading from a version before 1.0](#upgrading-from-a-version-before-10).
 
 A non-zero exit status of the command shows in the status line, and under an open
 question below the answers. Join the steps with `&&`, since `make x; pdfpc x` or a
@@ -402,10 +421,11 @@ The log holds what students wrote, so decide what git does with it:
 
 Answers recorded by an older version stay in `mentipy.json` and are read from there.
 An older Mentipy cannot read the log, so upgrade it everywhere, the `.venv` of each
-deck included. On a newer store an older `mentipy serve`, `view` and `watch` show
+deck included ([Upgrading from a version before 1.0](#upgrading-from-a-version-before-10)).
+On a newer store an older `mentipy serve`, `view` and `watch` show
 none of the answers in the log, so `Responses: 0` on a new store, and an older
-`mentipy export` writes only a CSV header, which overwrites a good export if sent
-to the same file. No answer is harmed: what an older `serve` records goes in
+`mentipy export` writes an empty list or only a CSV header, which overwrites a good
+export if sent to the same file. No answer is harmed: what an older `serve` records goes in
 `mentipy.json`, and the new version reads both.
 
 ## Discovering Commands

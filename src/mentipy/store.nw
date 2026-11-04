@@ -167,9 +167,11 @@ Unix systems, the freedesktop.org launcher that desktops provide;
 [[open]] on macOS, which has no [[xdg-open]]; and [[explorer]] on
 Windows, which opens a URL in the default browser.  The setting
 [[open_command]] replaces the default, for a particular browser
-or a window of its own, and an empty value or [[none]] turns the step
-off on the machine; [[present --open-with]] replaces both for one
-run.
+or a window of its own, and [[none]] turns the step off on the machine;
+[[present --open-with]] replaces both for one run.  An empty value in
+the file turns it off too, but [[mentipy config open_command --set ""]]
+does not write one: [[typerconf]] deletes the key, which brings the
+default back.
 
 The default is resolved when it is used, by one small function, rather
 than computed into a constant when the module is imported.  The table
@@ -3501,7 +3503,7 @@ then decides how it is recorded.
   target the author chose deliberately outside the checkout: a
   handout directory in a sibling repository, a printout directory, or
   a deck in its own repository whose store is a central one configured
-  with [[mentipy.store]].  A relative spelling would make every clone
+  with the [[store]] setting.  A relative spelling would make every clone
   write, and create, a directory outside itself.
 \end{description}
 

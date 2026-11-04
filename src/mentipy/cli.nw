@@ -4614,8 +4614,8 @@ shared machine a lecture under [[--public ssh]] should use
 The command comes from [[--open-with]], else from
 the [[open_command]] setting, else from the platform's default
 (\cref{sec:open-command} in the store); [[--no-open]] skips the step,
-for a lecturer whose browser is already open on the index.  An empty
-[[open_command]] setting, or [[none]], makes [[--no-open]] permanent on
+for a lecturer whose browser is already open on the index.  The
+[[open_command]] setting [[none]] makes [[--no-open]] permanent on
 a machine.  [[--open-with]] together with [[--no-open]] contradicts
 itself; [[--no-open]] wins, and a banner warning says the command was
 ignored.
@@ -8128,6 +8128,21 @@ def test_tutorial_list_starts_with_using_tutorials(tmp_path, monkeypatch):
     ]
 @
 
+A tutorial's commands are text to the program, so nothing else notices when a
+key in one stops existing.  A learner would then type a [[mentipy config]] line
+that succeeds and has no effect.  The test reads the tangled lessons, where the
+commands and the [[required_patterns]] stand together.
+
+<<test functions>>=
+def test_every_mentipy_config_in_the_tutorials_names_a_built_in_key():
+    keys = set()
+    for path in mentipy.cli._tutorial_paths():
+        keys.update(re.findall(r"mentipy config (\S+)", path.read_text()))
+
+    assert keys
+    assert keys <= set(DEFAULT_SETTINGS)
+@
+
 \section{Configuration command contracts}
 
 Configuration tests now pin two contracts: the public interface is TyperConf's
@@ -10469,9 +10484,9 @@ def test_unquoted_removes_one_matching_pair(token, unquoted):
     assert mentipy.cli._unquoted(token) == unquoted
 @
 
-An empty [[open_command]] setting, or [[none]], turns the step off for
-good on a machine, as [[--no-open]] does for one run.  [[--open-with]]
-together with [[--no-open]] is a contradiction, which [[--no-open]]
+An [[open_command]] setting of [[none]], or an empty value in the file,
+turns the step off for good on a machine, as [[--no-open]] does for one
+run.  [[--open-with]] together with [[--no-open]] is a contradiction, which [[--no-open]]
 wins, with a warning in the banner.
 
 <<test functions>>=
