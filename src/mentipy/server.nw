@@ -4003,8 +4003,9 @@ the stall is the likely symptom in a lecture hall.  We have not traced why
 only the two writes meet a reset.
 
 We measured this with simultaneous POSTs from another process against a real
-server on Linux, over loopback, at machine loads from about $2$ to about $19$.
-Counts vary between rounds, so these are the ranges seen, per round:
+server on Linux, over loopback, at machine loads from about $2$ to about $19$,
+when each answer still rewrote the store.  Counts vary between rounds, so these
+are the ranges seen, per round:
 
 \begin{description}
 \item[A backlog of $5$, $150$ POSTs in two writes] gave $66$ to $114$ resets
@@ -4023,23 +4024,26 @@ Counts vary between rounds, so these are the ranges seen, per round:
   and $6.9$ seconds respectively, and the longest queue we saw was $453$.
 \end{description}
 
-The queue stops the failures but not the waiting.  Each answer rewrites the
-store, so on a large store requests can still queue for a long time:
-[[store.record]] cost $25$ to $70$~ms at $5000$ answers and $100$ to $280$~ms at
-$20000$, and $150$ POSTs on $5000$ answers took a median of $6$ to $22$ seconds,
-depending on the load.
+The queue stops the failures, and it was the answers' own cost that made the wait
+long.  [[store.record]] now appends one line (\cref{sec:answer-log}), which costs the
+same at any size, so $150$ POSTs with $5000$ answers in the log took a median of
+$0.23$ seconds at a load of about $13$.  What remains is the old cost of reading: with
+$5000$ answers in a store's old [[answers]] key, which stay there, the same $150$
+POSTs took a median of $11.5$ seconds, since every request parses that file.
 
 The queue only holds what a client has actually started, so a long one costs
 nothing while the room is quiet.  The kernel silently lowers the value to
 [[net.core.somaxconn]], which is $4096$ on current Linux but was $128$ before
 kernel 5.4.  A machine with the lower cap holds only that many waiting
 connections, and nothing in Mentipy warns about it.  The other limit is file
-descriptors, since an accepted connection holds one while it waits for the
-store.  With [[ulimit -n 128]] and $300$ POSTs at a backlog of $1024$, a round
-lost up to $20$ answers: the server hit [[EMFILE]] opening [[mentipy.json]] and
-the clients saw [[RemoteDisconnected]].  A backlog of $5$ lost $176$ to $203$ in
-the same run, to resets.  At the usual limit of $1024$, $1200$ POSTs all
-succeeded.
+descriptors, since an accepted connection holds one while it waits.  The commands
+raise their soft limit towards the hard one at the start, up to $8192$, so this
+only bites under a low hard limit.  There it costs answers, though none is falsely
+thanked, since the server hits [[EMFILE]] opening [[mentipy.json]] or the log and
+the client gets a closed connection or the error page: with all sockets connected
+first, $300$ POSTs under a hard limit of $128$ got $164$ to $181$ answers through.
+With a hard limit of $256$, $150$ POSTs all succeeded, and with $1024$, $600$ POSTs
+lost at most $3$ in a round.
 
 <<constants>>=
 LISTEN_BACKLOG = 1024
@@ -4052,7 +4056,7 @@ that only sends many requests at once would pass or fail with the speed of the
 machine.  This test takes speed out of it: the server listens but accepts
 nothing until every client has connected and sent its answer.  All of them
 must then fit in the queue, however slow the machine is, and each answer must
-reach the store once the server starts.  Before the fix the seventh connection
+be recorded once the server starts.  Before the fix the seventh connection
 times out.  The number of clients stays below the system's cap, since no choice
 of ours can exceed that, and each one takes two file descriptors in this
 process, which keeps the number well inside the usual limit of $1024$.  Without
@@ -5884,32 +5888,41 @@ def test_an_answer_that_cannot_be_written_is_no_success(
 
 An answer that was saved must get its reply, or the respondent sends it again and it
 counts twice.  So everything the reply needs from the store is read before the answer
-is written.  A question that vanishes at that moment is simulated by failing the read,
-as the real window is too short to hit: nothing may be saved, and the retry counts once.
+is written.  A question that vanishes just after the write is simulated by failing every
+read of it from then on, as the real window is too short to hit: the reply must come all
+the same.  [[metadata]] is also read earlier on the way, so failing it from the start
+would prove nothing.
 
 <<test functions>>=
-def test_a_failure_before_the_reply_leaves_nothing_saved(tmp_path, monkeypatch):
+def test_a_saved_answer_gets_its_reply_whatever_happens_to_the_store(
+    tmp_path, monkeypatch
+):
     store = Store(tmp_path / "mentipy.json", min_prefix=4)
     prefix = store.register(OpenQuestion("Comment?"))
     full_hash = store.resolve(prefix)
-    form = {"Content-Type": "application/x-www-form-urlencoded"}
+    real_record, real_metadata = store.record, store.metadata
+    saved = []
 
-    def vanished(_full_hash):
-        raise KeyError(_full_hash)
+    def record(*arguments):
+        real_record(*arguments)
+        saved.append(True)
+
+    def metadata(wanted):
+        if saved:
+            raise KeyError(wanted)
+        return real_metadata(wanted)
+
+    monkeypatch.setattr(store, "record", record)
+    monkeypatch.setattr(store, "metadata", metadata)
 
     with _running_server(store, lock=False) as port:
-        with monkeypatch.context() as patch:
-            patch.setattr(store, "metadata", vanished)
-            with pytest.raises((http.client.HTTPException, ConnectionError)):
-                _request(
-                    port, "POST", f"/{prefix}", body="value=Twice", headers=form
-                )
-        assert not store.answer_log().exists()
-        retried, _ = _request(
-            port, "POST", f"/{prefix}", body="value=Twice", headers=form
+        response, _ = _request(
+            port, "POST", f"/{prefix}", body="value=Once",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
 
-    assert retried.status == HTTPStatus.SEE_OTHER
+    assert saved == [True]
+    assert response.status == HTTPStatus.SEE_OTHER
     assert store.results(full_hash)["total"] == 1
 @
 
