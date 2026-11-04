@@ -186,6 +186,78 @@ mentipy config mentipy.open_command --set "firefox --new-window"
 mentipy present --store ./mentipy.json --no-open
 ```
 
+The QR codes carry the server's address, so the slides are best built once the
+server is up. `--slides-command CMD`, or the setting `mentipy.slides_command`,
+runs a shell command after the server has started, in the directory you started
+`present` in. Nothing runs if neither is set. `present` doesn't wait for it, and
+its output goes to `slides-command.log` in the QR directory beside the store.
+When you restart `present` during a lecture, add `--no-slides`, or it opens a
+second viewer:
+
+```sh
+mentipy config mentipy.slides_command --set "make slides.pdf && pdfpc -w both slides.pdf"
+mentipy present --slides-command "make slides-intro.pdf && pdfpc -w both slides-intro.pdf"
+```
+
+For this to pick up a new address, two things must hold:
+
+- `make` must know the PDF depends on the QR codes, or it finds the PDF up to date
+  and the viewer shows the old ones. A deck's Makefile says so with
+  `slides.pdf: $(wildcard mentipy-obj/Q-*.pdf_tex)`.
+- The Mentipy in the deck's own `.venv` must be 1.0 or newer, because that is the
+  one writing the QR codes in a build. An older one writes the configured address
+  whatever the server serves. `mentipy init` in the deck upgrades it.
+
+A non-zero exit status of the command shows in the status line, and under an open
+question below the answers. Join the steps with `&&`, since `make x; pdfpc x` or a
+trailing `&` hides the status.
+
+A zero means the command finished and, with the shared `makefiles/tex.mk`, that a
+PDF exists. It doesn't mean the PDF is right. In a Beamer deck:
+
+- A fatal LaTeX error, such as a missing package or `\input`, normally shows as a
+  failure and the viewer doesn't open. **It also deletes the PDF, including a good
+  one from an earlier build, so `present` rebuilding minutes before class can leave
+  you with no slides. Keep a copy.**
+- A `pycode` exception, or an undefined macro under `-interaction=nonstopmode`,
+  shows no failure. The viewer opens a rewritten PDF whose poll frames come from an
+  earlier PythonTeX run, or are empty.
+- With an earlier PDF, a missing `\documentclass` shows no failure, and the viewer
+  opens that PDF.
+
+While the command runs, `present` also reads this run's part of the log. At a line
+starting `Latexmk: Errors` or `Collected error summary` it adds `Slides may have
+failed` to the status line, even with the viewer open. That is an extra warning
+keyed to those strings, never a verdict: without it the build may still have
+failed. It comes only from a build that ran, so a restart that `make` finds up to
+date gets a zero, opens the PDF and loses an earlier warning. So if the slides look
+wrong, read `slides-command.log`, where the errors are and where each run has a
+heading with the time.
+
+A deck's Makefile can get `latexmk`'s real status, by setting this before its
+`include`:
+
+```make
+COMPILE.tex = ${PDFLATEX} ${LATEXFLAGS} -output-directory=${TEX_OUTDIR} $<
+```
+
+A `pycode` exception or a missing `\documentclass` then shows as a failure and the
+viewer doesn't open. The failed build still rewrites the PDF after a `pycode`
+exception, so after an earlier good build a restart on the same port finds `make`
+up to date, gets a zero and opens that PDF, until you change a source or `touch`
+it. Without an earlier good build there is no `slides.pdf` link, so `make` runs
+again and it stays a failure, and another port rebuilds too. Don't add
+`.DELETE_ON_ERROR:`, which deletes both the PDF and its link.
+
+Ctrl-C leaves the command running, so the viewer stays open. The status line names
+its pid, and `present` says on its way out if it's still running. That's normal
+with a viewer open. A build that's still running is another matter: the served
+address goes when `present` stops, so that build writes the configured address
+into the QR codes. To recover, stop it with `kill -- -PID`, since a plain `kill` leaves
+`make` running, and start `present` again with the command. `--no-slides` corrects
+the QR files but not the PDF on the screen, and starting the command again without
+stopping the old one gives two builds and two viewers.
+
 Use `--results` when respondents should land on the live results page after
 submitting an answer:
 

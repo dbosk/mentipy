@@ -1743,6 +1743,87 @@ mentipy present --store ./mentipy.json --open-with "chromium --app={url}"
 mentipy present --store ./mentipy.json --no-open
 \end{minted}
 
+The QR codes carry the server's address, so the slides are best built once the
+server is up.  [[--slides-command]] makes that part of the same command: a shell
+command that [[present]] runs after the server has started, typically one that
+builds the slides and then opens them.  The setting [[mentipy.slides_command]]
+gives a default for your machine, and nothing runs if neither is set.
+
+\begin{minted}{text}
+mentipy config mentipy.slides_command \
+    --set "make slides.pdf && pdfpc -w both slides.pdf"
+mentipy present --slides-command \
+    "make slides-intro.pdf && pdfpc -w both slides-intro.pdf"
+\end{minted}
+
+For this to pick up a new address, [[make]] must know that the PDF depends on the
+QR codes, because a rule that only looks at the sources finds the PDF up to date
+and the viewer shows the old codes.  A deck's Makefile says so with a line such as
+\begin{minted}{make}
+slides.pdf: $(wildcard mentipy-obj/Q-*.pdf_tex)
+\end{minted}
+The Mentipy in the deck's own [[.venv]] must also be 1.0 or newer, because that
+is the one writing the QR codes in a build.  An older one writes the configured
+address whatever the server serves.  [[mentipy init]] in the deck upgrades it.
+
+The command runs in the directory you started [[present]] in, and [[present]]
+goes straight on to the watch without waiting for it.  Its output goes to
+[[slides-command.log]] in the QR directory beside the store, and the status line
+names the file.  It cannot read the terminal, so a LaTeX error ends the build
+instead of waiting at a prompt.  When you restart [[present]] during a lecture,
+add [[--no-slides]]: [[present]] cannot tell that the slides are already showing,
+and it would open a second viewer.
+
+A non-zero exit status of the command shows in the status line, and under an open
+question below the answers.  Join the steps with [[&&]] and let the command stay in the foreground of its own shell,
+since [[make x; pdfpc x]] or a trailing [[&]] hides the status.
+
+A zero means that the command finished and, with the shared [[makefiles/tex.mk]],
+that a PDF exists.  It does not mean that the PDF is right.  In a Beamer deck:
+\begin{itemize}
+\item A fatal LaTeX error, such as a missing package or [[\input]], normally shows
+  as a failure and the viewer does not open.  \textbf{It also deletes the PDF,
+  including a good one from an earlier build, so [[present]] rebuilding minutes
+  before class can leave you with no slides.  Keep a copy.}
+\item A [[pycode]] exception, or an undefined macro under
+  [[-interaction=nonstopmode]], shows no failure.  The viewer opens a rewritten PDF
+  whose poll frames come from an earlier PythonTeX run, or are empty.
+\item With an earlier PDF, a missing [[\documentclass]] shows no failure, and the
+  viewer opens that PDF.
+\end{itemize}
+
+While the command runs, [[present]] also reads this run's part of the log.  At a
+line starting [[Latexmk: Errors]] or [[Collected error summary]] it adds
+[[Slides may have failed]] to the status line, even with the viewer open.  That is
+an extra warning keyed to those strings, never a verdict: without it the build may
+still have failed.  It comes only from a build that ran, so a restart that [[make]]
+finds up to date gets a zero, opens the PDF and loses an earlier warning.  So if
+the slides look wrong, read [[slides-command.log]], where the errors are and where
+each run has a heading with the time.
+
+A deck's Makefile can get the real status of [[latexmk]], by setting this before
+its [[include]]:
+\begin{minted}{make}
+COMPILE.tex = ${PDFLATEX} ${LATEXFLAGS} -output-directory=${TEX_OUTDIR} $<
+\end{minted}
+A [[pycode]] exception or a missing [[\documentclass]] then shows as a failure and
+the viewer does not open.  The failed build still rewrites the PDF after a
+[[pycode]] exception, so after an earlier good build a restart on the same port
+finds [[make]] up to date, gets a zero and opens that PDF, until you change a
+source or [[touch]] it.  Without an earlier good build there is no [[slides.pdf]]
+link, so [[make]] runs again and it stays a failure, and another port rebuilds
+too.  Do not add [[.DELETE_ON_ERROR:]], which deletes both the PDF and its link.
+
+Ctrl-C in [[present]] does not reach the command, so quitting leaves the slides
+showing.  The status line names its pid, and [[present]] says on its way out if it
+is still running.  That is normal with a viewer open.  A build that is still
+running is another matter: the served address goes when [[present]] stops, so that
+build writes the configured address into the QR codes.  To recover, stop it with
+[[kill -- -PID]], since a plain [[kill]] leaves [[make]] running, and start
+[[present]] again with the command.  [[--no-slides]] corrects the QR files but not
+the PDF on the screen, and starting the command again without stopping the old one
+gives two builds and two viewers.
+
 Some slides carry several questions and one QR code.  Respondents reach
 the second and third question through the navigation row, so those must
 open together with the first rather than wait for their own results
