@@ -1395,9 +1395,15 @@ always has a first question to show.
 
 Which questions are live is the store's answer, so the page and the
 Previous and Next links cannot disagree.  That makes \enquote{old} mean
-\enquote{outside the latest build}.  A cut-down build, or one question
-rendered again from a terminal, moves questions under the old heading
-until the next full build, just as it takes them off the navigation row.
+\enquote{outside the live deck} (\cref{sec:live-deck}), with what that
+brings.  A cut-down build, or one question rendered again from a terminal,
+moves questions under the old heading until the next full build, just as it
+takes them off the navigation row.  A question the deck asks again has one
+row, at its last place, so a deck that repeats its first question does not
+open with it.  And a deck rebuilt with [[mentipy render]] without
+[[--new-run]] continues its old chain
+(\cref{sec:what-counts-as-a-run}), so what it no longer asks reads as
+current and the page may have no headings at all.
 
 Only the display is split.  The labels still get the store's full order,
 because that is what the gate walks
@@ -4562,8 +4568,9 @@ the slide.  A [[lock=False]] question with no predecessor is simply
 open.
 
 \enquote{Before it in the deck} means the store's full registration
-order --- the order the index page lists, orphans from earlier builds
-included --- and not the navigation row's live sequence.  The live
+order --- the order of [[Store.all_questions]], which [[mentipy list]]
+shows, orphans from earlier builds included --- and not the navigation
+row's live sequence.  The live
 sequence exists to keep dropped slides out of the
 \enquote{Next $\rightarrow$} chain; for pacing it would be a liability.
 Re-registering one existing question --- a [[mentipy render]] in a
@@ -5065,7 +5072,7 @@ cached for the server's lifetime.  A lecturer recompiles a deck while
 the server runs, which records new questions, and a cache would need
 the invalidation that the store avoids by reading its file on every
 operation.  It costs one more read of the store, beside the several
-that most requests make anyway (the index makes one, a question's form
+that most requests make anyway (the index makes two, a question's form
 five), and it is a read: a GET still writes nothing.  With the flag set
 it is never computed.
 
