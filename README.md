@@ -208,9 +208,9 @@ For this to pick up a new address, two things must hold:
   one writing the QR codes in a build. An older one writes the configured address
   whatever the server serves. `mentipy init` in the deck upgrades it.
 
-`present` knows only the command's exit status. A non-zero status shows in the
-status line, under an open question only at the next question. Join the steps with
-`&&`, since `make x; pdfpc x` or a trailing `&` hides the status.
+A non-zero exit status of the command shows in the status line, and under an open
+question below the answers. Join the steps with `&&`, since `make x; pdfpc x` or a
+trailing `&` hides the status.
 
 A zero means the command finished and, with the shared `makefiles/tex.mk`, that a
 PDF exists. It doesn't mean the PDF is right. In a Beamer deck:
@@ -222,14 +222,17 @@ PDF exists. It doesn't mean the PDF is right. In a Beamer deck:
 - A `pycode` exception, or an undefined macro under `-interaction=nonstopmode`,
   shows no failure. The viewer opens a rewritten PDF whose poll frames come from an
   earlier PythonTeX run, or are empty.
-- A missing `\documentclass` shows no failure, and the viewer opens the old PDF.
+- With an earlier PDF, a missing `\documentclass` shows no failure, and the viewer
+  opens that PDF.
 
 While the command runs, `present` also reads this run's part of the log. At a line
-starting `Latexmk: Errors` it adds `Slides may have failed` to the status line,
-even with the viewer open. That is an extra warning keyed to one string, never a
-verdict: without it the build may still have failed. So if the slides look wrong,
-read `slides-command.log`, where the errors are and where each run has a heading
-with the time.
+starting `Latexmk: Errors` or `Collected error summary` it adds `Slides may have
+failed` to the status line, even with the viewer open. That is an extra warning
+keyed to those strings, never a verdict: without it the build may still have
+failed. It comes only from a build that ran, so a restart that `make` finds up to
+date gets a zero, opens the PDF and loses an earlier warning. So if the slides look
+wrong, read `slides-command.log`, where the errors are and where each run has a
+heading with the time.
 
 A deck's Makefile can get `latexmk`'s real status, by setting this before its
 `include`:
@@ -240,8 +243,10 @@ COMPILE.tex = ${PDFLATEX} ${LATEXFLAGS} -output-directory=${TEX_OUTDIR} $<
 
 A `pycode` exception or a missing `\documentclass` then shows as a failure and the
 viewer doesn't open. The failed build still rewrites the PDF after a `pycode`
-exception, so a restart on the same port finds `make` up to date, gets a zero and
-opens that PDF, until you change a source or `touch` it. Don't add
+exception, so after an earlier good build a restart on the same port finds `make`
+up to date, gets a zero and opens that PDF, until you change a source or `touch`
+it. Without an earlier good build there is no `slides.pdf` link, so `make` runs
+again and it stays a failure, and another port rebuilds too. Don't add
 `.DELETE_ON_ERROR:`, which deletes both the PDF and its link.
 
 Ctrl-C leaves the command running, so the viewer stays open. The status line names

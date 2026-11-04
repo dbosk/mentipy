@@ -1774,9 +1774,8 @@ instead of waiting at a prompt.  When you restart [[present]] during a lecture,
 add [[--no-slides]]: [[present]] cannot tell that the slides are already showing,
 and it would open a second viewer.
 
-[[present]] knows only the command's exit status.  A non-zero status shows in the
-status line; under an open question it only shows at the next question.  Join the
-steps with [[&&]] and let the command stay in the foreground of its own shell,
+A non-zero exit status of the command shows in the status line, and under an open
+question below the answers.  Join the steps with [[&&]] and let the command stay in the foreground of its own shell,
 since [[make x; pdfpc x]] or a trailing [[&]] hides the status.
 
 A zero means that the command finished and, with the shared [[makefiles/tex.mk]],
@@ -1789,16 +1788,18 @@ that a PDF exists.  It does not mean that the PDF is right.  In a Beamer deck:
 \item A [[pycode]] exception, or an undefined macro under
   [[-interaction=nonstopmode]], shows no failure.  The viewer opens a rewritten PDF
   whose poll frames come from an earlier PythonTeX run, or are empty.
-\item A missing [[\documentclass]] shows no failure, and the viewer opens the old
-  PDF.
+\item With an earlier PDF, a missing [[\documentclass]] shows no failure, and the
+  viewer opens that PDF.
 \end{itemize}
 
 While the command runs, [[present]] also reads this run's part of the log.  At a
-line starting [[Latexmk: Errors]] it adds [[Slides may have failed]] to the status
-line, even with the viewer open.  That is an extra warning keyed to one string,
-never a verdict: without it the build may still have failed.  So if the slides
-look wrong, read [[slides-command.log]], where the errors are and where each run
-has a heading with the time.
+line starting [[Latexmk: Errors]] or [[Collected error summary]] it adds
+[[Slides may have failed]] to the status line, even with the viewer open.  That is
+an extra warning keyed to those strings, never a verdict: without it the build may
+still have failed.  It comes only from a build that ran, so a restart that [[make]]
+finds up to date gets a zero, opens the PDF and loses an earlier warning.  So if
+the slides look wrong, read [[slides-command.log]], where the errors are and where
+each run has a heading with the time.
 
 A deck's Makefile can get the real status of [[latexmk]], by setting this before
 its [[include]]:
@@ -1807,9 +1808,11 @@ COMPILE.tex = ${PDFLATEX} ${LATEXFLAGS} -output-directory=${TEX_OUTDIR} $<
 \end{minted}
 A [[pycode]] exception or a missing [[\documentclass]] then shows as a failure and
 the viewer does not open.  The failed build still rewrites the PDF after a
-[[pycode]] exception, so a restart on the same port finds [[make]] up to date,
-gets a zero and opens that PDF, until you change a source or [[touch]] it.  Do not
-add [[.DELETE_ON_ERROR:]], which deletes both the PDF and its link.
+[[pycode]] exception, so after an earlier good build a restart on the same port
+finds [[make]] up to date, gets a zero and opens that PDF, until you change a
+source or [[touch]] it.  Without an earlier good build there is no [[slides.pdf]]
+link, so [[make]] runs again and it stays a failure, and another port rebuilds
+too.  Do not add [[.DELETE_ON_ERROR:]], which deletes both the PDF and its link.
 
 Ctrl-C in [[present]] does not reach the command, so quitting leaves the slides
 showing.  The status line names its pid, and [[present]] says on its way out if it

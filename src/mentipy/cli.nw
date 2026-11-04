@@ -4793,7 +4793,8 @@ the PDF, the one from an earlier build included.  So [[present]] rebuilding just
 before a lecture can leave no slides, which the manual says plainly.  A
 [[pycode]] exception, or an undefined macro under nonstopmode, gives zero and a
 rewritten PDF, whose poll frames come from an earlier PythonTeX run or are empty.
-A missing document class gives zero and leaves the old PDF.  A deck can have the
+With an earlier PDF, a missing document class gives zero and leaves that PDF.  A
+deck can have the
 status of [[latexmk]] itself by setting [[COMPILE.tex]], which [[tex.mk]] allows.
 The manual gives the line.
 
@@ -4824,7 +4825,7 @@ SLIDES_COMMAND_OPTION = typer.Option(
 SLIDES_LOG_FILE = "slides-command.log"
 SLIDES_THREAD_NAME = "mentipy-slides-command"
 SLIDES_LOG_INTERVAL = 1.0
-LATEXMK_ERRORS = b"Latexmk: Errors"
+LATEXMK_ERRORS = (b"Latexmk: Errors", b"Collected error summary")
 SLIDES_REBUILD_ADVICE = (
     "the slides command must rebuild the slides so they embed the new images."
 )
@@ -4929,11 +4930,18 @@ poll frames, and nothing on the screen says so.  The status also comes too late,
 since a viewer holds the command open for the whole lecture.  So a second thread
 reads this run's part of the log while the command runs, and adds a line to the
 banner if a line of the log starts with what [[latexmk]] prints when it has found
-errors.  The start of the line is what counts, so that a build echoing the words
-in a message of its own does not set it off.
+errors.  It has two ways of saying so.  A failing build prints
+[[Latexmk: Errors]].  If a custom dependency, as PythonTeX is in a deck, failed in
+an earlier run and its source has not changed, [[latexmk]] calls the targets up to
+date and prints only [[Collected error summary]].  A good build prints neither.
+So a deck built broken by hand the evening before, with a zero from [[make]], still
+gets its warning on the morning of the lecture.  The start of the line is what
+counts, so that a build echoing the words in a message of its own does not set it
+off.
 
-That is one string from a program [[present]] does not otherwise know, so the line
-is an extra warning and never a verdict.  It says that the slides may have failed
+Those are two strings from a program [[present]] does not otherwise know, so the
+line is an extra warning and never a verdict.  A test holds them against the real
+[[latexmk]], where one is installed.  The line says that the slides may have failed
 and where to look.  No such line says nothing, since another build tool, or a
 later [[latexmk]] that words it differently, prints something else.  The banner
 has a line of its own for it, for the same reason as the status: a warning would
@@ -4959,7 +4967,7 @@ def _watch_slides_log(
             while True:
                 ended = finished.wait(SLIDES_LOG_INTERVAL)
                 *lines, unfinished = (unfinished + log.read()).split(b"\n")
-                unfinished = unfinished[: len(LATEXMK_ERRORS)]
+                unfinished = unfinished[: max(map(len, LATEXMK_ERRORS))]
                 if any(
                     line.startswith(LATEXMK_ERRORS)
                     for line in [*lines, unfinished]
@@ -6646,6 +6654,7 @@ class _QuestionWatcher:
         self.console = console
         self.banner = banner
         self.warnings_shown = getattr(banner, "warnings", 0)
+        self.slides_shown = _slides_news(banner)
         self.open = False
         self.last_seen: datetime | None = None
 
@@ -6678,9 +6687,14 @@ class _QuestionWatcher:
                 start=len(answers) - len(fresh) + 1,
             )
             self.last_seen = _latest_answer_time(fresh)
-        self._show_new_warnings()
+        self._show_news()
 
-    def _show_new_warnings(self):
+    def _show_news(self):
+        news = _slides_news(self.banner)
+        for line, shown in zip(news, self.slides_shown):
+            if line and line != shown:
+                typer.echo(_printable(line))
+        self.slides_shown = news
         warnings = getattr(self.banner, "warnings", 0)
         if warnings != self.warnings_shown:
             self.warnings_shown = warnings
@@ -6692,6 +6706,10 @@ class _QuestionWatcher:
     def _redraw(self, results: dict):
         _clear(self.banner)
         _render_results(results, console=self.console, pin_heat=self.pin_heat)
+
+
+def _slides_news(banner) -> tuple[str, str]:
+    return getattr(banner, "slides", ""), getattr(banner, "slides_warning", "")
 
 
 def _watcher_factory(
@@ -7371,8 +7389,10 @@ stay hidden just when the lecturer is wondering why no slides have appeared.  So
 changed banner redraws the waiting screen.  An aggregate question needs no such
 rule, as it clears on every refresh.  An open question appends instead, and
 redrawing it would print its whole transcript again for every dropped connection,
-so its news waits for the next question.  The message for a server that cannot be
-reached is left out too: it does not clear, so it would only repeat itself.
+so it appends its news as well: a new warning, or a slides line that has changed.
+A failed build matters most when the first question is an open one and the
+lecturer has no other sign of it.  The message for a server that cannot be reached
+is left out of the redraw: it does not clear, so it would only repeat itself.
 
 The messages print through [[_print_plain]] because they hold a URL or
 a path.  Rich would read an IPv6 address such as
@@ -9578,6 +9598,65 @@ def test_present_tells_the_lecturer_about_a_warning_on_an_open_question(
     assert "first" in last_frame and "second" in last_frame
 @
 
+The slides line and the warning about a failed build arrive the same way, and
+matter more.  These tests drive the watcher itself, since what they fix is what
+the banner holds at each refresh: the line must appear once when it changes, it
+must not repeat what the banner showed at the start, and the transcript must not
+be printed again.  The stream in the second is a stand-in for a terminal with a
+narrow encoding, which is a matter of how Python started.
+
+<<test functions>>=
+def _open_question_watcher(tmp_path, banner):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(OpenQuestion("Comment?"))
+    console = Console(file=io.StringIO(), width=200)
+    watcher = mentipy.cli._QuestionWatcher(
+        store,
+        store.resolve(prefix),
+        window="all",
+        pin_heat="count",
+        console=console,
+        banner=banner,
+    )
+    return watcher, console
+
+
+def test_slides_news_reaches_an_open_question_once(tmp_path, capsys):
+    banner = mentipy.cli._PresentBanner(["Serving"])
+    banner.slides = "Slides: make (pid 1)"
+    watcher, console = _open_question_watcher(tmp_path, banner)
+
+    watcher.show()
+    watcher.refresh()
+    banner.slides_warning = "Slides may have failed: see the log"
+    watcher.refresh()
+    watcher.refresh()
+    banner.slides = "Slides FAILED with status 2: make"
+    watcher.refresh()
+    watcher.refresh()
+
+    assert capsys.readouterr().out.splitlines() == [
+        "Slides may have failed: see the log",
+        "Slides FAILED with status 2: make",
+    ]
+    assert console.file.getvalue().count("Comment?") == 1
+
+
+def test_slides_news_on_an_open_question_fits_the_terminal(
+    tmp_path, monkeypatch
+):
+    latin1 = io.TextIOWrapper(io.BytesIO(), encoding="latin-1")
+    banner = mentipy.cli._PresentBanner(["Serving"])
+    watcher, _console = _open_question_watcher(tmp_path, banner)
+    watcher.show()
+    monkeypatch.setattr(sys, "stdout", latin1)
+
+    banner.slides = "Slides FAILED with status 2: pdfpc \u03c0.pdf"
+    watcher.refresh()
+
+    assert b"pdfpc \\u03c0.pdf" in latin1.buffer.getvalue()
+@
+
 A port that is taken ends both [[serve]] and [[present]] with one line
 naming the address, not a traceback, and [[present]] never starts the
 watch.  The holder is a plain listening socket, so the real server's
@@ -10949,7 +11028,6 @@ def test_a_slides_command_that_succeeds_gives_no_warning(
 
     assert result.exit_code == 0, result.output
     assert "Warnings:" not in result.stdout
-    assert mentipy.cli.LATEXMK_ERRORS.decode() not in result.stdout
     assert "may have failed" not in result.stdout
 
 
@@ -11239,11 +11317,19 @@ def _warning_after(log, *pieces, start=0):
     return banner.slides_warning
 
 
-def test_the_log_watch_finds_a_line_that_arrives_in_parts(tmp_path):
+@pytest.mark.parametrize(
+    "pieces",
+    [
+        [b"text\nLatexmk: Er", b"rors, so\n"],
+        [b"text\nCollected error summ", b"ary (may duplicate):\n"],
+    ],
+    ids=["errors", "summary"],
+)
+def test_the_log_watch_finds_a_line_that_arrives_in_parts(tmp_path, pieces):
     log = tmp_path / "log"
     log.touch()
 
-    warning = _warning_after(log, b"text\nLatexmk: Er", b"rors, so\n")
+    warning = _warning_after(log, *pieces)
 
     assert str(log) in warning
 
@@ -11300,6 +11386,103 @@ def test_the_log_watch_reads_what_came_just_before_the_end(tmp_path):
 
 def test_the_log_watch_gives_up_quietly_on_a_log_it_cannot_read(tmp_path):
     assert _warning_after(tmp_path / "gone") == ""
+
+
+def test_a_log_that_cannot_be_written_is_not_watched(tmp_path, monkeypatch):
+    log = tmp_path / "mentipy-obj" / mentipy.cli.SLIDES_LOG_FILE
+    log.parent.mkdir()
+    log.write_text(f"{LATEXMK_SAYS}\n")
+    log.chmod(0o444)
+    crashes = []
+    monkeypatch.setattr(threading, "excepthook", crashes.append)
+
+    result, _port = _present_with_slides(
+        tmp_path,
+        monkeypatch,
+        "true",
+        steps=[lambda: _until(_slides_thread_done)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "no log" in result.stdout
+    assert "may have failed" not in result.stdout
+    assert crashes == []
+@
+
+Those lines are written by hand, and a string the watch looks for is only right if
+[[latexmk]] prints it.  So the next test asks [[latexmk]] itself, on the smallest
+document that has a custom dependency, the way PythonTeX is one in a deck.  The
+dependency always fails.  The second run is the case that a test of the first
+string alone would miss: the source has not changed, so [[latexmk]] calls the
+targets up to date, repeats the old error and never prints [[Latexmk: Errors]].
+That is what a deck gets on the morning of a lecture when it was built broken the
+evening before.  The healthy document is there to show that a good build prints
+neither string, on a fresh build and on a build with nothing to do.  [[-norc]]
+keeps the lecturer's own configuration out of it.
+
+<<test functions>>=
+needs_latexmk = pytest.mark.skipif(
+    not (shutil.which("latexmk") and shutil.which("pdflatex")),
+    reason="needs latexmk and pdflatex",
+)
+
+
+def _latexmk_into(log, directory):
+    with log.open("wb") as output:
+        _REAL_POPEN(
+            ["latexmk", "-norc", "-r", "latexmkrc", "-pdf",
+             "-interaction=nonstopmode", "doc.tex"],
+            cwd=directory,
+            stdin=subprocess.DEVNULL,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+        ).wait(timeout=120)
+
+
+def _small_document(directory, *body):
+    directory.mkdir()
+    (directory / "doc.tex").write_text(
+        "\\documentclass{article}\\begin{document}Text\n"
+        + "\n".join(body)
+        + "\n\\end{document}\n"
+    )
+
+
+@needs_latexmk
+def test_the_log_watch_knows_what_latexmk_prints_about_a_failure(tmp_path):
+    deck = tmp_path / "deck"
+    _small_document(deck, "\\typeout{No file part.gen.}")
+    (deck / "latexmkrc").write_text(
+        "add_cus_dep('src', 'gen', 0, 'fails');\nsub fails { return 1; }\n"
+    )
+    (deck / "part.src").touch()
+    first, second = tmp_path / "first", tmp_path / "second"
+
+    _latexmk_into(first, deck)
+    _latexmk_into(second, deck)
+
+    assert _warning_after(first)
+    assert _warning_after(second)
+    assert b"Latexmk: Errors" in first.read_bytes()
+    assert b"Latexmk: Errors" not in second.read_bytes()
+    assert b"up-to-date" in second.read_bytes()
+
+
+@needs_latexmk
+def test_the_log_watch_stays_quiet_about_what_latexmk_prints_for_a_good_build(
+    tmp_path,
+):
+    deck = tmp_path / "deck"
+    _small_document(deck)
+    (deck / "latexmkrc").touch()
+    fresh, again = tmp_path / "fresh", tmp_path / "again"
+
+    _latexmk_into(fresh, deck)
+    _latexmk_into(again, deck)
+
+    assert b"Output written" in fresh.read_bytes()
+    assert _warning_after(fresh) == ""
+    assert _warning_after(again) == ""
 @
 
 Stopping [[present]] leaves the command running.  Mostly that is the viewer,
@@ -12247,6 +12430,7 @@ import mentipy.network
 import os
 import pty
 import select
+import shutil
 import signal
 import types
 import mentipy.server
