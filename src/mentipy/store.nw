@@ -2442,13 +2442,14 @@ a [[null]] on an entry does.
 @pytest.mark.parametrize(
     "record, live",
     [
+        (5, "BA"),
         ("nonsense", "BA"),
         (["nonsense"], "BA"),
         ([{REGISTERED_AFTER_KEY: "x"}], "BA"),
         ([{REGISTERED_AFTER_KEY: "f" * 64, REGISTRATION_SERIAL_KEY: 2}], "BA"),
         ([{REGISTERED_AFTER_KEY: None, REGISTRATION_SERIAL_KEY: 2}], "BA"),
     ],
-    ids=["text", "list of text", "no serial", "dangling", "stale head"],
+    ids=["number", "text", "list of text", "no serial", "dangling", "stale head"],
 )
 def test_a_damaged_record_cannot_break_the_walk(tmp_path, record, live):
     path = tmp_path / "mentipy.json"
