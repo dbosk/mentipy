@@ -13,6 +13,7 @@
 - Run all tests: `make test` or `make -C tests test`
 - Focused test file: `poetry run pytest tests/unit/test_<module>.py -q`
 - Regenerate one test file after changing `src/mentipy/<module>.nw`: `make -C tests unit/test_<module>.py`
+- Stress test, on request only: `make stress` runs real servers, builds (also by a real Mentipy 0.17 from PyPI) and signals for about five minutes on a real disk, and exits non-zero if an accepted answer was lost. Run it after a change to how answers or the store are written, and before a release. Choose with `make stress STRESSFLAGS="builds kill-server --seconds 10"`; `--keep` keeps its files, `--source DIR` tests another copy. It is not in `make test`, a plain `pytest` or the wheel: `tests/stress/race.nw` explains the scenarios and what counts as lost.
 - Weave the manual without building the PDF: `make -C doc mentipy.tex`
 - Build the manual PDF: `make -C doc mentipy.pdf`
 
@@ -31,6 +32,7 @@
 - `src/mentipy/qr.nw`: QR generation via `segno`.
 - `src/mentipy/sty.nw`: the companion LaTeX package `mentipy.sty` (`\mentipybasedir`, `\mentipyinput`); tangled by an explicit `mentipy.sty: sty.nw` rule (a `mentipy.sty.nw` name would clash with the facade's weave), shipped as wheel package data, installed by `mentipy sty [--install]`. Its integration test compiles a real book+deck and is skipped without `pdflatex`/`pythontex`.
 - `tests/Makefile`: auto-discovers `<<test [[module.py]]>>` chunks in `src/**/*.nw` and tangles them into `tests/unit/test_*.py`.
+- `tests/stress/race.nw`: the stress test behind `make stress`, a program and not a test module (no `test_` name, outside `src/`, not in the manual; `make -C tests/stress race.pdf` typesets it on its own).
 
 ## Non-obvious workflow constraints
 
