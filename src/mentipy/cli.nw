@@ -90,6 +90,7 @@ from mentipy.store import (
     PIN_HEAT_CONFIG,
     RESULTS_WINDOWS,
     QUESTION_ENVIRONMENT_CONFIG,
+    repeat_name,
     SHOW_URL_CONFIG,
     SLIDES_COMMAND_CONFIG,
     SSH_TUNNEL_CONFIG,
@@ -2180,7 +2181,7 @@ def _public_start_lines(
         lines.append(_format_index_hint(public_url, host, port))
     if lock:
         lines.append(_format_lock_hint(public_url))
-    return lines
+    return [*lines, *_repeat_lines(store)]
 @
 
 Most tests of the start-up lines replace [[regenerate_qrs]], because
@@ -2253,6 +2254,126 @@ def test_start_lines_carry_the_warning_about_skipped_qr_codes(
     assert lines[1].startswith("Warning: skipped 1 remembered QR codes")
     assert gone.as_posix() in banner
     assert capsys.readouterr().err == ""
+@
+
+A deck that asks a question twice gets its warning in both branches, and so in
+[[present]]'s banner, which is the only place it stays on the screen.  The line
+names one question, which is enough to find the others from the slides.
+
+<<test functions>>=
+def _repeating_store(path, texts):
+    store = Store(path, min_prefix=4)
+    _start_registration_run(store)
+    for text in texts:
+        store.register(OpenQuestion(text))
+    return store
+
+
+def _all_start_lines(store):
+    return {
+        "local": mentipy.cli._local_start_lines(
+            store, "127.0.0.1", 8080, results=True, lock=True
+        ),
+        "public": mentipy.cli._public_start_lines(
+            store, "127.0.0.1", 8080, "https://public.example",
+            results=True, lock=True, admin_token=None,
+        ),
+    }
+
+
+@pytest.mark.parametrize("branch", ["local", "public"])
+def test_start_lines_warn_about_a_question_asked_twice(tmp_path, branch):
+    store = _repeating_store(
+        tmp_path / "mentipy.json", ["X?", "Poll?", "Y?", "Poll?"]
+    )
+    prefix = store.metadata(question_hash(OpenQuestion("Poll?")))["url_prefix"]
+
+    lines = _all_start_lines(store)[branch]
+
+    [line] = [line for line in lines if "twice" in line]
+    assert line == (
+        f'Warning: this deck asks "Poll?" (prefix {prefix}) twice: '
+        "one pool of answers, one stop at its first place. "
+        'For two, make the texts differ, e.g. add "pretest" and "posttest".'
+    )
+    assert line in str(mentipy.cli._PresentBanner(lines))
+
+
+def test_start_line_counts_the_questions_asked_twice(tmp_path):
+    store = _repeating_store(
+        tmp_path / "mentipy.json", ["One?", "Two?", "Three?", "One?", "Two?"]
+    )
+
+    [line] = [
+        line
+        for line in _all_start_lines(store)["local"]
+        if "twice" in line
+    ]
+
+    assert line.startswith("Warning: this deck asks 2 questions twice")
+    assert '"One?"' in line and '"Two?"' not in line
+    assert "each has one pool of answers" in line
+    assert "pretest" in line and "posttest" in line
+
+
+def test_start_lines_do_not_warn_without_a_repeat(tmp_path):
+    store = _repeating_store(
+        tmp_path / "mentipy.json", ["One?", "One?", "Two?"]
+    )
+
+    for lines in _all_start_lines(store).values():
+        assert not any("twice" in line for line in lines)
+
+
+def test_start_lines_do_not_warn_about_a_record_the_walk_rejected(tmp_path):
+    path = tmp_path / "mentipy.json"
+    store = _repeating_store(path, list("XYABCA"))
+    _as_rebuilt_by_0_17(path, list("QRABCA"))
+
+    for lines in _all_start_lines(store).values():
+        assert not any("twice" in line for line in lines)
+@
+
+The manual tells a lecturer to look for that line when the server starts, so one
+test starts a real [[mentipy serve]], in a process of its own, and reads what the
+terminal would show.
+
+<<test functions>>=
+def test_a_real_serve_prints_the_warning_about_a_repeat(tmp_path):
+    store = _repeating_store(
+        tmp_path / "mentipy.json", ["X?", "Poll?", "Y?", "Poll?"]
+    )
+    (tmp_path / "config.json").write_text("{}")
+    port = _free_port()
+    server = _REAL_POPEN(
+        [
+            sys.executable, "-c", "from mentipy.cli import main; main()",
+            "serve", "--host", "127.0.0.1", "--port", str(port),
+            "--store", str(store.path),
+        ],
+        env={
+            **os.environ,
+            "MENTIPY_CONFIG": str(tmp_path / "config.json"),
+            "PYTHONUNBUFFERED": "1",
+        },
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    waiting = threading.Event()
+    try:
+        for _ in range(600):
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=5).close()
+                break
+            except OSError:
+                waiting.wait(0.1)
+    finally:
+        server.send_signal(signal.SIGINT)
+        output, _ = server.communicate(timeout=60)
+
+    assert 'asks "Poll?"' in output
+    assert "pretest" in output and "posttest" in output
 @
 
 \section{Command setup}
@@ -2737,7 +2858,7 @@ def _local_start_lines(
         lines.append(_format_index_hint(base, host, port))
     if lock:
         lines.append(_format_lock_hint(base))
-    return lines
+    return [*lines, *_repeat_lines(store)]
 
 
 def _address_line(address: str, count: int, *, always: bool = False) -> str:
@@ -2773,6 +2894,34 @@ def _regenerated(store: Store, base_url: str) -> tuple[int, list[str]]:
     with _logging_into(collector):
         count = regenerate_qrs(store, base_url)
     return count, collector.lines
+@
+
+The build warns when a deck asks a question twice, but the build may have been
+last week and the warning may have scrolled by, so the server says it again when
+the lecture starts (\cref{sec:a-repeat-warns}).  One line is enough to send the
+lecturer to the slides: how many, and the first by name.  It stays in
+[[present]]'s banner, whose rows the tally has to fit under, so it leaves the
+finer points to the build's warning and the manual.  It reads what the walk used,
+so a stale record that an older version copied says nothing, and neither does a
+deck built with [[mentipy render]], which has no record of a repeat.
+
+<<constants>>=
+REPEAT_LINE_ADVICE = (
+    "one pool of answers, one stop at its first place. For two, make the texts "
+    'differ, e.g. add "pretest" and "posttest".'
+)
+<<functions>>=
+def _repeat_lines(store: Store) -> list[str]:
+    rows = store.repeated_questions()
+    if not rows:
+        return []
+    name = repeat_name(rows[0]["text"], rows[0]["url_prefix"])
+    if len(rows) == 1:
+        return [f"Warning: this deck asks {name} twice: {REPEAT_LINE_ADVICE}"]
+    return [
+        f"Warning: this deck asks {len(rows)} questions twice, first {name}: "
+        f"each has {REPEAT_LINE_ADVICE}"
+    ]
 @
 
 A deck decides for itself what git does with its store, and moving the answers to a log
@@ -12646,7 +12795,7 @@ import mentipy.server
 from mentipy.server import create_server
 from mentipy.store import *
 from mentipy.store import _start_registration_run
-from test_store import _record_at
+from test_store import _as_rebuilt_by_0_17, _record_at
 
 <<test functions>>
 @

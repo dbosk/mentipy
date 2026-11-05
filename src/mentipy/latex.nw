@@ -26,6 +26,7 @@ import logging
 import os
 from pathlib import Path
 import subprocess
+import textwrap
 from typing import Iterable, Union
 import warnings
 
@@ -74,6 +75,7 @@ from mentipy.store import (
     Store,
     configured_setting,
     get_setting,
+    repeat_warning,
     resolve_path,
 )
 @
@@ -1706,7 +1708,7 @@ def question(
     chosen_catalogue = _slide_catalogue(locale)
 
     full_hash = question_hash(prompt)
-    prefix = active_store.register(prompt)
+    prefix, first_repeat = active_store.register_noting_repeat(prompt)
     url = _join_url(chosen_base, prefix)
     qr_path = chosen_dir / f"Q-{prefix}.{chosen_format}"
     written = make_qr(
@@ -1719,7 +1721,7 @@ def question(
     recorded_locale = _recorded_locale(locale)
     if recorded_locale is not None:
         active_store.remember_locale(full_hash, recorded_locale)
-    return _render_question(
+    rendered = _render_question(
         prompt,
         qr_path,
         url,
@@ -1728,6 +1730,61 @@ def question(
         layout=layout,
         catalogue=chosen_catalogue,
     )
+    if first_repeat:
+        _warn_of_a_repeat(prompt.text, prefix)
+        return _package_warning(prompt.text, prefix) + rendered
+    return rendered
+@
+
+A deck that asks a question twice is told so during the build
+(\cref{sec:a-repeat-warns}), and the build is a hard place to be heard.  A real
+build through the shared makefiles shows why it takes two channels.  The helper
+runs in PythonTeX's process, where a logged warning reaches stderr and PythonTeX
+prints it with its summary, as a \enquote{PythonTeX stderr} block in the middle
+of the hundreds of lines [[latexmk]] prints; and only when PythonTeX runs, so a
+later [[make]] that only reruns [[pdflatex]] says nothing.  What the helper
+returns stays in PythonTeX's output and is read by every [[pdflatex]] run, so a
+[[\PackageWarning]] there shows on the terminal and stays in the [[.log]] for as
+long as the deck repeats the question.  [[latexmk]]'s summary at the end does not
+list it.  The LaTeX is not stored, so neither channel touches the store's bytes
+or the question's hash, and it changes only the slide of the second ask, which
+is a block PythonTeX has just run anyway.
+
+PythonTeX's reading of stderr is the one trap.  It counts a line with
+[[Error:]] in it as an error of the session, whatever the session's exit status,
+and [[latexmk]] then stops with \enquote{Errors, so I did not complete making
+targets}.  A prompt may well ask about an [[Error:]], and the warning must not be
+what fails the build.  So that one word loses its colon in what goes to stderr;
+the name of the question is still plain.
+
+<<functions>>=
+def _warn_of_a_repeat(text: str, prefix: str):
+    message = repeat_warning(text, prefix).replace("Error:", "Error")
+    LOGGER.warning("Mentipy: %s", message)
+@
+
+The argument of [[\PackageWarning]] is read by TeX, and the prompt is the
+lecturer's and may hold anything.  [[\detokenize]] turns what it can into plain
+characters, including an active quotation mark under a language package, but it
+still needs its argument to tokenise: a percent sign comments out the closing
+brace, an odd brace closes it early or never, a hash doubles or is an illegal
+parameter inside a frame, and a backslash before the closing brace swallows it.
+Those go, along with the caret of TeX's own [[^^]] notation.  The rest of the
+sentence is ours and has none of them.  TeX breaks log lines at column 79, in
+the middle of a word if need be, and a package warning indents by 25, so we break
+the message ourselves, and the line ends in a [[%]] like the rest of the snippet.
+
+<<constants>>=
+LATEX_WARNING_UNSAFE = str.maketrans(dict.fromkeys("\\{}%#^", " "))
+LATEX_WARNING_WIDTH = 50
+<<functions>>=
+def _package_warning(text: str, prefix: str) -> str:
+    safe = repeat_warning(text, prefix).translate(LATEX_WARNING_UNSAFE)
+    lines = textwrap.wrap(safe, LATEX_WARNING_WIDTH)
+    message = r"\MessageBreak ".join(
+        rf"\detokenize{{{line}}}" for line in lines
+    )
+    return f"\\PackageWarning{{mentipy}}{{{message}}}%\n"
 @
 
 Without [[store=]], each call makes its own [[Store]] from the
@@ -1752,6 +1809,341 @@ def test_helpers_without_a_store_keep_one_navigation_chain(
     assert store.prev_question(first) is None
     assert store.next_question(first) == second
     assert store.next_question(second) == third
+@
+
+Let's verify the warning from a deck's point of view.  Every kind goes through
+[[question]], so a repeated [[mc]] warns like a repeated [[open_text]], and the
+warning says once what happens and what to do, however many times the question
+comes back.  Only the second ask carries the LaTeX warning.
+
+<<test functions>>=
+def _repeat_warnings(caplog):
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "mentipy.latex" and "twice" in record.getMessage()
+    ]
+
+
+def test_a_question_asked_twice_warns_once_in_a_run(
+    tmp_path, monkeypatch, caplog
+):
+    common = _label_test_setup(tmp_path, monkeypatch)
+    _start_registration_run(common["store"])
+
+    with caplog.at_level("WARNING", logger="mentipy.latex"):
+        slides = [
+            mc(text, ["Yes", "No"], **common)
+            for text in ("Poll?", "Other?", "Poll?", "Poll?", "Last?", "Poll?")
+        ]
+
+    [message] = _repeat_warnings(caplog)
+    prefix = common["store"].metadata(
+        question_hash(MCQuestion("Poll?", ("Yes", "No")))
+    )["url_prefix"]
+    assert '"Poll?"' in message
+    assert f"prefix {prefix}" in message
+    assert "pretest" in message and "posttest" in message
+    assert "a title or a label around it changes nothing" in message
+    assert ["PackageWarning" in slide for slide in slides] == [
+        False, False, True, False, False, False,
+    ]
+    latex = slides[2]
+    assert latex.startswith("\\PackageWarning{mentipy}{")
+    assert "Poll?" in latex and prefix in latex and "posttest" in latex
+    assert latex[latex.index("%\n") + 2:] == slides[3]
+
+
+def test_each_repeated_question_warns_for_itself(
+    tmp_path, monkeypatch, caplog
+):
+    common = _label_test_setup(tmp_path, monkeypatch)
+    _start_registration_run(common["store"])
+
+    with caplog.at_level("WARNING", logger="mentipy.latex"):
+        for text in ("One?", "Two?", "One?", "Two?"):
+            open_text(text, **common)
+
+    messages = _repeat_warnings(caplog)
+    assert len(messages) == 2
+    assert '"One?"' in messages[0] and '"Two?"' in messages[1]
+@
+
+Everything that only looks like a repeat stays quiet.  A rebuild is a new run,
+and so is the notes build of a deck, whose PythonTeX process is its own.  Two
+decks in one process keep separate runs by their stores, even when they share a
+question.  A book with one store really does ask the question twice.
+
+<<test functions>>=
+def test_a_rebuild_and_a_notes_build_do_not_warn(
+    tmp_path, monkeypatch, caplog
+):
+    common = _label_test_setup(tmp_path, monkeypatch)
+    deck = ("One?", "Two?", "Three?")
+
+    with caplog.at_level("WARNING", logger="mentipy.latex"):
+        for _build_or_notes in range(3):
+            _start_registration_run()
+            slides = [open_text(text, **common) for text in deck]
+
+    assert _repeat_warnings(caplog) == []
+    assert not any("PackageWarning" in slide for slide in slides)
+
+
+def test_a_question_registered_twice_in_a_row_does_not_warn(
+    tmp_path, monkeypatch, caplog
+):
+    common = _label_test_setup(tmp_path, monkeypatch)
+    _start_registration_run(common["store"])
+
+    with caplog.at_level("WARNING", logger="mentipy.latex"):
+        for text in ("One?", "One?", "Two?", "Two?"):
+            open_text(text, **common)
+
+    assert _repeat_warnings(caplog) == []
+
+
+def test_two_decks_in_one_process_do_not_warn_about_each_other(
+    tmp_path, monkeypatch, caplog
+):
+    common = _label_test_setup(tmp_path, monkeypatch)
+    first = {**common, "store": Store(tmp_path / "one" / "mentipy.json")}
+    second = {**common, "store": Store(tmp_path / "two" / "mentipy.json")}
+    _start_registration_run()
+
+    with caplog.at_level("WARNING", logger="mentipy.latex"):
+        open_text("Shared?", **first)
+        open_text("Shared?", **second)
+        open_text("Other?", **first)
+        open_text("Other?", **second)
+
+    assert _repeat_warnings(caplog) == []
+
+
+def test_a_book_with_one_store_warns_about_a_real_repeat(
+    tmp_path, monkeypatch, caplog
+):
+    common = _label_test_setup(tmp_path, monkeypatch)
+    book = Path(common["store"].path)
+    _start_registration_run()
+
+    with caplog.at_level("WARNING", logger="mentipy.latex"):
+        open_text("Shared?", **{**common, "store": Store(book)})
+        open_text("Other?", **{**common, "store": Store(book)})
+        open_text("Shared?", **{**common, "store": Store(book)})
+
+    assert len(_repeat_warnings(caplog)) == 1
+
+
+def test_a_render_after_a_build_does_not_warn(tmp_path, monkeypatch, caplog):
+    common = _label_test_setup(tmp_path, monkeypatch)
+    _start_registration_run()
+    open_text("One?", **common)
+    open_text("Two?", **common)
+
+    with caplog.at_level("WARNING", logger="mentipy.latex"):
+        _start_registration_run()
+        common["store"].continue_registration_run()
+        slide = open_text("One?", **common)
+
+    assert _repeat_warnings(caplog) == []
+    assert "PackageWarning" not in slide
+@
+
+The warning cannot touch what the store holds or what the question is: a rebuild
+of a repeating deck leaves the same bytes, since the LaTeX is not stored, and
+the hash has not heard of it.
+
+<<test functions>>=
+def test_the_warning_leaves_the_store_as_it_was(tmp_path, monkeypatch):
+    common = _label_test_setup(tmp_path, monkeypatch)
+    deck = ("One?", "Poll?", "Two?", "Poll?")
+
+    def build():
+        _start_registration_run()
+        return [open_text(text, **common) for text in deck]
+
+    first = build()
+    built = common["store"].path.read_bytes()
+    second = build()
+
+    assert common["store"].path.read_bytes() == built
+    assert first == second
+    assert "PackageWarning" in first[3]
+@
+
+The prompt is the lecturer's and may hold anything a question can hold, while
+the argument of [[\PackageWarning]] is read by TeX.  A percent sign would comment
+out the closing brace, a brace could close it early, a hash inside a frame is
+an illegal parameter, and a backslash at the end of one of its broken lines
+swallows the brace there.  So the LaTeX copy keeps only what is safe, and a real
+[[pdflatex]] run in a Beamer frame is the check that it does.  An active
+quotation mark, as a language package makes it, here stops the run if it is ever
+executed, so the test does not need the package.
+
+<<test functions>>=
+HARD_PROMPTS = (
+    r"100% of {x} #1 \foo ~ ^^A ` $a_b$ & \ ",
+    "}{ \\end{frame} \\",
+    'Hur "säger" man `len(xs)`? Åäö',
+    "x" * 300,
+    "two\nlines",
+    "\\ " * 30,
+)
+
+
+@pytest.mark.parametrize("prompt", HARD_PROMPTS)
+def test_the_latex_warning_keeps_only_what_tex_can_read(prompt):
+    warning = latex_module._package_warning(prompt, "abcd")
+
+    assert warning.startswith("\\PackageWarning{mentipy}{")
+    assert warning.endswith("}%\n")
+    assert warning.count("\n") == 1
+    argument = warning[: -len("%\n")]
+    for special in "%#^":
+        assert special not in argument
+    assert argument.count("{") == argument.count("}")
+    for macro in ("\\PackageWarning", "\\detokenize", "\\MessageBreak"):
+        argument = argument.replace(macro, "")
+    assert "\\" not in argument
+    assert "abcd" in warning
+
+
+@needs_pdflatex
+def test_the_latex_warning_compiles_in_a_beamer_frame(tmp_path, monkeypatch):
+    common = _label_test_setup(tmp_path, monkeypatch)
+    _start_registration_run()
+    open_text("Asked twice?", **common)
+    open_text("Between?", **common)
+    slide = open_text("Asked twice?", **common)
+    active_quote = (
+        "\\begingroup\\catcode`\\\"=\\active"
+        "\\gdef\"{\\errmessage{an active quotation mark ran}}\\endgroup\n"
+        "\\AtBeginDocument{\\catcode`\\\"=\\active}"
+    )
+
+    _compiled_text(
+        tmp_path,
+        active_quote,
+        [
+            latex_module._package_warning(prompt, "abcd")
+            for prompt in HARD_PROMPTS
+        ]
+        + [slide],
+    )
+
+    log = (tmp_path / "deck.log").read_text(errors="replace")
+    assert log.count("Package mentipy Warning") == len(HARD_PROMPTS) + 1
+    assert "pretest" in log and "posttest" in log
+    for line in log.splitlines():
+        if line.startswith(("Package mentipy", "(mentipy)")):
+            assert len(line) < 79 or "on input line" in line
+@
+
+The rest of the path is PythonTeX's: the helper runs in its process, and the
+warning has to come out of that process and out of the LaTeX run.  A real build
+of a real Beamer deck is the only way to see it.  PythonTeX collects the stderr
+of the session and prints it with its own summary, and the \LaTeX{} log gets the
+package warning from the slide.  The second document is the deck's notes, built
+into the same store as PythonTeX builds it: a process of its own, so it must
+say nothing about the first's questions, and a deck that asks nothing twice must
+say nothing at all.  A prompt with \enquote{Error:} in it is there because
+PythonTeX counts a line of stderr with that word as an error of the session, and
+a lecturer's prompt must not be able to fail the build through the warning.
+
+<<test functions>>=
+needs_pythontex = pytest.mark.skipif(
+    not (shutil.which("pdflatex") and shutil.which("pythontex")),
+    reason="needs pdflatex and pythontex",
+)
+
+DECK = r'''\documentclass{beamer}
+\usepackage{graphicx}
+\usepackage{pythontex}
+\begin{document}
+\begin{pycode}
+from mentipy.latex import open_text
+from mentipy.store import Store
+common = dict(
+    store=Store("mentipy.json", min_prefix=4),
+    qr_dir="mentipy-obj", qr_format="png",
+    base_url="http://example.test:8080",
+)
+\end{pycode}
+%s
+\end{document}
+'''
+
+
+def _deck_source(*texts):
+    return DECK % "\n".join(
+        "\\begin{frame}[fragile]\n\\begin{pycode}\n"
+        f"print(open_text({text!r}, **common))\n"
+        "\\end{pycode}\n\\end{frame}"
+        for text in texts
+    )
+
+
+def _pythontex_build(directory, name):
+    env = {**os.environ, "MENTIPY_CONFIG": str(directory / "config.json")}
+
+    def run(*command):
+        return subprocess.run(
+            command, cwd=directory, capture_output=True, text=True,
+            env=env, timeout=300,
+        )
+
+    latex = ("pdflatex", "-interaction=nonstopmode", "-halt-on-error", name)
+    assert run(*latex).returncode == 0
+    python = run(
+        "pythontex", "--interpreter", f"python:{sys.executable}", name
+    )
+    last = run(*latex)
+    assert last.returncode == 0, last.stdout[-2000:]
+    return python, Path(directory / name).with_suffix(".log").read_text(
+        errors="replace"
+    )
+
+
+@needs_pythontex
+def test_a_real_build_shows_the_warning_where_a_lecturer_reads(tmp_path):
+    (tmp_path / "config.json").write_text("{}")
+    (tmp_path / "slides.tex").write_text(
+        _deck_source("X?", "Poll?", "B?", "Poll?", "Error: why?", "Y?",
+                     "Error: why?")
+    )
+    (tmp_path / "notes.tex").write_text(
+        _deck_source("X?", "Poll?", "B?", "Error: why?", "Y?")
+    )
+    (tmp_path / "calm.tex").write_text(_deck_source("X?", "B?"))
+
+    python, log = _pythontex_build(tmp_path, "slides.tex")
+
+    assert python.returncode == 0, python.stdout[-2000:]
+    assert '"Poll?"' in python.stdout and "posttest" in python.stdout
+    assert "0 error(s)" in python.stdout
+    assert log.count("Package mentipy Warning") == 2
+    assert "Poll?" in log and "posttest" in log
+    built = (tmp_path / "mentipy.json").read_bytes()
+
+    python, log = _pythontex_build(tmp_path, "slides.tex")
+    assert python.returncode == 0
+    assert log.count("Package mentipy Warning") == 2
+    assert (tmp_path / "mentipy.json").read_bytes() == built
+
+    def poll_has_a_record():
+        data = json.loads((tmp_path / "mentipy.json").read_text())
+        return EARLIER_REGISTRATIONS_KEY in data["questions"][
+            question_hash(OpenQuestion("Poll?"))
+        ]
+
+    assert poll_has_a_record()
+    for quiet in ("notes.tex", "calm.tex"):
+        python, log = _pythontex_build(tmp_path, quiet)
+        assert python.returncode == 0
+        assert "twice" not in python.stdout
+        assert "Package mentipy Warning" not in log
+        assert not poll_has_a_record()
 @
 
 The multiple-choice wrapper exists for author convenience: slide sources should
@@ -4540,6 +4932,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import unicodedata
 
 import pytest

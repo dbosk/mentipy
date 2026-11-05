@@ -1279,7 +1279,10 @@ into C2 it reads C, A, B, C2; and a new deck A, B in a store that holds last
 term's P, Q reads P, Q, A, B.  A deck that asks a question twice loses the
 questions before its first place, with [[--new-run]] or without, because each
 render is a process of its own: in X, Y, A, B, C, A, the questions X and Y have
-no \enquote{Next $\rightarrow$} link and are listed as old.  Passing
+no \enquote{Next $\rightarrow$} link and are listed as old, and A stands last.
+Such a process cannot tell a repeat from a question rendered again from a
+terminal, so it records no repeat and nothing warns about it, unlike a PythonTeX
+build (\cref{sec:asking-before-and-after}).  Passing
 [[--new-run]] to the deck's first
 question starts the chain afresh, so the rebuilt deck replaces the old one,
 what it no longer asks becomes an old question, and an unchanged deck leaves
@@ -1622,16 +1625,12 @@ row of the active question has a toned background, in whichever section it
 stands.
 
 The current questions are in deck order with one row per question, at the
-question's last place in the deck.  So the first line is the deck's first
-question unless the deck asks that question again: X, Y, A, B, C, A lists X,
-Y, B, C, A, and A, B, C, A, D lists B first.  \enquote{Next $\rightarrow$}
-and \enquote{$\leftarrow$ Previous} have the same one stop per question: from
-Y they go straight to B, so stepping through results pages never opens A for
-its first ask, and a respondent who scans A's QR code on that slide waits.
-When you plan a poll before and after an explanation, open its first ask from
-the index, before you show the slide.  It then stays open, so its second ask
-opens nothing new, and the toned row and [[/active]] stay on the question before
-it until the next new question opens.  Building a cut-down deck or
+question's first place in the deck, so the first line is the deck's first
+question: X, Y, A, B, C, A lists X, Y, A, B, C.  \enquote{Next $\rightarrow$}
+and \enquote{$\leftarrow$ Previous} have the same one stop per question, so
+stepping through results pages opens A for its first ask and goes from C to
+whatever comes after the second.  A question asked twice is covered in
+\cref{sec:asking-before-and-after}.  Building a cut-down deck or
 rendering one question again from a terminal moves the others under the old
 heading until the next full build, as it does on the navigation row.  A
 PythonTeX build always replaces the current questions.  A deck built with
@@ -1876,10 +1875,16 @@ open, while the next slide's question keeps the default [[lock=True]]
 and waits for the lecturer.  In a deck that asks a question again,
 \enquote{before it} counts each question at its last place only, so a follow-on
 question travels with the wrong one when it comes right after a first ask: in
-X, Y, A, B, C, A with [[lock=False]] on B, opening Y opens B, and Y's
-\enquote{Next $\rightarrow$} leads a respondent there, although B's slide comes
-after A's.  With [[lock=False]] on A, the first ask stays locked until C, the
-question before its last place, is open.  Open such a first ask from the index.
+X, Y, A, B, C, A with [[lock=False]] on B, opening Y opens B, although B's slide
+comes after A's.  \enquote{Next $\rightarrow$} from Y leads to A, which waits, so
+only a respondent who has B's address reaches it early.  With [[lock=False]] on
+A, the first ask stays locked for the room until C, the question before its last
+place, is open, or until you open it by stepping to it.  With [[lock=False]] on a
+question right after the second ask, it opens too early and Next reaches it: in
+X, Y, A, B, C, A, D with [[lock=False]] on D, D opens with A's first ask, and
+\enquote{Next $\rightarrow$} from C gives a respondent D's form while you are
+still on C.  Making the two asks two
+questions (\cref{sec:asking-before-and-after}) removes all of that.
 The follow-on questions typically use the QR-less layout from
 \cref{sec:layout-no-url}:
 
@@ -2001,6 +2006,70 @@ warning, which [[mentipy present]] keeps in its banner.
   serves the poll, and recompiles when refreshed QR artifacts must be embedded
   in the document.
 }
+
+\subsection{Asking a Question Before and After}
+\label{sec:asking-before-and-after}
+
+A poll before an explanation and the same poll after it are usually two
+questions to the lecturer, but they are one to Mentipy if the prompt is the same.
+A question's identity is its prompt, so both asks share one prefix, one QR code,
+one pool of answers and one results page, and the results page shows both rounds
+together.  To get two tallies, word them differently, for example with
+\enquote{pretest} and \enquote{posttest} in the question:
+
+\begin{minted}{python}
+print(mc("Pretest: which call is tail recursive?", options))
+# ... the explanation ...
+print(mc("Posttest: which call is tail recursive?", options))
+\end{minted}
+
+Only the text counts.  An exercise title or a label around the question is not
+part of it, so two exercises that differ only there are still one question.
+
+If you do mean to ask one question twice, it has one stop, at its first place.
+That place is what a respondent meets first, and stepping through the deck opens
+it on the way.  By the second ask it is simply open, so its QR code works at
+once, and forgetting to go back to it costs nothing but the tally on the screen.
+Its second ask opens nothing new, so the toned row and [[/active]] stay on the
+question you opened last.  In X, Y, A, B, C, A, D that is C.
+
+\begin{description}
+\item[C's tally can grow] A respondent who answers the second ask and follows
+  \enquote{Next $\rightarrow$} is sent to C's form, as a slow respondent on the
+  first ask would be.  They have usually answered it already, nothing checks for
+  that, and it is the whole room at once, so the tally of C can grow by a second
+  round of answers while you discuss A.
+\item[A's QR code is the way back] A phone that followed
+  \enquote{Next $\rightarrow$} from C sits on D's waiting page during the second
+  ask.  Nothing moves it to A, so respondents need A's QR code on the slide.
+\item[Your own Next] On A's results page \enquote{Next $\rightarrow$} leads to B,
+  the stop after the first ask, not to D.  That is harmless, since B is open
+  already; step to D from C or from the index.
+\item[ [[mentipy list]] ] It shows the store's order, X, Y, B, C, A, D, where the
+  index shows X, Y, A, B, C, D, since the store keeps a question where it was last
+  registered.
+\item[ [[next=False]] ] The other flags of the last ask apply at the one stop, but
+  [[next=False]] on a repeated question is ignored: it is what a deck puts on its
+  last slide, and at the question's first place it would end the deck for you and
+  the room in the middle.  A question asked once keeps it wherever it stands.
+\end{description}
+
+Mentipy warns about such a deck, once per question and build.  In the build the
+warning is part of the output, as a \enquote{PythonTeX stderr} block when
+PythonTeX runs and as a \enquote{Package mentipy Warning} in each
+[[pdflatex]] run, so it scrolls by some way above the end of the output and only
+when the build runs at all.  [[latexmk]]'s summary does not list it.  It stays in
+the log, with its question and prefix, for
+[[grep 'Package mentipy' ltxobj/*.log]].  [[mentipy serve]] and
+[[mentipy present]] repeat it when they start, naming how many questions and the
+first of them.  A rebuild of a deck, its notes built into the same store, two
+decks with their own stores, and one question in several decks are not repeats.
+A book with one store that asks a question twice is one, and does get the
+warning.  A frame with overlays runs its code once per overlay, so two questions
+in such a frame read as asked twice; register them before the frame instead, as
+you should anyway with overlays.  A deck built with [[mentipy render]] gets no
+warning, because each render is a process of its own that cannot tell a repeat
+from a question rendered again.
 
 \subsection{Where the Answers Are}
 \label{sec:where-answers-are}
