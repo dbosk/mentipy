@@ -58,3 +58,4 @@ clean:
 	$(RM) $(TEST_MODULES)
 	$(RM) -r .pytest_cache __pycache__ unit/__pycache__
 	$(RM) -r htmlcov .coverage
+	$(MAKE) -C stress clean
