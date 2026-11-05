@@ -14,6 +14,15 @@ all: compile doc/mentipy.pdf test
 test: compile
 	${MAKE} -C tests test
 
+# Real servers, builds and signals for some minutes, only on request: not part of
+# `all` or `test`.  Pass options in STRESSFLAGS, for example
+# make stress STRESSFLAGS="builds kill-server --seconds 10"
+.PHONY: stress
+stress:
+	${MAKE} -C src/mentipy all
+	${MAKE} -C tests/stress race.py
+	poetry run python tests/stress/race.py ${STRESSFLAGS}
+
 .PHONY: install
 install: compile
 	uv tool install --force --python 3.11 .
