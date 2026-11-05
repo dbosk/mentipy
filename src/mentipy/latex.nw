@@ -100,6 +100,8 @@ LATEX_ESCAPES = {
     "~": r"\textasciitilde{}",
     "^": r"\textasciicircum{}",
     '"': r'\string"',
+    "<": r"\textless{}",
+    ">": r"\textgreater{}",
 }
 
 DEFAULT_LAYOUT = "slide"
@@ -119,6 +121,12 @@ sets an umlaut, so a quoted word in a prompt would lose its quotes;
 [[\string"]] prints the character itself under any language.
 [[\textquotedbl]] would be the obvious spelling, but it fails outright
 under the default OT1 encoding.
+
+Less-than and greater-than are not special to \LaTeX{} either, but that same
+encoding has inverted punctuation in their places in the text fonts, so that
+[[x < 3]] prints as \enquote{x ¡ 3} on a Beamer deck that has not loaded T1,
+with no warning.  [[\textless]] and [[\textgreater]] print the characters under
+either encoding, and a real build checks both.
 
 <<functions>>=
 def _escape_latex(text: str) -> str:
@@ -564,7 +572,10 @@ into guillemets and [[,,]] into a low quote, while [[']] becomes a curly
 quote under any encoding and runs of spaces collapse.  A code piece
 therefore breaks every ligature with an empty group, spells the
 apostrophe as [[\textquotesingle]] and keeps each space with a control
-space, so the slide shows the characters the phone shows.
+space, so the slide shows the characters the phone shows.  Less-than and
+greater-than keep their own characters in code, with the group for the
+ligatures, rather than the spelled-out form of the text: the typewriter font
+has them under both encodings.
 
 <<constants>>=
 LATEX_CODE_ESCAPES = {
@@ -594,26 +605,32 @@ and they get the same break.
 The start of the text has the same trouble as the break, and it is worse.  An
 option comes right after [[\item]], and a prompt in an environment right after
 [[\begin{exercise}]], and both read on for an optional argument in square
-brackets, as Beamer's versions do for an overlay in angle brackets; Beamer's
-[[\item]] looks for one after its label too, which catches a scale's labels.  To
-them an option [[[1, 2]]] is a label that takes the brackets away, and [[<class
-'int'>]] is an overlay that takes the whole option off the slide, with no
-error, while [[[1, 2]] without its end and [[<3]] stop the build.  A programming
-course writes such options all the time.  An empty group in front ends the
-looking ahead, and it typesets nothing.
+brackets.  To them an option [[[1, 2]]] is a label that takes the brackets away,
+while [[[1, 2]] without its end stops the build.  A programming course writes
+such options all the time.  An empty group in front ends the looking ahead, and
+it typesets nothing.
 
 Only text that starts that way gets it, spaces and line breaks before the
-bracket included, since a macro that looks ahead skips those.  This is the one
-exception to the rule that text without a blank line keeps its bytes on the
-slide, and those bytes never did what the author wrote.  The stored text and the
-hash do not change. The group goes in front of every such text rather than only
-where a macro is waiting, which keeps a single rule in one place: in the
-argument of [[\textbf]] it does no harm, and a deck may well put a helper's
-result after a macro of its own.
+bracket included, since a macro that looks ahead skips those.  The group goes in
+front of every such text rather than only where a macro is waiting, which keeps
+a single rule in one place: in the argument of [[\textbf]] it does no harm, and
+a deck may well put a helper's result after a macro of its own.
+
+Beamer's versions of those macros also read on for an overlay in angle
+brackets, even after an item's label, which catches a scale's labels.  There an
+option [[<3]] stopped the build, and one that closed its bracket took itself
+off the slide with no error.  No group is needed for that, though: in text the
+character is spelled [[\textless]] by now, which no macro takes for an overlay,
+and a code span starts with its own [[\texttt]].
+
+So besides the blank lines, the slide's bytes change for text that holds a
+less-than or a greater-than and for text that starts with a square bracket, and
+those bytes never did what the author wrote.  The stored text and the hash do
+not change.
 
 <<constants>>=
 LATEX_LINE_BREAK = r"\\{}"
-LATEX_READ_AHEAD = ("[", "<")
+LATEX_OPTIONAL_ARGUMENT = "["
 <<functions>>=
 def _render_inline(text: str) -> str:
     rendered = "".join(
@@ -631,14 +648,14 @@ def _render_plain(text: str) -> str:
 
 def _finished_text(rendered: str) -> str:
     broken = rendered.replace(BLANK_LINE, LATEX_LINE_BREAK)
-    if broken.lstrip().startswith(LATEX_READ_AHEAD):
+    if broken.lstrip().startswith(LATEX_OPTIONAL_ARGUMENT):
         return "{}" + broken
     return broken
 @
 
 Let's pin both halves of the promise about blank lines: what one turns into, in
-text and in code, and that text without one keeps the exact bytes it had
-before, single line breaks and all.
+text and in code, and that text without one keeps the bytes it had, single line
+breaks and all.
 
 <<test functions>>=
 @pytest.mark.parametrize(
@@ -681,10 +698,11 @@ def test_text_without_a_blank_line_renders_as_before(text, expected):
     assert latex_module._render_inline(text) == expected
 @
 
-The guard goes in front of text that starts with what a macro would read, and
-nowhere else.  Spaces and line breaks do not hide such a start, since a macro
-that looks ahead skips them; and a code span is safe, since it starts with its
-own [[\texttt]].
+The guard goes in front of text that starts with a square bracket, and nowhere
+else.  Spaces and line breaks do not hide such a start, since a macro that looks
+ahead skips them; and a code span is safe, since it starts with its own
+[[\texttt]].  Less-than and greater-than are spelled out in text and stay
+themselves in code, where they are no problem.
 
 <<test functions>>=
 @pytest.mark.parametrize(
@@ -692,13 +710,11 @@ own [[\texttt]].
     [
         ("[1, 2]", "{}[1, 2]"),
         ("[1, 2", "{}[1, 2"),
-        ("<class 'int'>", "{}<class 'int'>"),
-        ("<3", "{}<3"),
         (" [x", "{} [x"),
-        ("\t<x", "{}\t<x"),
+        ("\t[x", "{}\t[x"),
         ("\n[x", "{}\n[x"),
         ("\n\n[x", "{}[x"),
-        ("[x\n\n<y", "{}[x\\\\{}<y"),
+        ("[x\n\n[y", "{}[x\\\\{}[y"),
         ("[`x`", "{}[\\texttt{x}"),
     ],
 )
@@ -714,15 +730,36 @@ def test_text_a_macro_would_read_gets_a_guard(text, expected):
         ("", ""),
         ("  ", "  "),
         ("a [x", "a [x"),
-        ("a <3", "a <3"),
         ("x]", "x]"),
-        (">3", ">3"),
         ("*x", "*x"),
     ],
 )
 def test_other_text_gets_no_guard(text, expected):
     assert latex_module._render_inline(text) == expected
     assert latex_module._render_plain(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("<3", "\\textless{}3"),
+        (">3", "\\textgreater{}3"),
+        (" <x", " \\textless{}x"),
+        ("x < 3 and y > 2", "x \\textless{} 3 and y \\textgreater{} 2"),
+        ("<class 'int'>", "\\textless{}class 'int'\\textgreater{}"),
+        ("a\n\n<b", "a\\\\{}\\textless{}b"),
+    ],
+)
+def test_less_and_greater_are_spelled_out_in_text(text, expected):
+    assert latex_module._render_inline(text) == expected
+    assert latex_module._render_plain(text) == expected
+
+
+def test_less_and_greater_stay_themselves_in_code():
+    assert latex_module._render_inline("`x < 3`") == "\\texttt{x\\ <{}\\ 3}"
+    assert latex_module._render_inline("`a >> b`") == (
+        "\\texttt{a\\ >{}>{}\\ b}"
+    )
 
 
 def test_a_code_span_at_the_start_needs_no_guard():
@@ -742,10 +779,10 @@ def test_the_guard_reaches_options_labels_and_environments(
 
     for helper in (mc, ranking):
         rendered = helper("Pick?", ["[1, 2]", "<3"], **common)
-        assert "\\item {}[1, 2]\n\\item {}<3\n" in rendered
+        assert "\\item {}[1, 2]\n\\item \\textless{}3\n" in rendered
 
     labelled = scale("Pace?", low_label="<3", high_label="[x", **common)
-    assert "\\item[\\mentipylowlabel{}] {}<3\n" in labelled
+    assert "\\item[\\mentipylowlabel{}] \\textless{}3\n" in labelled
     assert "\\item[\\mentipyhighlabel{}] {}[x\n" in labelled
 
     framed = open_text("[x?", environment="exercise", **common)
@@ -753,7 +790,7 @@ def test_the_guard_reaches_options_labels_and_environments(
     notes = open_text(
         "<y?", environment="quote", layout="article", show_url=False, **common
     )
-    assert notes == "\\begin{quote}\n{}<y?\n\\end{quote}"
+    assert notes == "\\begin{quote}\n\\textless{}y?\n\\end{quote}"
 @
 
 Open-text and scale questions are both compact enough to render as description
@@ -2571,12 +2608,21 @@ def _bracket_deck(documentclass, framed, layouts, name):
     return source, expected
 
 
+FONTENC_T1 = "\\usepackage[T1]{fontenc}\n"
+
+
 @needs_pdflatex
 @needs_pythontex
+@pytest.mark.parametrize("encoding", ["T1", "OT1"])
 @pytest.mark.parametrize("name", BLANK_LINE_CLASSES)
-def test_a_real_build_shows_text_that_starts_with_a_bracket(tmp_path, name):
+def test_a_real_build_shows_text_that_starts_with_a_bracket(
+    tmp_path, name, encoding
+):
     (tmp_path / "config.json").write_text("{}")
     source, expected = _bracket_deck(*BLANK_LINE_CLASSES[name], name)
+    assert FONTENC_T1 in source
+    if encoding == "OT1":
+        source = source.replace(FONTENC_T1, "")
     (tmp_path / "deck.tex").write_text(source)
 
     python, log = _pythontex_build(tmp_path, "deck.tex")
@@ -2589,6 +2635,44 @@ def test_a_real_build_shows_text_that_starts_with_a_bracket(tmp_path, name):
     ).stdout
     shown = " ".join(shown.replace("\u2019", "'").split())
     assert [text for text in expected if text not in shown] == []
+@
+
+Less-than and greater-than have a trouble of their own, wherever they stand in
+the text: under the default encoding they print as inverted punctuation.  Beamer
+decks are often built that way, so the check reads the PDF under both
+encodings, with and without the Swedish that the manual's lecturer teaches in,
+in every place the text lands and in code too.  This one compiles the snippets
+directly, since the encoding and the language are all it is about.
+
+<<test functions>>=
+@needs_pdflatex
+@pytest.mark.parametrize("language", ["", "\\usepackage[swedish]{babel}\n"])
+@pytest.mark.parametrize("fontenc", ["", FONTENC_T1])
+def test_a_compiled_slide_prints_less_and_greater_as_themselves(
+    tmp_path, monkeypatch, fontenc, language
+):
+    common = _blank_line_setup(tmp_path, monkeypatch)
+    snippets = [
+        mc("Is x < 3 and y > 2?", ["a < b", "c > d"], **common),
+        ranking("Rank e < f", ["<g>", "h"], **common),
+        scale("Pace?", low_label="i < j", high_label="k > l", **common),
+        open_text("Is m < n in the notes?", layout="article", **common),
+        open_text("Is o > p here?", environment="quote", **common),
+        pin_text("Pin it", "q < r > s", **common),
+        open_text("Code `t < u` and `v > w` and `x >> y`", **common),
+    ]
+
+    shown = _compiled_text(tmp_path, fontenc + language, snippets)
+
+    # pdftotext guesses at the word gaps of a short line, so it may say a<b.
+    joined = shown.replace(" ", "")
+    for text in (
+        "Is x < 3 and y > 2?", "a < b", "c > d", "Rank e < f", "<g>", "i < j",
+        "k > l", "Is m < n in the notes?", "Is o > p here?", "q < r > s",
+        "Code t < u and v > w and x >> y",
+    ):
+        assert text.replace(" ", "") in joined, text
+    assert "\u00a1" not in shown and "\u00bf" not in shown
 @
 
 The same text can reach \LaTeX{} without PythonTeX: [[mentipy render]] prints
