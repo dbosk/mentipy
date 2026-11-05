@@ -588,6 +588,114 @@ def test_inline_code_spans_leave_latex_quotes_alone():
     assert inline_code_spans("``a` b") == [("``a` b", False)]
 @
 
+\subsection{Blank lines in plain text}
+\label{sec:blank-lines}
+
+A prompt or an option is plain text, and one written as a multi-line Python
+string can hold a blank line.  To \LaTeX{} a blank line ends a paragraph, and
+the slide sets a prompt in the argument of [[\textbf]], a code span in
+[[\texttt]], neither of which takes a paragraph.  So the build stopped, with an
+error that named no prompt.  Elsewhere a blank line compiled as a paragraph
+break: in an option, a scale label, a prompt in an environment or in the notes.
+
+The author who writes two paragraphs means two paragraphs, so a blank line
+stays visible: both renderers break the line there, the slide with [[\\]] and
+the page with [[<br>]].  It is a line break and not a paragraph because a line
+break fits in every place the text lands, while a [[\par]] would first need
+those arguments gone: [[\bfseries]] for [[\textbf]] and [[\ttfamily]] for
+[[\texttt]], in a group of their own, which is machinery for a difference that
+hardly shows, since a Beamer paragraph has neither an indent nor a gap.  Nothing
+else of Markdown comes with it.  A single line break still reads as a space, as
+it does in \LaTeX{} and HTML alike.
+
+So those places get the line break too, and their bytes change from a paragraph
+break to [[\\]], since the same text should not look different depending on
+where it lands.  The stored text and the hash stay.  There is a price where the
+text is ragged right, as all of Beamer is: a lecturer who wraps a helper's
+result in [[\mbox]] or [[\fbox]] there, or in Beamer's [[\caption]], gets
+\enquote{Not allowed in LR mode} for a prompt with a blank line, where the
+paragraph break used to vanish without a trace.  In a justified [[article]]
+those wrappers take the break, and [[\caption]], [[\section]] and [[\textbf]]
+take it where they refused a paragraph.
+
+What counts is the same for both renderers, so it is settled here, next to the
+reading of the code spans.  A line that holds only spaces or tabs looks blank
+and is one to \LaTeX{} as well, which ignores the spaces at the end of a line,
+and a Windows or an old Mac line end is a line end, whichever way the text
+arrived.  A run of them is one break, as several blank lines are one paragraph
+break to \LaTeX{}, and the spaces around the run go with it, or they would
+indent the next line.  At the very start or end of the text a break separates
+nothing, and at the start \LaTeX{} even refuses one, with \enquote{There's no
+line here to end}, so it goes.
+
+[[settle_blank_lines]] writes each break as [[BLANK_LINE]], which lets the
+renderers stay as simple as they are.  It works on the whole text, before the
+split at backticks, because only the ends of the whole text lose their break:
+the end of a piece just before a code span is a real one.  And since no escape
+touches a line break, each renderer can then replace the mark in what it has
+made, in code and text alike.  Text without a blank line comes back unchanged,
+so this leaves its bytes on the slide and on the page as they were.  The stored
+text and the hash are not involved at all: this is only how a renderer reads
+the text.
+
+<<functions>>=
+BLANK_LINE = "\n\n"
+LINE_END = r"(?:\r\n?+|\n)"
+BLANK_LINES = re.compile(rf"[ \t]*{LINE_END}(?:[ \t]*{LINE_END})+[ \t]*")
+
+
+def settle_blank_lines(text: str) -> str:
+    """Return ``text`` with one ``BLANK_LINE`` per break, none at its ends."""
+
+    settled = BLANK_LINES.sub(BLANK_LINE, text)
+    return settled.removeprefix(BLANK_LINE).removesuffix(BLANK_LINE)
+@
+
+<<test functions>>=
+def test_settling_blank_lines_keeps_one_mark_per_break():
+    assert settle_blank_lines("a\n\nb") == "a\n\nb"
+    assert settle_blank_lines("a\n \t\nb") == "a\n\nb"
+    assert settle_blank_lines("a\r\n\r\nb") == "a\n\nb"
+    assert settle_blank_lines("a\r\rb") == "a\n\nb"
+    assert settle_blank_lines("a\n\n\n  \n\nb") == "a\n\nb"
+    assert settle_blank_lines("a \t\n\n\t b") == "a\n\nb"
+    assert settle_blank_lines("a\n\nb\n\nc") == "a\n\nb\n\nc"
+
+
+def test_settling_blank_lines_drops_them_at_the_ends():
+    assert settle_blank_lines("\n\na\n\n") == "a"
+    assert settle_blank_lines(" \n \n a \n \n ") == "a"
+    assert settle_blank_lines("\n\n") == ""
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["", " ", "a", " a ", "a\nb", "a\r\nb", "a\rb", "\na\n", "a \n b", "\t"],
+)
+def test_text_without_a_blank_line_settles_to_itself(text):
+    assert settle_blank_lines(text) == text
+
+
+def test_a_blank_line_changes_neither_the_stored_text_nor_the_hash():
+    prompt = "First.\n\nSecond."
+    question = OpenQuestion(prompt)
+
+    assert question.to_dict()["text"] == prompt
+    assert question.canonical_dict()["text"] == prompt
+    assert question_hash(question) == (
+        "33b9ef162904b1baa2ced21b0d47a0dafd804866dd200688bdb7100466b656ff"
+    )
+    assert question_hash(MCQuestion("Pick\n\none", ("A\n\nB", "C"))) == (
+        "a200cb102ee56c1d85bd90a677f6b5250c8bc7eb83b1463997836891a4337acb"
+    )
+    assert question_hash(ScaleQuestion("Pace?", low_label="Slow\n\nvery")) == (
+        "a85e711e260e8510fbff4d10afe43dcea30802b02f2300df30c97892a9ac534c"
+    )
+    assert question_hash(question) != question_hash(
+        OpenQuestion("First.\n \nSecond.")
+    )
+@
+
 
 \section{Open Questions}
 

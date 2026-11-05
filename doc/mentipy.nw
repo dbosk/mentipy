@@ -371,6 +371,13 @@ opening quote does pair with the next code span, though, so text with
 code in it should use [[']] and typographic quotes, ‘like this’.  The same holds for every question kind's
 prompt and for ranking options.
 
+A single line break in a prompt, an option or a scale label reads as a space,
+so a long prompt can be written over several lines of a Python string.  A blank
+line breaks the line, on the slide, in the notes and on the web pages alike.
+That is all the layout a prompt has; there are no lists or headings.  The store
+keeps the text as it was written, so adding a blank line makes a new question,
+like any other edit of the text.
+
 \begin{pyblock}
 print(
     mc(

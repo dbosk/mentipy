@@ -53,8 +53,10 @@ from mentipy.questions import (
     RankingQuestion,
     ScaleQuestion,
     WordCloudQuestion,
+    BLANK_LINE,
     inline_code_spans,
     question_hash,
+    settle_blank_lines,
 )
 from mentipy.store import (
     BASE_URL_CONFIG,
@@ -98,6 +100,8 @@ LATEX_ESCAPES = {
     "~": r"\textasciitilde{}",
     "^": r"\textasciicircum{}",
     '"': r'\string"',
+    "<": r"\textless{}",
+    ">": r"\textgreater{}",
 }
 
 DEFAULT_LAYOUT = "slide"
@@ -117,6 +121,12 @@ sets an umlaut, so a quoted word in a prompt would lose its quotes;
 [[\string"]] prints the character itself under any language.
 [[\textquotedbl]] would be the obvious spelling, but it fails outright
 under the default OT1 encoding.
+
+Less-than and greater-than are not special to \LaTeX{} either, but that same
+encoding has inverted punctuation in their places in the text fonts, so that
+[[x < 3]] prints as \enquote{x ¡ 3} on a Beamer deck that has not loaded T1,
+with no warning.  [[\textless]] and [[\textgreater]] print the characters under
+either encoding, and a real build checks both.
 
 <<functions>>=
 def _escape_latex(text: str) -> str:
@@ -562,7 +572,10 @@ into guillemets and [[,,]] into a low quote, while [[']] becomes a curly
 quote under any encoding and runs of spaces collapse.  A code piece
 therefore breaks every ligature with an empty group, spells the
 apostrophe as [[\textquotesingle]] and keeps each space with a control
-space, so the slide shows the characters the phone shows.
+space, so the slide shows the characters the phone shows.  Less-than and
+greater-than keep their own characters in code, with the group for the
+ligatures, rather than the spelled-out form of the text: the typewriter font
+has them under both encodings.
 
 <<constants>>=
 LATEX_CODE_ESCAPES = {
@@ -577,15 +590,220 @@ LATEX_CODE_ESCAPES = {
 <<functions>>=
 def _escape_latex_code(text: str) -> str:
     return "".join(LATEX_CODE_ESCAPES.get(char, char) for char in text)
+@
 
+A blank line in the text becomes a line break (\cref{sec:blank-lines}).  The
+break is [[\\]] with an empty group after it, because [[\\]] reads on: the next
+line of a prompt may well start with a square bracket, which it would take for
+the length of an optional space and stop the build over, or with a star.  It
+works in the argument of [[\textbf]] and [[\texttt]], after an [[\item]] and in
+a Beamer column.  The labels of a scale are plain text without code spans, and
+they get the same break.
 
+A [[\\]] needs a line to end, or \LaTeX{} stops with \enquote{There's no line
+here to end}.  The settled text never starts with a break, and a code span that
+does has left vertical mode by opening its own [[\texttt]].  One case is left: a
+code span that ends in a break, right before a break in the text.  In a Beamer
+column, which is set ragged right, [[\\]] ends the paragraph, so the second one
+would find no line.  They are one break to the reader anyway, so the one inside
+the span goes.
+
+The start of the text has the same trouble as the break, and it is worse.  An
+option comes right after [[\item]], and a prompt in an environment right after
+[[\begin{exercise}]], and both read on for an optional argument in square
+brackets.  To them an option [[[1, 2]]] is a label that takes the brackets away,
+while [[[1, 2]] without its end stops the build.  A programming course writes
+such options all the time.  An empty group in front ends the looking ahead, and
+it typesets nothing.
+
+Only text that starts that way gets it, spaces and line breaks before the
+bracket included, since a macro that looks ahead skips those.  The group goes in
+front of every such text rather than only where a macro is waiting, which keeps
+a single rule in one place: in the argument of [[\textbf]] it does no harm, and
+a deck may well put a helper's result after a macro of its own.
+
+Beamer's versions of those macros also read on for an overlay in angle
+brackets, even after an item's label, which catches a scale's labels.  There an
+option [[<3]] stopped the build, and one that closed its bracket took itself
+off the slide with no error.  No group is needed for that, though: in text the
+character is spelled [[\textless]] by now, which no macro takes for an overlay,
+and a code span starts with its own [[\texttt]].
+
+So besides the blank lines, the slide's bytes change for text that holds a
+less-than or a greater-than and for text that starts with a square bracket, and
+those bytes never did what the author wrote.  The stored text and the hash do
+not change.
+
+<<constants>>=
+LATEX_LINE_BREAK = r"\\{}"
+LATEX_OPTIONAL_ARGUMENT = "["
+<<functions>>=
 def _render_inline(text: str) -> str:
-    return "".join(
+    rendered = "".join(
         f"\\texttt{{{_escape_latex_code(piece)}}}"
         if code
         else _escape_latex(piece)
-        for piece, code in inline_code_spans(text)
+        for piece, code in inline_code_spans(settle_blank_lines(text))
     )
+    return _finished_text(rendered)
+
+
+def _render_plain(text: str) -> str:
+    return _finished_text(_escape_latex(settle_blank_lines(text)))
+
+
+def _finished_text(rendered: str) -> str:
+    broken = rendered.replace(BLANK_LINE, LATEX_LINE_BREAK).replace(
+        LATEX_LINE_BREAK + "}" + LATEX_LINE_BREAK, "}" + LATEX_LINE_BREAK
+    )
+    if broken.lstrip().startswith(LATEX_OPTIONAL_ARGUMENT):
+        return "{}" + broken
+    return broken
+@
+
+Let's pin both halves of the promise about blank lines: what one turns into, in
+text and in code, and that text without one keeps the bytes it had, single line
+breaks and all.
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("First.\n\nSecond.", "First.\\\\{}Second."),
+        ("First.\n \t\nSecond.", "First.\\\\{}Second."),
+        ("First.\r\n\r\nSecond.", "First.\\\\{}Second."),
+        ("First.\n\n\n\nSecond.", "First.\\\\{}Second."),
+        ("First. \n\n Second.", "First.\\\\{}Second."),
+        ("a\n\nb\n\nc", "a\\\\{}b\\\\{}c"),
+        ("\n\nFirst.\n\n", "First."),
+        ("\n\n", ""),
+        ("a_b\n\n50%", "a\\_b\\\\{}50\\%"),
+        ("First.\n\n[x] *y", "First.\\\\{}[x] *y"),
+        ("See `a\n\nb` here", "See \\texttt{a\\\\{}b} here"),
+        ("`a`\n\n`b`", "\\texttt{a}\\\\{}\\texttt{b}"),
+        ("`a\n \nb`", "\\texttt{a\\\\{}b}"),
+        ("`a\n\n`\n\nb", "\\texttt{a}\\\\{}b"),
+        ("x\n\n`\n\n`\n\nb", "x\\\\{}\\texttt{}\\\\{}b"),
+        ("`a\n\n`\n\n`\n\nb`", "\\texttt{a}\\\\{}\\texttt{\\\\{}b}"),
+        ("`a\n\n` x", "\\texttt{a\\\\{}} x"),
+        ("`a\n\n`", "\\texttt{a\\\\{}}"),
+    ],
+)
+def test_a_blank_line_is_a_line_break_in_inline_text(text, expected):
+    assert latex_module._render_inline(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("Plain", "Plain"),
+        (" a ", " a "),
+        ("a\nb", "a\nb"),
+        ("a\r\nb", "a\r\nb"),
+        ("\na\n", "\na\n"),
+        ("a \n b", "a \n b"),
+        ("`a\nb`", "\\texttt{a\nb}"),
+        ("`a \n b`", "\\texttt{a\\ \n\\ b}"),
+        ("`a b`", "\\texttt{a\\ b}"),
+    ],
+)
+def test_text_without_a_blank_line_renders_as_before(text, expected):
+    assert latex_module._render_inline(text) == expected
+@
+
+The guard goes in front of text that starts with a square bracket, and nowhere
+else.  Spaces and line breaks do not hide such a start, since a macro that looks
+ahead skips them; and a code span is safe, since it starts with its own
+[[\texttt]].  Less-than and greater-than are spelled out in text and stay
+themselves in code, where they are no problem.
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("[1, 2]", "{}[1, 2]"),
+        ("[1, 2", "{}[1, 2"),
+        (" [x", "{} [x"),
+        ("\t[x", "{}\t[x"),
+        ("\n[x", "{}\n[x"),
+        ("\n\n[x", "{}[x"),
+        ("[x\n\n[y", "{}[x\\\\{}[y"),
+        ("[`x`", "{}[\\texttt{x}"),
+    ],
+)
+def test_text_a_macro_would_read_gets_a_guard(text, expected):
+    assert latex_module._render_inline(text) == expected
+    if "`" not in text:
+        assert latex_module._render_plain(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("", ""),
+        ("  ", "  "),
+        ("a [x", "a [x"),
+        ("x]", "x]"),
+        ("*x", "*x"),
+    ],
+)
+def test_other_text_gets_no_guard(text, expected):
+    assert latex_module._render_inline(text) == expected
+    assert latex_module._render_plain(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("<3", "\\textless{}3"),
+        (">3", "\\textgreater{}3"),
+        (" <x", " \\textless{}x"),
+        ("x < 3 and y > 2", "x \\textless{} 3 and y \\textgreater{} 2"),
+        ("<class 'int'>", "\\textless{}class 'int'\\textgreater{}"),
+        ("a\n\n<b", "a\\\\{}\\textless{}b"),
+    ],
+)
+def test_less_and_greater_are_spelled_out_in_text(text, expected):
+    assert latex_module._render_inline(text) == expected
+    assert latex_module._render_plain(text) == expected
+
+
+def test_less_and_greater_stay_themselves_in_code():
+    assert latex_module._render_inline("`x < 3`") == "\\texttt{x\\ <{}\\ 3}"
+    assert latex_module._render_inline("`a >> b`") == (
+        "\\texttt{a\\ >{}>{}\\ b}"
+    )
+
+
+def test_a_code_span_at_the_start_needs_no_guard():
+    assert latex_module._render_inline("`[x`") == "\\texttt{[x}"
+    assert latex_module._render_inline("`<x`") == "\\texttt{<{}x}"
+    assert latex_module._render_inline(" `[x`") == " \\texttt{[x}"
+
+
+def test_a_scale_label_reads_its_backticks_as_text_after_the_guard():
+    assert latex_module._render_plain("[`x`") == "{}[`x`"
+
+
+def test_the_guard_reaches_options_labels_and_environments(
+    tmp_path, monkeypatch
+):
+    common = _blank_line_setup(tmp_path, monkeypatch)
+
+    for helper in (mc, ranking):
+        rendered = helper("Pick?", ["[1, 2]", "<3"], **common)
+        assert "\\item {}[1, 2]\n\\item \\textless{}3\n" in rendered
+
+    labelled = scale("Pace?", low_label="<3", high_label="[x", **common)
+    assert "\\item[\\mentipylowlabel{}] \\textless{}3\n" in labelled
+    assert "\\item[\\mentipyhighlabel{}] {}[x\n" in labelled
+
+    framed = open_text("[x?", environment="exercise", **common)
+    assert "\\begin{exercise}\n{}[x?\n\n" in framed
+    notes = open_text(
+        "<y?", environment="quote", layout="article", show_url=False, **common
+    )
+    assert notes == "\\begin{quote}\n\\textless{}y?\n\\end{quote}"
 @
 
 Open-text and scale questions are both compact enough to render as description
@@ -615,12 +833,12 @@ def _render_scale(question: ScaleQuestion, labels: _SlideLabels) -> str:
     if question.low_label:
         lines.append(
             f"\\item[{labels('slide.low')}] "
-            f"{_escape_latex(question.low_label)}"
+            f"{_render_plain(question.low_label)}"
         )
     if question.high_label:
         lines.append(
             f"\\item[{labels('slide.high')}] "
-            f"{_escape_latex(question.high_label)}"
+            f"{_render_plain(question.high_label)}"
         )
 
     lines.append("\\end{description}")
@@ -945,6 +1163,103 @@ def _render_question_content(
         )
 
     return definitions + f"\\textbf{{{prompt}}}\n\n{body}"
+@
+
+Every kind and every wrapper gets the same prompt from this function, and the
+options and scale labels of the kinds that have them reach the slide through
+the body.  The stored question is what the author wrote, whatever the slide
+makes of it.
+
+<<test functions>>=
+TWO_LINES = "First.\\\\{}Second."
+BLANK_LINE_HELPERS = {
+    "mc": lambda text, **kw: mc(text, ["O\n\np", "B"], **kw),
+    "multi": lambda text, **kw: mc(text, ["O\n\np", "B"], multi=True, **kw),
+    "open": open_text,
+    "scale": lambda text, **kw: scale(
+        text, low_label="L\n\nl", high_label="H\n\nh", **kw
+    ),
+    "cloud": word_cloud,
+    "ranking": lambda text, **kw: ranking(text, ["O\n\np", "B"], **kw),
+    "top": lambda text, **kw: ranking(text, ["O\n\np", "B"], top_n=1, **kw),
+    "pin_text": lambda text, **kw: pin_text(text, "x = 1", **kw),
+    "pin_image": lambda text, **kw: pin_image(text, "pin.png", **kw),
+}
+
+
+def _blank_line_setup(tmp_path, monkeypatch):
+    common = _label_test_setup(tmp_path, monkeypatch)
+    Image.new("RGB", (4, 3), "white").save(tmp_path / "pin.png")
+    return common
+
+
+@pytest.mark.parametrize("kind", BLANK_LINE_HELPERS)
+@pytest.mark.parametrize("layout", ["slide", "article+qr", "auto"])
+def test_every_kind_keeps_a_blank_line_out_of_the_bold_prompt(
+    tmp_path, monkeypatch, kind, layout
+):
+    common = _blank_line_setup(tmp_path, monkeypatch)
+
+    rendered = BLANK_LINE_HELPERS[kind](
+        "First.\n\nSecond.", layout=layout, **common
+    )
+
+    assert f"\\textbf{{{TWO_LINES}}}\n\n" in rendered
+
+
+@pytest.mark.parametrize("kind", BLANK_LINE_HELPERS)
+def test_the_notes_and_an_environment_get_the_same_prompt(
+    tmp_path, monkeypatch, kind
+):
+    common = _blank_line_setup(tmp_path, monkeypatch)
+    helper = BLANK_LINE_HELPERS[kind]
+
+    notes = helper("First.\n\nSecond.", layout="article", **common)
+    framed = helper(
+        "First.\n\nSecond.", layout="slide", environment="exercise", **common
+    )
+
+    assert notes.startswith(TWO_LINES)
+    assert f"\\begin{{exercise}}\n{TWO_LINES}\n\n" in framed
+
+
+def test_options_and_scale_labels_keep_a_blank_line_out_too(
+    tmp_path, monkeypatch
+):
+    common = _blank_line_setup(tmp_path, monkeypatch)
+
+    for kind in ("mc", "multi", "ranking", "top"):
+        rendered = BLANK_LINE_HELPERS[kind]("Pick?", **common)
+        assert "\\item O\\\\{}p\n" in rendered
+
+    labelled = BLANK_LINE_HELPERS["scale"]("Pace?", **common)
+    assert "\\item[\\mentipylowlabel{}] L\\\\{}l\n" in labelled
+    assert "\\item[\\mentipyhighlabel{}] H\\\\{}h\n" in labelled
+
+
+def test_a_scale_label_has_no_inline_code_even_across_a_blank_line(
+    tmp_path, monkeypatch
+):
+    common = _blank_line_setup(tmp_path, monkeypatch)
+
+    rendered = scale(
+        "Pace?", low_label="`a`\n\n`b` 50%", high_label="`c`\n\n`d`", **common
+    )
+
+    assert "\\item[\\mentipylowlabel{}] `a`\\\\{}`b` 50\\%\n" in rendered
+    assert "\\item[\\mentipyhighlabel{}] `c`\\\\{}`d`\n" in rendered
+
+
+def test_the_store_keeps_the_text_the_author_wrote(tmp_path, monkeypatch):
+    common = _blank_line_setup(tmp_path, monkeypatch)
+    prompt, option = "First.\r\n\r\nSecond.\n", "O\n \np"
+
+    mc(prompt, [option, "B"], **common)
+
+    question = MCQuestion(prompt, (option, "B"))
+    stored = common["store"].metadata(question_hash(question))
+    assert stored["text"] == prompt
+    assert stored["options"] == [option, "B"]
 @
 
 \section{Layout renderers}
@@ -1989,6 +2304,8 @@ HARD_PROMPTS = (
     "x" * 300,
     "two\nlines",
     "\\ " * 30,
+    "two\n\nparagraphs",
+    "two\r\n\r\nparagraphs\n \n",
 )
 
 
@@ -2144,6 +2461,274 @@ def test_a_real_build_shows_the_warning_where_a_lecturer_reads(tmp_path):
         assert "twice" not in python.stdout
         assert "Package mentipy Warning" not in log
         assert not poll_has_a_record()
+@
+
+A blank line in a prompt stopped the build, with an error that names no prompt,
+and only a real build can show that it no longer does: which macro's argument
+the text ends up in, and which of them allow what, is \LaTeX's own business.
+Each question gets its own number, so that nothing here is a repeat, except at
+the end, where one question is asked twice to take the blank line through the
+package warning as well.  The number comes after anything that has to be at the
+very start of a prompt.  The hard texts take turns over the kinds, the layouts
+and the environments.  One document per class is what keeps this affordable, and
+plain [[article]] leaves out the [[slide]] and [[auto]] layouts, which need
+Beamer's commands whatever the prompt holds.
+
+<<test functions>>=
+BLANK_LINE_TEXTS = (
+    ("First {n}.\n\nSecond.", "O\n\np", "L\n\nl"),
+    ("First {n}.\n \t\nSecond.", "O\n  \np", "L\n \nl"),
+    ("First {n}.\r\n\r\nSecond.", "O\r\n\r\np", "L\r\n\r\nl"),
+    ("See `a {n}\n\nb` here", "`c\n\nd`", "L"),
+    ("`a {n}\n\n`\n\nb", "`c\n\n`\n\nd", "L"),
+    ("\n\nFirst {n}.\n\n", "\n\nO\n\n", "\n\nL\n\n"),
+    ("`\n\nFirst {n}.\n\n`", "`\n\nO`", "L"),
+    ("First {n}.\n\n[x] *y", "O\n\n[1] *", "L\n\n[l] *"),
+)
+BLANK_LINE_DECK_KINDS = (
+    "mc({t!r}, [{o!r}, 'B'], **{k})",
+    "mc({t!r}, [{o!r}, 'B'], multi=True, **{k})",
+    "open_text({t!r}, **{k})",
+    "scale({t!r}, low_label={l!r}, high_label={l!r}, **{k})",
+    "word_cloud({t!r}, **{k})",
+    "ranking({t!r}, [{o!r}, 'B'], **{k})",
+    "ranking({t!r}, [{o!r}, 'B', 'C'], top_n=2, **{k})",
+    "pin_text({t!r}, 'x = 1\\n\\ny = 2', **{k})",
+    "pin_image({t!r}, 'pin.png', **{k})",
+)
+BLANK_LINE_DECK = r'''%s
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{pythontex}
+\newtheorem{exercise}{Exercise}
+\begin{document}
+\begin{pycode}
+from mentipy.latex import *
+from mentipy.store import Store
+def keywords(layout, environment):
+    return dict(
+        store=Store("mentipy.json", min_prefix=4),
+        qr_dir="mentipy-obj", qr_format="png",
+        base_url="http://example.test:8080",
+        layout=layout, environment=environment,
+    )
+\end{pycode}
+%s
+\end{document}
+'''
+BLANK_LINE_CLASSES = {
+    "beamer": (r"\documentclass{beamer}", True,
+               ("slide", "article", "article+qr", "auto")),
+    "article": (r"\documentclass{article}", False, ("article", "article+qr")),
+    "beamerarticle": (
+        "\\documentclass{article}\n\\usepackage{beamerarticle}", True,
+        ("slide", "article", "article+qr", "auto"),
+    ),
+}
+
+
+def _printed_block(call, framed):
+    block = f"\\begin{{pycode}}\nprint({call})\n\\end{{pycode}}"
+    if framed:
+        return f"\\begin{{frame}}[fragile]\n{block}\n\\end{{frame}}"
+    return block
+
+
+def _blank_line_deck(documentclass, framed, layouts):
+    def frame(call):
+        return _printed_block(call, framed)
+
+    combinations = [
+        (code, layout, environment)
+        for layout in layouts
+        for environment in (None, "exercise", "quote")
+        for code in BLANK_LINE_DECK_KINDS
+    ]
+    frames = []
+    for serial, (code, layout, environment) in enumerate(combinations):
+        text, option, label = BLANK_LINE_TEXTS[
+            serial % len(BLANK_LINE_TEXTS)
+        ]
+        frames.append(frame(code.format(
+            t=text.format(n=serial), o=option, l=label,
+            k=f"keywords({layout!r}, {environment!r})",
+        )))
+    asked_twice = "open_text('Asked\\n\\ntwice?', **keywords('slide', None))"
+    if not framed:
+        asked_twice = asked_twice.replace("'slide'", "'article+qr'")
+    between = asked_twice.replace("Asked\\n\\ntwice?", "Between?")
+    frames += [frame(asked_twice), frame(between), frame(asked_twice)]
+    return BLANK_LINE_DECK % (documentclass, "\n".join(frames))
+
+
+@needs_pythontex
+@pytest.mark.parametrize("name", BLANK_LINE_CLASSES)
+def test_a_real_build_survives_blank_lines_in_all_the_text(tmp_path, name):
+    (tmp_path / "config.json").write_text("{}")
+    Image.new("RGB", (4, 3), "white").save(tmp_path / "pin.png")
+    (tmp_path / "deck.tex").write_text(
+        _blank_line_deck(*BLANK_LINE_CLASSES[name])
+    )
+
+    python, log = _pythontex_build(tmp_path, "deck.tex")
+
+    assert "- 0 error(s)" in python.stdout, python.stdout[-2000:]
+    assert [line for line in log.splitlines() if line.startswith("!")] == []
+    assert log.count("Package mentipy Warning") == 1
+@
+
+Text that starts with a bracket needs the same real build, and one more thing
+from it: compiling is not enough, since [[<class 'int'>]] used to compile and
+vanish.  So each text carries a number, and the PDF has to show the text with
+its bracket in front of that number.  The texts take turns over the kinds, the
+layouts and the environments, and with five kinds and four texts the turns come
+out so that every kind in every environment gets every text, under some layout.
+Plain [[article]] has two layouts, so it goes through them twice.  An option or
+a label is only on the page where the layout shows the question's body.
+
+<<test functions>>=
+BRACKET_TEXTS = ("[1, 2] ", "[1, 2 ", "<class 'int'> ", "<3 ")
+BRACKET_DECK_KINDS = (
+    "mc({t!r}, [{o!r}, 'B'], **{k})",
+    "ranking({t!r}, [{o!r}, 'B'], **{k})",
+    "scale({t!r}, low_label={o!r}, high_label={h!r}, **{k})",
+    "open_text({t!r}, **{k})",
+    "pin_text({t!r}, 'x = 1', **{k})",
+)
+
+
+def _bracket_deck(documentclass, framed, layouts, name):
+    frames, expected = [], []
+    combinations = [
+        (code, layout, environment)
+        for layout in layouts * (len(BRACKET_TEXTS) // len(layouts))
+        for environment in (None, "exercise", "quote")
+        for code in BRACKET_DECK_KINDS
+    ]
+    for serial, (code, layout, environment) in enumerate(combinations):
+        start = BRACKET_TEXTS[serial % len(BRACKET_TEXTS)]
+        prompt = f"{start}P{serial}"
+        option, high = f"{start}O{serial}", f"{start}H{serial}"
+        frames.append(_printed_block(code.format(
+            t=prompt, o=option, h=high,
+            k=f"keywords({layout!r}, {environment!r})",
+        ), framed))
+        expected.append(prompt)
+        if layout == "slide" or layout == "article+qr" or (
+            layout == "auto" and name == "beamer"
+        ):
+            if code.startswith(("mc", "ranking", "scale")):
+                expected.append(option)
+            if code.startswith("scale"):
+                expected.append(high)
+    source = BLANK_LINE_DECK % (documentclass, "\n".join(frames))
+    return source, expected
+
+
+FONTENC_T1 = "\\usepackage[T1]{fontenc}\n"
+
+
+@needs_pdflatex
+@needs_pythontex
+@pytest.mark.parametrize("encoding", ["T1", "OT1"])
+@pytest.mark.parametrize("name", BLANK_LINE_CLASSES)
+def test_a_real_build_shows_text_that_starts_with_a_bracket(
+    tmp_path, name, encoding
+):
+    (tmp_path / "config.json").write_text("{}")
+    source, expected = _bracket_deck(*BLANK_LINE_CLASSES[name], name)
+    assert FONTENC_T1 in source
+    if encoding == "OT1":
+        source = source.replace(FONTENC_T1, "")
+    (tmp_path / "deck.tex").write_text(source)
+
+    python, log = _pythontex_build(tmp_path, "deck.tex")
+
+    assert "- 0 error(s)" in python.stdout, python.stdout[-2000:]
+    assert [line for line in log.splitlines() if line.startswith("!")] == []
+    shown = subprocess.run(
+        ["pdftotext", "deck.pdf", "-"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout
+    shown = " ".join(shown.replace("\u2019", "'").split())
+    assert [text for text in expected if text not in shown] == []
+@
+
+Less-than and greater-than have a trouble of their own, wherever they stand in
+the text: under the default encoding they print as inverted punctuation.  Beamer
+decks are often built that way, so the check reads the PDF under both
+encodings, with and without the Swedish that the manual's lecturer teaches in,
+in every place the text lands and in code too.  This one compiles the snippets
+directly, since the encoding and the language are all it is about.
+
+<<test functions>>=
+@needs_pdflatex
+@pytest.mark.parametrize("language", ["", "\\usepackage[swedish]{babel}\n"])
+@pytest.mark.parametrize("fontenc", ["", FONTENC_T1])
+def test_a_compiled_slide_prints_less_and_greater_as_themselves(
+    tmp_path, monkeypatch, fontenc, language
+):
+    common = _blank_line_setup(tmp_path, monkeypatch)
+    snippets = [
+        mc("Is x < 3 and y > 2?", ["a < b", "c > d"], **common),
+        ranking("Rank e < f", ["<g>", "h"], **common),
+        scale("Pace?", low_label="i < j", high_label="k > l", **common),
+        open_text("Is m < n in the notes?", layout="article", **common),
+        open_text("Is o > p here?", environment="quote", **common),
+        pin_text("Pin it", "q < r > s", **common),
+        open_text("Code `t < u` and `v > w` and `x >> y`", **common),
+    ]
+
+    shown = _compiled_text(tmp_path, fontenc + language, snippets)
+
+    # pdftotext guesses at the word gaps of a short line, so it may say a<b.
+    joined = shown.replace(" ", "")
+    for text in (
+        "Is x < 3 and y > 2?", "a < b", "c > d", "Rank e < f", "<g>", "i < j",
+        "k > l", "Is m < n in the notes?", "Is o > p here?", "q < r > s",
+        "Code t < u and v > w and x >> y",
+    ):
+        assert text.replace(" ", "") in joined, text
+    assert "\u00a1" not in shown and "\u00bf" not in shown
+@
+
+The same text can reach \LaTeX{} without PythonTeX: [[mentipy render]] prints
+the fragment, and [[write_snippet]] writes it to a file, so that a carriage
+return arrives as it is.  A real run also shows what the test above does not,
+that the lines come out one below the other.  The Beamer column and the
+environment are the two places a prompt lands on a slide.
+
+<<test functions>>=
+@needs_pdflatex
+def test_blank_lines_read_as_a_line_break_in_a_compiled_slide(
+    tmp_path, monkeypatch
+):
+    common = _blank_line_setup(tmp_path, monkeypatch)
+    snippets = [
+        open_text("Q1 first.\n\nQ1 second.", **common),
+        open_text("Q2 first.\r\n\r\nQ2 second.", **common),
+        open_text("Q3 `first\n\nsecond`", **common),
+        open_text("Q4 first.\n\nQ4 second.", environment="quote", **common),
+        mc("Q5?", ["O5 first\n\nO5 second", "B"], **common),
+        scale("Q6?", low_label="L6 first\n\nL6 second", **common),
+    ]
+
+    _compiled_text(tmp_path, "", snippets)
+
+    lines = subprocess.run(
+        ["pdftotext", "deck.pdf", "-"],
+        cwd=tmp_path, capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+    for first, second in [
+        ("Q1 first.", "Q1 second."),
+        ("Q2 first.", "Q2 second."),
+        ("Q3 first", "second"),
+        ("Q4 first.", "Q4 second."),
+        ("O5 first", "O5 second"),
+        ("L6 first", "L6 second"),
+    ]:
+        assert any(line.endswith(first) for line in lines), first
+        assert any(line.startswith(second) for line in lines), second
 @
 
 The multiple-choice wrapper exists for author convenience: slide sources should
@@ -4936,6 +5521,8 @@ import sys
 import unicodedata
 
 import pytest
+
+from PIL import Image
 
 from mentipy.catalogue import MESSAGES, Catalogue
 import mentipy.latex as latex_module
