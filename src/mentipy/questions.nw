@@ -595,7 +595,8 @@ A prompt or an option is plain text, and one written as a multi-line Python
 string can hold a blank line.  To \LaTeX{} a blank line ends a paragraph, and
 the slide sets a prompt in the argument of [[\textbf]], a code span in
 [[\texttt]], neither of which takes a paragraph.  So the build stopped, with an
-error that named no prompt.
+error that named no prompt.  Elsewhere a blank line compiled as a paragraph
+break: in an option, a scale label, a prompt in an environment or in the notes.
 
 The author who writes two paragraphs means two paragraphs, so a blank line
 stays visible: both renderers break the line there, the slide with [[\\]] and
@@ -606,6 +607,16 @@ those arguments gone: [[\bfseries]] for [[\textbf]] and [[\ttfamily]] for
 hardly shows, since a Beamer paragraph has neither an indent nor a gap.  Nothing
 else of Markdown comes with it.  A single line break still reads as a space, as
 it does in \LaTeX{} and HTML alike.
+
+So those places get the line break too, and their bytes change from a paragraph
+break to [[\\]], since the same text should not look different depending on
+where it lands.  The stored text and the hash stay.  There is a price where the
+text is ragged right, as all of Beamer is: a lecturer who wraps a helper's
+result in [[\mbox]] or [[\fbox]] there, or in Beamer's [[\caption]], gets
+\enquote{Not allowed in LR mode} for a prompt with a blank line, where the
+paragraph break used to vanish without a trace.  In a justified [[article]]
+those wrappers take the break, and [[\caption]], [[\section]] and [[\textbf]]
+take it where they refused a paragraph.
 
 What counts is the same for both renderers, so it is settled here, next to the
 reading of the code spans.  A line that holds only spaces or tabs looks blank

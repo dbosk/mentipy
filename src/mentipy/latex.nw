@@ -597,10 +597,16 @@ break is [[\\]] with an empty group after it, because [[\\]] reads on: the next
 line of a prompt may well start with a square bracket, which it would take for
 the length of an optional space and stop the build over, or with a star.  It
 works in the argument of [[\textbf]] and [[\texttt]], after an [[\item]] and in
-a Beamer column, and it always has a line to end, since the settled text never
-starts with a break and a code span that does has left vertical mode by opening
-its own [[\texttt]].  The labels of a scale are plain text without code spans,
-and they get the same break.
+a Beamer column.  The labels of a scale are plain text without code spans, and
+they get the same break.
+
+A [[\\]] needs a line to end, or \LaTeX{} stops with \enquote{There's no line
+here to end}.  The settled text never starts with a break, and a code span that
+does has left vertical mode by opening its own [[\texttt]].  One case is left: a
+code span that ends in a break, right before a break in the text.  In a Beamer
+column, which is set ragged right, [[\\]] ends the paragraph, so the second one
+would find no line.  They are one break to the reader anyway, so the one inside
+the span goes.
 
 The start of the text has the same trouble as the break, and it is worse.  An
 option comes right after [[\item]], and a prompt in an environment right after
@@ -647,7 +653,9 @@ def _render_plain(text: str) -> str:
 
 
 def _finished_text(rendered: str) -> str:
-    broken = rendered.replace(BLANK_LINE, LATEX_LINE_BREAK)
+    broken = rendered.replace(BLANK_LINE, LATEX_LINE_BREAK).replace(
+        LATEX_LINE_BREAK + "}" + LATEX_LINE_BREAK, "}" + LATEX_LINE_BREAK
+    )
     if broken.lstrip().startswith(LATEX_OPTIONAL_ARGUMENT):
         return "{}" + broken
     return broken
@@ -674,6 +682,11 @@ breaks and all.
         ("See `a\n\nb` here", "See \\texttt{a\\\\{}b} here"),
         ("`a`\n\n`b`", "\\texttt{a}\\\\{}\\texttt{b}"),
         ("`a\n \nb`", "\\texttt{a\\\\{}b}"),
+        ("`a\n\n`\n\nb", "\\texttt{a}\\\\{}b"),
+        ("x\n\n`\n\n`\n\nb", "x\\\\{}\\texttt{}\\\\{}b"),
+        ("`a\n\n`\n\n`\n\nb`", "\\texttt{a}\\\\{}\\texttt{\\\\{}b}"),
+        ("`a\n\n` x", "\\texttt{a\\\\{}} x"),
+        ("`a\n\n`", "\\texttt{a\\\\{}}"),
     ],
 )
 def test_a_blank_line_is_a_line_break_in_inline_text(text, expected):
@@ -1229,9 +1242,12 @@ def test_a_scale_label_has_no_inline_code_even_across_a_blank_line(
 ):
     common = _blank_line_setup(tmp_path, monkeypatch)
 
-    rendered = scale("Pace?", low_label="`a`\n\n`b` 50%", **common)
+    rendered = scale(
+        "Pace?", low_label="`a`\n\n`b` 50%", high_label="`c`\n\n`d`", **common
+    )
 
     assert "\\item[\\mentipylowlabel{}] `a`\\\\{}`b` 50\\%\n" in rendered
+    assert "\\item[\\mentipyhighlabel{}] `c`\\\\{}`d`\n" in rendered
 
 
 def test_the_store_keeps_the_text_the_author_wrote(tmp_path, monkeypatch):
@@ -2464,6 +2480,7 @@ BLANK_LINE_TEXTS = (
     ("First {n}.\n \t\nSecond.", "O\n  \np", "L\n \nl"),
     ("First {n}.\r\n\r\nSecond.", "O\r\n\r\np", "L\r\n\r\nl"),
     ("See `a {n}\n\nb` here", "`c\n\nd`", "L"),
+    ("`a {n}\n\n`\n\nb", "`c\n\n`\n\nd", "L"),
     ("\n\nFirst {n}.\n\n", "\n\nO\n\n", "\n\nL\n\n"),
     ("`\n\nFirst {n}.\n\n`", "`\n\nO`", "L"),
     ("First {n}.\n\n[x] *y", "O\n\n[1] *", "L\n\n[l] *"),

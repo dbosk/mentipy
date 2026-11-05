@@ -2675,7 +2675,7 @@ def test_a_scale_form_breaks_its_labels_at_a_blank_line(tmp_path):
     full_hash = store.resolve(
         store.register(
             ScaleQuestion(
-                "Pace?", low_label="`a`\n\n<b>", high_label="H\n \nh\n\n"
+                "Pace?", low_label="`a`\n\n<b>", high_label="`H`\n \nh\n\n"
             )
         )
     )
@@ -2683,7 +2683,7 @@ def test_a_scale_form_breaks_its_labels_at_a_blank_line(tmp_path):
     rendered = server_module._render_form(store, full_hash)
 
     assert "`a`<br>&lt;b&gt;" in rendered
-    assert "H<br>h</p>" in rendered
+    assert "`H`<br>h</p>" in rendered
 @
 
 Text that starts with a bracket is a trap only on the slide
