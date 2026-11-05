@@ -2686,6 +2686,48 @@ def test_a_scale_form_breaks_its_labels_at_a_blank_line(tmp_path):
     assert "H<br>h</p>" in rendered
 @
 
+Text that starts with a bracket is a trap only on the slide
+(\cref{sec:blank-lines}), since a page has no macro to read it.  The escaping
+already shows it, and since the two surfaces must agree on what the question
+says, the test pins that it stays so.
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    "text, shown",
+    [
+        ("[1, 2]", "[1, 2]"),
+        ("[1, 2", "[1, 2"),
+        ("<class 'int'>", "&lt;class &#x27;int&#x27;&gt;"),
+        ("<3", "&lt;3"),
+    ],
+)
+def test_pages_show_text_that_starts_with_a_bracket(tmp_path, text, shown):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion(text, (text, "B")))
+    full_hash = store.resolve(prefix)
+    ranked = store.resolve(store.register(RankingQuestion("Rank", (text, "B"))))
+    labelled = store.resolve(
+        store.register(ScaleQuestion("Pace?", low_label=text))
+    )
+    store.record(ranked, [0, 1])
+
+    with _running_server(store) as port:
+        store.record(full_hash, 0)
+        _form, form_body = _request(port, "GET", f"/{prefix}")
+        _results, results_body = _request(port, "GET", f"/{prefix}/results")
+
+    assert f"<h1>{shown}</h1>" in form_body
+    assert f"<p>{shown}</p>" in form_body
+    assert f"{shown}</label>" in form_body
+    assert f'<span class="bar-label">{shown}</span>' in results_body
+    assert f"<strong>{shown}</strong>" in results_body
+    assert f"{shown}</div>" in server_module._render_form(store, ranked)
+    assert f'<span class="bar-label">{shown}</span>' in (
+        server_module._render_results(store, ranked)
+    )
+    assert f"{shown}</p>" in server_module._render_form(store, labelled)
+@
+
 The ranking form gives each option its own position dropdown.  We pin the
 per-option field names and the absence of any script tag, since the
 no-JavaScript guarantee is the whole point of the dropdown design.

@@ -623,9 +623,9 @@ split at backticks, because only the ends of the whole text lose their break:
 the end of a piece just before a code span is a real one.  And since no escape
 touches a line break, each renderer can then replace the mark in what it has
 made, in code and text alike.  Text without a blank line comes back unchanged,
-so its bytes on the slide and on the page stay what they were.  The stored text
-and the hash are not involved at all: this is only how a renderer reads the
-text.
+so this leaves its bytes on the slide and on the page as they were.  The stored
+text and the hash are not involved at all: this is only how a renderer reads
+the text.
 
 <<functions>>=
 BLANK_LINE = "\n\n"
