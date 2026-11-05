@@ -66,8 +66,8 @@ went wrong.
   server.  Such an answer may or may not have been stored, and the student has
   not been thanked either way.
 \end{description}
-They are only acceptable where the scenario itself causes them, and elsewhere they
-fail the run as well (\cref{sec:verdict}).
+They are only acceptable at the moments the scenario itself causes them, and at any
+other moment they fail the run as well (\cref{sec:verdict}).
 
 \subsection{The whole program}
 
@@ -161,32 +161,35 @@ respondents have stopped, or the counts would move while we compare them, and
 before the server stops, since two of them read through HTTP.  And [[stop]] sits in
 a [[finally]], because a run that fails half-way must not leave a server behind.
 
-Once the scenario is under way, a store that no longer parses or a server that no
-longer answers is not a failure of this program but what it is looking for: an
-invalid store stops a whole lecture.  So those become a problem of the run, and the
-remaining scenarios still run.  Before that, in [[start]], the same errors mean that
-nothing could be tested, and they end the program.
+Once the scenario is under way, a store that no longer parses, a server that no
+longer answers or one that cannot start again is not a failure of this program but
+what it is looking for: an invalid store stops a whole lecture.  So those become a
+problem of the run, the table still gets its line, with a dash for what the readers
+would have said, and the remaining scenarios still run.  Before that, in [[start]], the same errors mean that nothing could be tested,
+and they end the program.
 
-<<functions>>=
-def run_scenario(name, settings, base):
-    """Run the scenario `name` in a new directory under `base`."""
+<<run methods>>=
+def perform(self):
+    """Run the scenario from start to finish, and return its outcome."""
 
-    directory = Path(tempfile.mkdtemp(dir=base, prefix=f"{name}-"))
-    run = Run(name, SCENARIOS[name], settings, directory)
     try:
-        run.start()
+        self.start()
         try:
-            run.scenario.drive(run)
-            run.finish_answering()
-            rows = run.read_back()
-        except (ValueError, OSError, http.client.HTTPException) as error:
-            run.problems.append(f"the scenario could not finish: {error!r}")
+            self.scenario.drive(self)
+            self.finish_answering()
+            rows = self.read_back()
+        except (
+            HarnessError,
+            ValueError,
+            OSError,
+            http.client.HTTPException,
+            subprocess.SubprocessError,
+        ) as error:
+            self.problems.append(f"the scenario could not finish: {error!r}")
             rows = []
     finally:
-        run.stop()
-    return run.judge(rows)
-<<imports>>=
-import tempfile
+        self.stop()
+    return self.judge(rows)
 @
 
 \section{The servers}
@@ -251,7 +254,7 @@ def start(self):
         self.ports.append(free_port())
         self.servers.append(self._start_server(self.ports[-1]))
     self._start_threads()
-    self.started_at = time.monotonic()
+    self.started_at = self.life_began = time.monotonic()
     self.deadline = self.started_at + self.settings.seconds
 
 
@@ -271,6 +274,9 @@ def _start_process(self, command, **options):
 self.children = []
 self.servers = []
 self.ports = []
+self.life_began = 0.0
+self.lives = []
+self.outages = []
 <<imports>>=
 import json
 import subprocess
@@ -285,6 +291,10 @@ The file size limit is for the [[fsize]] scenario.  It is set inside the server
 after the import, not by a [[preexec_fn]], which is unsafe with the respondents'
 threads running, and not before the import, or Python's own compiled files would
 meet it.
+
+A restart notes when the old server's life ended and when the new one was listening,
+because the verdict needs to tell what happened during an outage from what happened
+outside one (\cref{sec:verdict}).
 
 <<run methods>>=
 def _start_server(self, port, file_size_limit=None):
@@ -325,6 +335,8 @@ def restart_server(self, index, *, kill, file_size_limit=None):
     """Stop a server, by SIGKILL or by SIGINT, and start it on its port again."""
 
     server = self.servers[index]
+    down = time.monotonic()
+    self.lives.append((self.life_began, down))
     if kill:
         server.kill()
         server.wait()
@@ -333,6 +345,14 @@ def restart_server(self, index, *, kill, file_size_limit=None):
     self.servers[index] = self._start_server(
         self.ports[index], file_size_limit
     )
+    self.life_began = time.monotonic()
+    self.outages.append((down, self.life_began))
+
+
+def let_the_last_server_answer(self):
+    """Wait out the time, and long enough for the last server to show it works."""
+
+    time.sleep(max(self.deadline - time.monotonic(), MINIMUM_LAST_LIFE))
 
 
 def _stop_server(self, server):
@@ -370,6 +390,7 @@ class HarnessError(Exception):
 CLI_CODE = "from mentipy.cli import main\nmain()\n"
 SERVER_START_TIMEOUT = 30
 SERVER_STOP_TIMEOUT = 10
+MINIMUM_LAST_LIFE = 2.0
 <<imports>>=
 import signal
 import socket
@@ -380,11 +401,15 @@ servers get the same SIGINT as a lecturer's Ctrl-C and a chance to finish, which
 also a check that they do.  After that every process this run started and has not
 reaped gets a SIGKILL, which also works on a process that is stopped.  The harness
 only ever signals the processes it started itself, since other people's servers
-may be running on the same machine.
+may be running on the same machine.  It can be called twice, which a signal during
+the first call makes necessary (\cref{sec:main}).
 
 <<run methods>>=
 def stop(self):
-    """Leave no process of this run behind, whatever has happened."""
+    """Leave no process of this run behind, whatever has happened.
+
+    Calling it again does the rest of the work, or nothing.
+    """
 
     self.stopping.set()
     for server in self.servers:
@@ -415,6 +440,9 @@ to the log as they are, and [[str.splitlines]] would cut a line there.  Then the
 are quotes for the CSV and markup for the page.  Each text ends in its own number,
 which is what makes an open answer identifiable.
 
+Every answer notes when it was sent, before the connection is made, and a failed one
+when it failed, since the verdict goes by which server a request can have met.
+
 <<constants>>=
 ANSWERS_PER_SECOND = 40
 RESPONDENTS = 8
@@ -444,27 +472,31 @@ def _respondent(self):
         time.sleep(random.expovariate(pause))
         key, value = self._next_answer()
         port = random.choice(self.ports)
+        sent = time.monotonic()
         try:
             status = post_answer(port, self.prefixes[key], value)
         except (OSError, http.client.HTTPException) as error:
-            self._note_no_reply(error)
+            self._note_no_reply(error, sent)
         else:
-            self._note_reply(key, value, status)
+            self._note_reply(key, value, status, sent)
 
 
-def _note_reply(self, key, value, status):
+def _note_reply(self, key, value, status, sent):
     with self.guard:
         if status == ACCEPTED:
             self.accepted[key].append(value)
+            self.accepted_sent.append(sent)
         else:
-            self.refused.append(status)
+            self.refused.append((sent, status))
 
 
-def _note_no_reply(self, error):
+def _note_no_reply(self, error, sent):
+    failed = time.monotonic()
     with self.guard:
-        self.no_reply.append(type(error).__name__)
+        self.no_reply.append((sent, failed, type(error).__name__))
 <<the state of a run>>=
 self.accepted = {key: [] for key in QUESTIONS}
+self.accepted_sent = []
 self.refused = []
 self.no_reply = []
 self.serial = itertools.count()
@@ -502,8 +534,8 @@ import urllib.parse
 
 While the answers come in, one more thread keeps asking for the pages a lecturer
 has open, since every one of them reads the store and the log, and a reader that
-trips over a half-written file would show here.  A page that fails to connect only
-counts where the scenario takes the server away.
+trips over a half-written file would show here.  A page that fails to connect is
+judged like an answer that does: it only counts outside an outage.
 
 <<run methods>>=
 def _reader_of_pages(self):
@@ -514,19 +546,16 @@ def _reader_of_pages(self):
     )
     while not self.stopping.wait(PAGE_INTERVAL):
         for path in paths:
+            sent = time.monotonic()
             try:
                 status, _ = self.http_get(path)
             except (OSError, http.client.HTTPException) as error:
-                if not self.scenario.interrupts_server:
-                    self._note_page_error(f"{path}: {type(error).__name__}")
+                self.page_failures.append(
+                    (sent, time.monotonic(), f"{path}: {type(error).__name__}")
+                )
             else:
                 if status != 200:
-                    self._note_page_error(f"{path}: {status}")
-
-
-def _note_page_error(self, error):
-    with self.guard:
-        self.page_errors.append(error)
+                    self.page_errors.append(f"{path}: {status}")
 
 
 def http_get(self, path):
@@ -544,6 +573,7 @@ def http_get(self, path):
         connection.close()
 <<the state of a run>>=
 self.page_errors = []
+self.page_failures = []
 <<constants>>=
 PAGE_INTERVAL = 0.25
 READ_TIMEOUT = 60
@@ -575,7 +605,9 @@ def _guarded(self, job):
 def finish_answering(self):
     """Stop the answers, so that what the readers see stands still."""
 
-    self.elapsed = time.monotonic() - self.started_at
+    now = time.monotonic()
+    self.elapsed = now - self.started_at
+    self.lives.append((self.life_began, now))
     self.stopping.set()
     for thread in self.threads:
         thread.join(THREAD_STOP_TIMEOUT)
@@ -779,6 +811,7 @@ def drive_kill_server(run):
         run.restart_server(0, kill=True)
         restarts += 1
     run.notes.append(f"the server was SIGKILLed {restarts} times")
+    run.let_the_last_server_answer()
 @
 
 A full disk is the fault that gives a short write: part of a line, and an error.  A
@@ -787,9 +820,12 @@ as the system cuts the write off at the limit and refuses the next one.  A serve
 that meets it must refuse the answers from then on, and may leave half a line, which
 the next server has to step over.  We set the limit so that the log reaches it about a
 quarter of the way through, and restart without it half-way, so that answers
-accepted before, and after, must all be there at the end.  A run that never reached
-the limit has tested nothing, so that is a problem too; it takes a very short
-[[--seconds]] to get there.
+accepted before, and after, must all be there at the end.  The second half is the
+point: the room has freed some disk, and one full disk must not stop the rest of the
+lecture.  So the time from the restart on is marked as outside the limit, and in it
+nothing may be refused and answers must be accepted (\cref{sec:verdict}).  A run that
+never reached the limit has tested nothing, so that is a problem too; it takes a very
+short [[--seconds]] to get there.
 
 <<functions>>=
 def drive_file_size_limit(run):
@@ -800,17 +836,24 @@ def drive_file_size_limit(run):
         int(ANSWERS_PER_SECOND * LOG_LINE_BYTES * run.settings.seconds / 4),
     )
     run.restart_server(0, kill=False, file_size_limit=limit)
+    limit_began = run.life_began
+    run.limit_phase = (limit_began, math.inf)
     time.sleep(max(0.0, run.deadline - time.monotonic()) / 2)
     with run.guard:
-        refused = list(run.refused)
-    if not refused:
+        statuses = [status for _, status in run.refused]
+    if not statuses:
         run.problems.append(f"the log never met the limit of {limit} bytes")
     run.notes.append(
-        f"{len(refused)} answers refused at the limit of {limit} bytes,"
-        f" with status {sorted(set(refused))}"
+        f"{len(statuses)} answers refused at the limit of {limit} bytes,"
+        f" with status {sorted(set(statuses))}"
     )
     run.restart_server(0, kill=False)
-    time.sleep(max(0.0, run.deadline - time.monotonic()))
+    run.limit_phase = (limit_began, run.life_began)
+    run.let_the_last_server_answer()
+<<the state of a run>>=
+self.limit_phase = None
+<<imports>>=
+import math
 <<constants>>=
 LOG_LINE_BYTES = 100
 @
@@ -823,8 +866,7 @@ connection.  So this scenario connects first, waits until the server's threads a
 waiting on their sockets, and then sends every request in one go.  Connecting first
 leaves the queue of waiting connections out of it, which has its own test in the
 suite; what is tested here is the handling of the answers.  A round is 200 answers,
-which takes a real server less than a second, and it is the only scenario with no
-process competing for the store.
+which takes a real server less than a second.
 
 <<run methods>>=
 def burst(self, count=BURST_ANSWERS):
@@ -838,28 +880,29 @@ def burst(self, count=BURST_ANSWERS):
             )
             connections.append((connection, *self._next_answer()))
         time.sleep(BURST_SETTLING)
+        sent = time.monotonic()
         for connection, key, value in connections:
             connection.sendall(_answer_request(self.prefixes[key], value))
         for connection, key, value in connections:
-            self._read_burst_reply(connection, key, value)
+            self._read_burst_reply(connection, key, value, sent)
     finally:
         for connection, _, _ in connections:
             connection.close()
 
 
-def _read_burst_reply(self, connection, key, value):
+def _read_burst_reply(self, connection, key, value, sent):
     reply = b""
     try:
         while part := connection.recv(4096):
             reply += part
     except OSError as error:
-        self._note_no_reply(error)
+        self._note_no_reply(error, sent)
         return
     match = re.match(rb"HTTP/1\.\d (\d+)", reply)
     if match:
-        self._note_reply(key, value, int(match.group(1)))
+        self._note_reply(key, value, int(match.group(1)), sent)
     else:
-        self._note_no_reply(ConnectionError("no status line"))
+        self._note_no_reply(ConnectionError("no status line"), sent)
 <<functions>>=
 def _answer_request(prefix, value):
     body = urllib.parse.urlencode({"value": value})
@@ -889,20 +932,16 @@ import re
 
 \subsection{The table of scenarios}
 
-What a scenario causes on purpose must not fail it.  Taking the server away gives
-connections with no reply, and the size limit also gives refusals and half a line.  In
-every other scenario those are faults of Mentipy, so the table states the exceptions
-and [[judge]] allows nothing else.
+A scenario is its driver and the number of servers it needs.  What a driver causes on
+purpose is noted in the run as it happens, so the table does not excuse anything.
 
 <<classes>>=
 @dataclass(frozen=True)
 class Scenario:
-    """One way to disturb a lecture, and what that may cause by itself."""
+    """One way to disturb a lecture."""
 
     drive: Callable[["Run"], None]
     servers: int = 1
-    interrupts_server: bool = False
-    limits_file_size: bool = False
 <<scenario table>>=
 SCENARIOS = {
     "builds": Scenario(drive_builds),
@@ -910,10 +949,8 @@ SCENARIOS = {
     "kill-builds": Scenario(drive_kill_builds),
     "stop-build": Scenario(drive_stop_build),
     "two-servers": Scenario(drive_builds, servers=2),
-    "kill-server": Scenario(drive_kill_server, interrupts_server=True),
-    "fsize": Scenario(
-        drive_file_size_limit, interrupts_server=True, limits_file_size=True
-    ),
+    "kill-server": Scenario(drive_kill_server),
+    "fsize": Scenario(drive_file_size_limit),
     "burst": Scenario(drive_bursts),
 }
 @
@@ -1146,6 +1183,29 @@ or a server that would not stop are all things that must not happen during a lec
 And a run that accepted no answers at all has tested nothing, which is the one way
 this program could otherwise report success without having looked.
 
+What a scenario causes on purpose must not fail it, but that excuse holds for the
+moment it is caused and no longer.  An excuse for the whole run would let the worst case
+through: a server that comes back from a kill or a full disk and never takes an answer
+again, while the answers from before make the totals look fine.  So the excuses go by
+time, and by what a request can have met, which does not depend on how loaded the
+machine is, as a limit on counts or a grace period would.
+\begin{description}
+\item[No reply] An outage lasts from the moment before the signal until the new server
+  listens.  A request is excused if its life, from sending to failing, overlaps an
+  outage: it was cut off by the signal, or it found nobody there.  One sent after the
+  new server listens and failed before the next signal can only have met a working
+  server, however slow.  With no outages, as in most scenarios, nothing is excused.
+\item[Refused] Only what was sent to the server that has the size limit is excused.
+  What is sent after the restart without the limit can only meet the new server.
+\item[Half a line] Only a scenario with a size limit may leave one.
+\end{description}
+
+That leaves a server that hangs: its requests wait out their timeout, overlap the next
+kill and are excused.  So every server that stayed up for [[MINIMUM_LIFE]] must have
+accepted an answer sent during its life.  At forty answers a second that is a low bar,
+and it is per server, so that one bad restart among ten shows.  The last server gets
+[[MINIMUM_LAST_LIFE]] whatever the clock says, so that the check always reaches it.
+
 A value stored but never accepted is allowed only as far as answers went unanswered:
 the request may have been stored before the server died.  More than that means answers
 appeared out of nowhere, or the server refused an answer it had kept, which would make
@@ -1169,8 +1229,8 @@ def judge(self, rows):
         self.elapsed,
         self.builds,
         accepted,
-        sum(row.stored for row in rows),
-        sum(row.lost for row in rows),
+        sum(row.stored for row in rows) if rows else None,
+        sum(row.lost for row in rows) if rows else None,
         len(self.refused),
         len(self.no_reply),
         len(self.problems),
@@ -1201,38 +1261,73 @@ def _print_report(self, rows):
 def _server_errors(self):
     text = (self.directory / "server.log").read_text(errors="replace")
     return sorted(set(SERVER_ERROR.findall(text)))
+
+
+def _during_outage(self, sent, failed):
+    return any(sent <= up and failed >= down for down, up in self.outages)
+
+
+def _within_limit_phase(self, sent):
+    if self.limit_phase is None:
+        return False
+    began, ended = self.limit_phase
+    return began <= sent < ended
 <<note what should not have happened>>=
 if not accepted:
     self.problems.append("no answer was accepted, so this tested nothing")
-if self.refused and not self.scenario.limits_file_size:
-    statuses = sorted(set(map(str, self.refused)))
+silent = sum(
+    ended - began >= MINIMUM_LIFE
+    and not any(began <= sent < ended for sent in self.accepted_sent)
+    for began, ended in self.lives
+)
+if silent and accepted:
     self.problems.append(
-        f"{len(self.refused)} answers refused: {statuses[:5]}"
+        f"{silent} of {len(self.lives)} servers accepted no answer"
+        " during their life"
     )
-if self.no_reply and not self.scenario.interrupts_server:
-    errors = sorted(set(self.no_reply))
+refused = [
+    str(status)
+    for sent, status in self.refused
+    if not self._within_limit_phase(sent)
+]
+if refused:
     self.problems.append(
-        f"{len(self.no_reply)} answers without a reply: {errors[:5]}"
+        f"{len(refused)} answers refused with no cause in the scenario:"
+        f" {sorted(set(refused))[:5]}"
+    )
+unanswered = [
+    error
+    for sent, failed, error in self.no_reply
+    if not self._during_outage(sent, failed)
+]
+if unanswered:
+    self.problems.append(
+        f"{len(unanswered)} answers without a reply outside an outage:"
+        f" {sorted(set(unanswered))[:5]}"
     )
 if extra > len(self.no_reply):
     self.problems.append(
         f"{extra} answers stored that were never accepted, with only"
         f" {len(self.no_reply)} unanswered"
     )
-if self.page_errors:
+page_errors = self.page_errors + [
+    error
+    for sent, failed, error in self.page_failures
+    if not self._during_outage(sent, failed)
+]
+if page_errors:
     self.problems.append(
-        f"{len(self.page_errors)} failed page reads:"
-        f" {sorted(set(self.page_errors))[:4]}"
+        f"{len(page_errors)} failed page reads:"
+        f" {sorted(set(page_errors))[:4]}"
     )
-if not self.scenario.limits_file_size and (
-    self.malformed_lines or self.torn_bytes
-):
+if self.limit_phase is None and (self.malformed_lines or self.torn_bytes):
     self.problems.append(
         f"log has {self.malformed_lines} malformed lines and a torn"
         f" tail of {self.torn_bytes} bytes"
     )
 <<constants>>=
 NOTES_SHOWN = 8
+MINIMUM_LIFE = 1.0
 SERVER_ERROR = re.compile(r"^(?:\w*Error|json\.\S+Error)[^\n]*", re.M)
 <<classes>>=
 @dataclass(frozen=True)
@@ -1243,8 +1338,8 @@ class Outcome:
     seconds: float
     builds: int
     accepted: int
-    stored: int
-    lost: int
+    stored: Optional[int]
+    lost: Optional[int]
     refused: int
     no_reply: int
     problems: int
@@ -1470,7 +1565,9 @@ A signal has to go the same way as an exception, through every [[finally]], or a
 interrupted run leaves its servers running.  SIGKILL is the one signal that cannot do
 that, and then the servers of that moment stay and have to be stopped by hand.  The
 handler first switches itself off, because a second Ctrl-C during the clean-up would
-otherwise abandon it half-way.  Output goes line by line, since a run takes minutes
+otherwise abandon it half-way.  The first signal can also land in the clean-up, in the
+middle of [[Run.stop]], and leave the rest of it undone, so [[main]] keeps the current
+run and stops it once more, when no signal can reach it any longer.  Output goes line by line, since a run takes minutes
 and [[make]] may be writing to a pipe, and an interrupted run should show how far it
 came.
 
@@ -1497,8 +1594,8 @@ def print_table(outcomes):
                 f"{outcome.seconds:.0f}",
                 outcome.builds,
                 outcome.accepted,
-                outcome.stored,
-                outcome.lost,
+                "-" if outcome.stored is None else outcome.stored,
+                "-" if outcome.lost is None else outcome.lost,
                 outcome.refused,
                 outcome.no_reply,
                 outcome.problems,
@@ -1513,7 +1610,7 @@ def main(argv=None):
     sys.stdout.reconfigure(line_buffering=True)
     for handled in HANDLED_SIGNALS:
         signal.signal(handled, _interrupted)
-    outcomes, status, scratch = [], None, None
+    outcomes, status, scratch, run = [], None, None, None
     try:
         kind = check_real_disk(arguments.dir)
         scratch = Path(
@@ -1524,7 +1621,9 @@ def main(argv=None):
         print(f"working in {scratch} ({kind})")
         settings = prepare_settings(arguments, scratch)
         for name in arguments.scenarios:
-            outcomes.append(run_scenario(name, settings, scratch))
+            directory = tempfile.mkdtemp(dir=scratch, prefix=f"{name}-")
+            run = Run(name, SCENARIOS[name], settings, Path(directory))
+            outcomes.append(run.perform())
     except Interrupted as interruption:
         print(f"interrupted by signal {interruption.args[0]}", file=sys.stderr)
         status = 128 + interruption.args[0]
@@ -1532,6 +1631,10 @@ def main(argv=None):
         print(f"race.py: {error}", file=sys.stderr)
         status = 2
     finally:
+        for handled in HANDLED_SIGNALS:
+            signal.signal(handled, signal.SIG_IGN)
+        if run is not None:
+            run.stop()
         if scratch is not None and not arguments.keep:
             shutil.rmtree(scratch, ignore_errors=True)
     print_table(outcomes)
@@ -1564,6 +1667,7 @@ TABLE_LINE = (
 )
 <<imports>>=
 import shutil
+import tempfile
 @
 
 \section{Running it}
