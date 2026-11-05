@@ -1123,7 +1123,7 @@ def _render_terminal_mc_stats(
     mode_index = summary.get("mode_index")
     if mode_index is None:
         return
-    label = str(question["options"][mode_index])
+    label = _single_line_text(str(question["options"][mode_index]))
     percentage = summary["percentages"][mode_index]
     line = _stats_line([("Mode", label)])
     line.append(f" ({percentage:.0f}%)")
@@ -1132,9 +1132,25 @@ def _render_terminal_mc_stats(
 
 The mode renderer should preserve the displayed label and rounded percentage.
 This protects both the data source and the terminal formatting in one small
-case.
+case.  An option can span several lines, and the bars below it already show it
+on one, so the mode's single line does too.  The heading above keeps a prompt's
+line breaks, since it has the screen to itself and the slide shows them as
+well.
 
 <<test functions>>=
+def test_terminal_mc_stats_show_a_multi_line_option_on_one_line():
+    buffer = io.StringIO()
+    console = Console(file=buffer, force_terminal=False, width=80)
+
+    mentipy.cli._render_terminal_mc_stats(
+        {"options": ["Two\n\nparagraphs", "B"]},
+        {"mode_index": 0, "percentages": [100.0, 0.0]},
+        console=console,
+    )
+
+    assert buffer.getvalue().strip() == "Mode: Two paragraphs (100%)"
+
+
 def test_terminal_mc_stats_show_mode_percentage():
     buffer = io.StringIO()
     console = Console(

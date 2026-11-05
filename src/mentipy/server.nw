@@ -71,9 +71,11 @@ from mentipy.questions import (
     RankingQuestion,
     ScaleQuestion,
     WordCloudQuestion,
+    BLANK_LINE,
     bin_pins,
     inline_code_spans,
     pin_heat_color,
+    settle_blank_lines,
     smooth_pin_grid,
     sniff_image_mime,
 )
@@ -2133,13 +2135,27 @@ inline code (\cref{sec:inline-code}), and every page that shows one
 shows it through one helper: the forms here, the page heading, the
 index, and the results pages' bar labels and mode callout.  Each piece
 is escaped before the code pieces are wrapped, so the only markup the
-author's text can produce is [[<code>]].
+author's text can produce is [[<code>]], and the [[<br>]] of a blank line.
+HTML would read that line as a space, while the slide shows a break
+(\cref{sec:blank-lines}), and a respondent should see the question the way the
+projector shows it.  Every place that shows the text takes a line break: a
+heading, a form's label, a bar's label and a row of the index.  The tab's title
+takes no markup, and a browser folds the line ends there by itself.
 
+<<constants>>=
+HTML_LINE_BREAK = "<br>"
 <<functions>>=
 def _render_inline(text: str) -> str:
-    return "".join(
+    rendered = "".join(
         f"<code>{escape(piece)}</code>" if code else escape(piece)
-        for piece, code in inline_code_spans(text)
+        for piece, code in inline_code_spans(settle_blank_lines(text))
+    )
+    return rendered.replace(BLANK_LINE, HTML_LINE_BREAK)
+
+
+def _render_plain(text: str) -> str:
+    return escape(settle_blank_lines(text)).replace(
+        BLANK_LINE, HTML_LINE_BREAK
     )
 @
 
@@ -2228,12 +2244,12 @@ def _render_inputs(
     low_end_label = ""
     if question.low_label:
         low_end_label = "<p>" + catalogue.markup(
-            "form.scale_low", escape, label=escape(question.low_label)
+            "form.scale_low", escape, label=_render_plain(question.low_label)
         ) + "</p>"
     high_end_label = ""
     if question.high_label:
         high_end_label = "<p>" + catalogue.markup(
-            "form.scale_high", escape, label=escape(question.high_label)
+            "form.scale_high", escape, label=_render_plain(question.high_label)
         ) + "</p>"
 
     return (
@@ -2590,6 +2606,84 @@ def test_results_show_inline_code_in_options(tmp_path):
     assert '<span class="bar-label"><code>sorted</code></span>' in (
         ranking_results
     )
+@
+
+A blank line in a prompt or an option is a line break wherever the page
+shows it, as on the slide (\cref{sec:blank-lines}), and it cannot let markup
+in, since the text is escaped before the break is written.
+
+<<test functions>>=
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("First.\n\nSecond.", "First.<br>Second."),
+        ("First.\n \t\nSecond.", "First.<br>Second."),
+        ("First.\r\n\r\nSecond.", "First.<br>Second."),
+        ("\n\nFirst.\n\n", "First."),
+        ("<b>\n\n<i>", "&lt;b&gt;<br>&lt;i&gt;"),
+        ("See `a\n\n<b>` here", "See <code>a<br>&lt;b&gt;</code> here"),
+        ("`a`\n\n`b`", "<code>a</code><br><code>b</code>"),
+        ("a\nb", "a\nb"),
+        ("a\r\nb", "a\r\nb"),
+        (" a ", " a "),
+    ],
+)
+def test_a_blank_line_is_a_line_break_on_a_page(text, expected):
+    assert server_module._render_inline(text) == expected
+
+
+@pytest.mark.parametrize("kind", PROMPT_KINDS)
+def test_every_form_breaks_its_prompt_at_a_blank_line(tmp_path, kind):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(store.register(kind("First.\n\nSecond.")))
+
+    rendered = server_module._render_form(store, full_hash)
+
+    assert "<p>First.<br>Second.</p>" in rendered
+
+
+def test_pages_break_prompts_and_options_at_a_blank_line(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    prefix = store.register(MCQuestion("First.\n\nSecond.", ("O\n\np", "B")))
+    full_hash = store.resolve(prefix)
+    ranked = store.resolve(
+        store.register(RankingQuestion("Rank", ("O\n\np", "B")))
+    )
+    store.record(ranked, [0, 1])
+
+    with _running_server(store) as port:
+        store.record(full_hash, 0)
+        _form, form_body = _request(port, "GET", f"/{prefix}")
+        _results, results_body = _request(port, "GET", f"/{prefix}/results")
+        _index, index_body = _request(port, "GET", "/")
+
+    assert "<h1>First.<br>Second.</h1>" in form_body
+    assert "O<br>p</label>" in form_body
+    assert "<br>" not in form_body.split("</title>")[0]
+    assert "<h1>First.<br>Second.</h1>" in results_body
+    assert '<span class="bar-label">O<br>p</span>' in results_body
+    assert "<strong>O<br>p</strong>" in results_body
+    assert "First.<br>Second. (<a" in index_body
+    assert "O<br>p</div>" in server_module._render_form(store, ranked)
+    assert '<span class="bar-label">O<br>p</span>' in (
+        server_module._render_results(store, ranked)
+    )
+
+
+def test_a_scale_form_breaks_its_labels_at_a_blank_line(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    full_hash = store.resolve(
+        store.register(
+            ScaleQuestion(
+                "Pace?", low_label="`a`\n\n<b>", high_label="H\n \nh\n\n"
+            )
+        )
+    )
+
+    rendered = server_module._render_form(store, full_hash)
+
+    assert "`a`<br>&lt;b&gt;" in rendered
+    assert "H<br>h</p>" in rendered
 @
 
 The ranking form gives each option its own position dropdown.  We pin the
