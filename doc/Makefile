@@ -2,6 +2,10 @@ LATEXFLAGS += -shell-escape
 TEX_PYTHONTEX = yes
 PYTHONTEXFLAGS = --interpreter python:"poetry run python3"
 TEX_OUTDIR = ltxobj
+# A clean build of this manual can take more than latexmk's five passes to show
+# that it has settled: noweb's lists of page numbers move a page break, which
+# moves the numbers.  A layout that never settles still ends in "Maximum runs".
+PDFLATEX = latexmk -pdf -use-make -8bit -e '$$max_repeat=8'
 
 .PHONY: all weave clean distclean
 all: mentipy.pdf
