@@ -1879,7 +1879,11 @@ X, Y, A, B, C, A with [[lock=False]] on B, opening Y opens B, although B's slide
 comes after A's.  \enquote{Next $\rightarrow$} from Y leads to A, which waits, so
 only a respondent who has B's address reaches it early.  With [[lock=False]] on
 A, the first ask stays locked for the room until C, the question before its last
-place, is open, or until you open it by stepping to it.  Making the two asks two
+place, is open, or until you open it by stepping to it.  With [[lock=False]] on a
+question right after the second ask, it opens too early and Next reaches it: in
+X, Y, A, B, C, A, D with [[lock=False]] on D, D opens with A's first ask, and
+\enquote{Next $\rightarrow$} from C gives a respondent D's form while you are
+still on C.  Making the two asks two
 questions (\cref{sec:asking-before-and-after}) removes all of that.
 The follow-on questions typically use the QR-less layout from
 \cref{sec:layout-no-url}:
@@ -2027,10 +2031,28 @@ That place is what a respondent meets first, and stepping through the deck opens
 it on the way.  By the second ask it is simply open, so its QR code works at
 once, and forgetting to go back to it costs nothing but the tally on the screen.
 Its second ask opens nothing new, so the toned row and [[/active]] stay on the
-question you opened last, and a respondent who answers the second ask and follows
-\enquote{Next $\rightarrow$} goes there, even if they have answered it already.
-The flags of the last ask apply at the one stop, so [[next=False]] on a repeated
-last question takes the \enquote{Next $\rightarrow$} link from its first place.
+question you opened last.  In X, Y, A, B, C, A, D that is C.
+
+\begin{description}
+\item[C's tally can grow] A respondent who answers the second ask and follows
+  \enquote{Next $\rightarrow$} is sent to C's form, as a slow respondent on the
+  first ask would be.  They have usually answered it already, nothing checks for
+  that, and it is the whole room at once, so the tally of C can grow by a second
+  round of answers while you discuss A.
+\item[A's QR code is the way back] A phone that followed
+  \enquote{Next $\rightarrow$} from C sits on D's waiting page during the second
+  ask.  Nothing moves it to A, so respondents need A's QR code on the slide.
+\item[Your own Next] On A's results page \enquote{Next $\rightarrow$} leads to B,
+  the stop after the first ask, not to D.  That is harmless, since B is open
+  already; step to D from C or from the index.
+\item[ [[mentipy list]] ] It shows the store's order, X, Y, B, C, A, D, where the
+  index shows X, Y, A, B, C, D, since the store keeps a question where it was last
+  registered.
+\item[ [[next=False]] ] The other flags of the last ask apply at the one stop, but
+  [[next=False]] on a repeated question is ignored: it is what a deck puts on its
+  last slide, and at the question's first place it would end the deck for you and
+  the room in the middle.  A question asked once keeps it wherever it stands.
+\end{description}
 
 Mentipy warns about such a deck, once per question and build.  In the build the
 warning is part of the output, as a \enquote{PythonTeX stderr} block when

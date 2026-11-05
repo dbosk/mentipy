@@ -3681,6 +3681,20 @@ Only the right-hand link respects [[question.next]]: lecturers sometimes want
 a terminal slide with no forward path, while the left-hand link should appear
 whenever the question has a predecessor in the deck's last build.
 
+A question the deck asks twice is the one exception.  Its flags are those of its
+last ask, and [[next=False]] is what a deck puts on its last slide, but the
+question has its one stop at its first place (\cref{sec:live-deck}).  Honouring
+the flag there would end the deck at the first ask: X, A, B, A with
+[[next=False]] would stop the lecturer and the room at A and never reach B.  So
+a repeat ignores the flag.  A question asked once keeps it wherever it stands,
+in the middle of a deck too, since there the lecturer asked for exactly that.
+The link and the route below must agree, so both ask this function.
+
+<<functions>>=
+def _next_is_switched_off(store: Store, full_hash: str) -> bool:
+    return not store.question(full_hash).next and not store.repeats(full_hash)
+@
+
 <<functions>>=
 def _render_prev_link(
     store: Store,
@@ -3728,8 +3742,7 @@ def _render_next_link(
     next_hash = store.next_question(full_hash)
     if next_hash is None:
         return ""
-    question = store.question(full_hash)
-    if not question.next:
+    if _next_is_switched_off(store, full_hash):
         return ""
     if results:
         next_prefix = store.metadata(next_hash)["url_prefix"]
@@ -4720,17 +4733,21 @@ a locked question nobody opens.
 A deck that asks a question twice is where the two orders part: the store has
 it at its last place, the live sequence at its first
 (\cref{sec:live-deck}).  The gate keeps the store's order, so what is open is
-what it was.  That leaves a [[lock=False]] question right after a first ask
-following the wrong question: in X, Y, A, B, C, A with [[lock=False]] on B, B
-stands after Y in the store, so it opens with Y and not with A, and with
-[[lock=False]] on A, the first ask opens only with C.  Neither lets a respondent
-reach a form through the deck: Next from Y leads to A, which waits, and the
-lecturer's Next from Y opens A by visiting it.  A respondent who has B's address
-does get its form.  Moving the walk to the live order would fix the follow-on
-question and take with it the property above, that a re-render never opens a
-question the lecturer has not reached, because a re-render changes the live
-sequence wholesale.  The deck's way out is to make the two asks two questions,
-which the warning tells it to.
+what it was.  That leaves a [[lock=False]] question next to a repeat following
+the wrong question.  In X, Y, A, B, C, A with [[lock=False]] on B, B stands after
+Y in the store, so it opens with Y and not with A; Next from Y leads to A, which
+waits, so only a respondent who has B's address gets its form early.  With
+[[lock=False]] on A, the first ask opens only with C, or when the lecturer's Next
+from Y opens it by visiting it.  The third case does reach a form through the
+deck, ahead of the lecturer.  In X, Y, A, B, C, A, D with [[lock=False]] on D, D
+stands after A in the store, so it opens at the first ask, and with the lecturer
+on C, a respondent's Next from C leads straight to D's form.
+
+We leave that as it is.  Moving the walk to the live order would fix the
+follow-on question and take with it the property above, that a re-render never
+opens a question the lecturer has not reached, because a re-render changes the
+live sequence wholesale.  The lecturer's answer to a repeat is different texts,
+which two warnings say; issue~\#94 holds the design for doing more.
 
 The tracker takes that sequence as data rather than a [[Store]].  Every
 locked request already resolves its prefix through the store; the gate
@@ -5977,7 +5994,7 @@ full_hash = self._resolve(segments[0])
 if full_hash is None:
     return
 next_hash = store.next_question(full_hash)
-if next_hash is None or not store.question(full_hash).next:
+if next_hash is None or _next_is_switched_off(store, full_hash):
     self._send_error_page(HTTPStatus.NOT_FOUND)
     return
 location = None
@@ -8925,24 +8942,158 @@ The second ask opens nothing new, because the question is open already, so
 [[/active]] stays where the lecture was.  A respondent who answers the second
 ask and follows Next is therefore behind the active question as far as the
 server can tell, and gets it, as a slow respondent on the first ask would.  The
-server cannot tell those two apart, which is one more reason for the warning.
+server cannot tell those two apart, and it does not check for duplicates, so the
+room that goes on from the second ask can answer C again and C's tally grows.
+That stands as a known cost: the lecturer's answer to a repeat is different
+texts, and two warnings say so.  The test pins it, so that a change here is a
+decision.
 
 <<test functions>>=
 def test_the_second_ask_leaves_the_active_question_where_it_was(tmp_path):
     store, q = _repeating_lecture(tmp_path)
     client = {"remote": False}
+    answer = {"Content-Type": "application/x-www-form-urlencoded"}
 
     with _running_server(store, remote=client) as port:
-        for text in "ABCA":
+        for text in "ABC":
             _request(port, "GET", f"/{q[text]}/results")
+        client["remote"] = True
+        _request(port, "POST", f"/{q['C']}", body="value=first", headers=answer)
+        client["remote"] = False
+        _request(port, "GET", f"/{q['A']}/results")
         client["remote"] = True
         active, _ = _request(port, "GET", "/active")
         form, form_page = _request(port, "GET", f"/{q['A']}")
         next_step, _ = _request(port, "GET", f"/{q['A']}/next")
+        again, again_page = _request(port, "GET", f"/{q['C']}")
+        _request(port, "POST", f"/{q['C']}", body="value=again", headers=answer)
 
     assert active.getheader("Location") == f"/{q['C']}"
     assert form.status == 200 and "<form" in form_page
     assert next_step.getheader("Location") == f"/{q['C']}"
+    assert again.status == 200 and "<form" in again_page
+    assert store.results(store.resolve(q["C"]))["total"] == 2
+@
+
+During the second ask a phone that went on from C sits on D's waiting page.  D is
+ahead of the lecture and nothing has opened it, so nothing moves the phone to A:
+A's QR code on the slide is the way there.  And the lecturer who goes back to A's
+results page finds Next leading to B, the stop after the first ask, which opens
+nothing new.
+
+<<test functions>>=
+def test_during_the_second_ask_a_phone_on_the_next_question_stays_there(
+    tmp_path,
+):
+    store, q = _repeating_lecture(tmp_path)
+    client = {"remote": False}
+
+    with _running_server(store, remote=client) as port:
+        for text in "ABC":
+            _request(port, "GET", f"/{q[text]}/results")
+        _response, lecturer_page = _request(port, "GET", f"/{q['A']}/results")
+        client["remote"] = True
+        waiting, waiting_page = _request(port, "GET", f"/{q['D']}")
+
+    assert waiting.status == 200 and "<form" not in waiting_page
+    assert re.findall(
+        r'class="next-link" href="/(\w+)/results', lecturer_page
+    ) == [q["B"]]
+@
+
+A [[lock=False]] question right after the second ask follows the repeat in the
+store's order, so it opens at the first ask, and Next reaches it from the
+question before it in the live deck, with the lecturer still on that question.
+So here a respondent does reach, through the deck, a question whose slide the
+lecturer has not come to.  This stands too, for the same reason, and the test
+pins it.
+
+<<test functions>>=
+def test_a_follow_on_after_the_second_ask_opens_at_the_first(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    _start_registration_run(store)
+    q = {}
+    for text in "XYABCA":
+        q[text] = store.register(OpenQuestion(text))
+    q["D"] = store.register(OpenQuestion("D", lock=False))
+    client = {"remote": False}
+
+    with _running_server(store, remote=client) as port:
+        for text in "XY":
+            _request(port, "GET", f"/{q[text]}/results")
+        client["remote"] = True
+        before, before_page = _request(port, "GET", f"/{q['D']}")
+        client["remote"] = False
+        _request(port, "GET", f"/{q['A']}/results")
+        client["remote"] = True
+        at_first_ask, first_page = _request(port, "GET", f"/{q['D']}")
+        client["remote"] = False
+        for text in "BC":
+            _request(port, "GET", f"/{q[text]}/results")
+        client["remote"] = True
+        next_step, _ = _request(port, "GET", f"/{q['C']}/next")
+        form, form_page = _request(port, "GET", f"/{q['D']}")
+
+    assert before.status == 200 and "<form" not in before_page
+    assert at_first_ask.status == 200 and "<form" in first_page
+    assert next_step.getheader("Location") == f"/{q['D']}"
+    assert form.status == 200 and "<form" in form_page
+@
+
+A [[next=False]] on the last ask of a repeat is a wrap-up flag on the deck's last
+slide, but the question has its one stop further up, and the flag must not end
+the deck there: the lecturer stepping through would stop at the first ask, and
+the room with them.  A question asked once keeps the flag wherever it stands,
+also in a deck that repeats another question.
+
+<<test functions>>=
+def _next_links(page):
+    return re.findall(r'class="next-link" href="/([^"]+)"', page)
+
+
+def test_next_false_on_a_repeat_does_not_end_the_deck_at_its_first_place(
+    tmp_path,
+):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    _start_registration_run(store)
+    store.register(OpenQuestion("X"))
+    a = store.register(OpenQuestion("A"))
+    b = store.register(OpenQuestion("B"))
+    store.register(OpenQuestion("A", next=False))
+    client = {"remote": False}
+
+    with _running_server(store, remote=client) as port:
+        _response, lecturer_page = _request(port, "GET", f"/{a}/results")
+        client["remote"] = True
+        step, _ = _request(port, "GET", f"/{a}/next")
+
+    full_hash = store.resolve(a)
+    assert store.question(full_hash).next is False
+    assert _next_links(lecturer_page) == [f"{b}/results"]
+    assert step.status == 303 and step.getheader("Location") == f"/{b}"
+    assert f'href="/{a}/next"' in server_module._render_next_link(
+        store, full_hash
+    )
+
+
+def test_next_false_on_a_question_asked_once_still_ends_there(tmp_path):
+    store = Store(tmp_path / "mentipy.json", min_prefix=4)
+    _start_registration_run(store)
+    store.register(OpenQuestion("A"))
+    wrap_up = store.register(OpenQuestion("Wrap-up?", next=False))
+    store.register(OpenQuestion("B"))
+    store.register(OpenQuestion("A"))
+    client = {"remote": False}
+
+    with _running_server(store, remote=client) as port:
+        _response, lecturer_page = _request(port, "GET", f"/{wrap_up}/results")
+        client["remote"] = True
+        step, _ = _request(port, "GET", f"/{wrap_up}/next")
+
+    assert store.next_question(store.resolve(wrap_up)) is not None
+    assert _next_links(lecturer_page) == []
+    assert step.status == 404
+    assert server_module._render_next_link(store, store.resolve(wrap_up)) == ""
 @
 
 The route answers 404 wherever the link would be missing: after the

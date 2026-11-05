@@ -1772,28 +1772,26 @@ REPEAT_ADVICE = (
 )
 REPEAT_NAME_LIMIT = 60
 <<functions>>=
-def repeat_warning(text: str, prefix: str, *, count: int = 1) -> str:
-    """Return the warning that this deck asks a question twice.
-
-    `text` and `prefix` name the question, and `count` says how many
-    questions the deck asks twice, of which this is the first.
-    """
+def repeat_name(text: str, prefix: str) -> str:
+    """Return how a warning names a question: its text, cut short, and prefix."""
 
     name = " ".join(text.split())
     if len(name) > REPEAT_NAME_LIMIT:
         name = name[: REPEAT_NAME_LIMIT - 3] + "..."
-    name = f'"{name}" (prefix {prefix})'
-    if count == 1:
-        return f"this deck asks {name} twice. {REPEAT_ADVICE}"
-    return (
-        f"this deck asks {count} questions twice, the first {name}. "
-        f"{REPEAT_ADVICE}"
-    )
+    return f'"{name}" (prefix {prefix})'
+
+
+def repeat_warning(text: str, prefix: str) -> str:
+    """Return the build's warning that this deck asks a question twice."""
+
+    return f"this deck asks {repeat_name(text, prefix)} twice. {REPEAT_ADVICE}"
 @
 
 The advice says the text must change because only the premises enter the hash:
 an exercise title or a label around the question is not part of it, so a pretest
-and a posttest that differ only there are still one question.
+and a posttest that differ only there are still one question.  The server's line
+says less, because it has to fit in [[present]]'s banner, so only the name of the
+question is shared here.
 
 A prompt can be a paragraph, and the warning is one line in a terminal or a log,
 so it names the prompt rather than quoting it.
@@ -2569,6 +2567,9 @@ def test_repeated_questions_are_those_the_walk_stood_at_twice(
     assert [row["text"] for row in rows] == repeated.split()
     for row in rows:
         assert row["url_prefix"] == store.metadata(row["hash"])["url_prefix"]
+    for text in set(deck.split()):
+        full_hash = question_hash(OpenQuestion(text))
+        assert store.repeats(full_hash) == (text in repeated.split())
 @
 
 An older writer copies the record, so the record alone proves nothing, and the
@@ -2599,6 +2600,7 @@ def test_repeated_questions_ignore_a_record_the_walk_did_not_use(
     assert [row["text"] for row in store.repeated_questions()] == (
         repeated.split()
     )
+    assert store.repeats(question_hash(OpenQuestion("A"))) == bool(repeated)
 
 
 def test_repeated_questions_ignore_an_older_writer_over_a_repeat(tmp_path):
@@ -2616,6 +2618,7 @@ def test_a_render_built_deck_records_no_repeat(tmp_path):
         store = _render(path, question)
 
     assert store.repeated_questions() == []
+    assert not store.repeats(question_hash(OpenQuestion("A")))
 
 
 def test_a_deck_that_stops_repeating_repeats_nothing(tmp_path):
@@ -3464,17 +3467,29 @@ question of a deck that asks it once.  A question counts only if the walk really
 stood at it twice, and a store the walk rejected, which is read by the serials,
 has no repeats to report.
 
+<<functions>>=
+def _repeated_hashes(questions: dict[str, Any]) -> list[str]:
+    places = _places_of_the_run(questions) or []
+    return [
+        full_hash
+        for full_hash in dict.fromkeys(places)
+        if places.count(full_hash) > 1
+    ]
 <<store methods>>=
 def repeated_questions(self) -> list[dict[str, Any]]:
     """Return the live questions that the deck asks more than once."""
 
     questions = self._data()["questions"]
-    places = _places_of_the_run(questions) or []
     return [
         {**_public_question_metadata(questions[full_hash]), "hash": full_hash}
-        for full_hash in dict.fromkeys(places)
-        if places.count(full_hash) > 1
+        for full_hash in _repeated_hashes(questions)
     ]
+
+
+def repeats(self, full_hash: str) -> bool:
+    """Return whether the deck asks ``full_hash`` more than once."""
+
+    return full_hash in _repeated_hashes(self._data()["questions"])
 @
 
 The public view of the live deck has to agree with the navigation, including

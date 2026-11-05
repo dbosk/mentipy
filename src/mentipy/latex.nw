@@ -1844,7 +1844,7 @@ def test_a_question_asked_twice_warns_once_in_a_run(
     assert '"Poll?"' in message
     assert f"prefix {prefix}" in message
     assert "pretest" in message and "posttest" in message
-    assert "text" in message
+    assert "a title or a label around it changes nothing" in message
     assert ["PackageWarning" in slide for slide in slides] == [
         False, False, True, False, False, False,
     ]

@@ -90,7 +90,7 @@ from mentipy.store import (
     PIN_HEAT_CONFIG,
     RESULTS_WINDOWS,
     QUESTION_ENVIRONMENT_CONFIG,
-    repeat_warning,
+    repeat_name,
     SHOW_URL_CONFIG,
     SLIDES_COMMAND_CONFIG,
     SSH_TUNNEL_CONFIG,
@@ -2291,9 +2291,11 @@ def test_start_lines_warn_about_a_question_asked_twice(tmp_path, branch):
     lines = _all_start_lines(store)[branch]
 
     [line] = [line for line in lines if "twice" in line]
-    assert line.startswith("Warning: ")
-    assert '"Poll?"' in line and f"prefix {prefix}" in line
-    assert "pretest" in line and "posttest" in line
+    assert line == (
+        f'Warning: this deck asks "Poll?" (prefix {prefix}) twice: '
+        "one pool of answers, one stop at its first place. "
+        'For two, make the texts differ, e.g. add "pretest" and "posttest".'
+    )
     assert line in str(mentipy.cli._PresentBanner(lines))
 
 
@@ -2310,6 +2312,8 @@ def test_start_line_counts_the_questions_asked_twice(tmp_path):
 
     assert line.startswith("Warning: this deck asks 2 questions twice")
     assert '"One?"' in line and '"Two?"' not in line
+    assert "each has one pool of answers" in line
+    assert "pretest" in line and "posttest" in line
 
 
 def test_start_lines_do_not_warn_without_a_repeat(tmp_path):
@@ -2909,19 +2913,29 @@ The build warns when a deck asks a question twice, but the build may have been
 last week and the warning may have scrolled by, so the server says it again when
 the lecture starts (\cref{sec:a-repeat-warns}).  One line is enough to send the
 lecturer to the slides: how many, and the first by name.  As a start-up line it
-stays in [[present]]'s banner.  It reads what the walk used, so a stale record
+stays in [[present]]'s banner, whose rows are what the tally has to fit under, so
+it is shorter than the build's warning and leaves the finer points to that and
+the manual.  It reads what the walk used, so a stale record
 that an older version copied says nothing, and a deck built with
 [[mentipy render]] says nothing because it has no record of a repeat at all.
 
+<<constants>>=
+REPEAT_LINE_ADVICE = (
+    "one pool of answers, one stop at its first place. For two, make the texts "
+    'differ, e.g. add "pretest" and "posttest".'
+)
 <<functions>>=
 def _repeat_lines(store: Store) -> list[str]:
     rows = store.repeated_questions()
     if not rows:
         return []
-    warning = repeat_warning(
-        rows[0]["text"], rows[0]["url_prefix"], count=len(rows)
-    )
-    return [f"Warning: {warning}"]
+    name = repeat_name(rows[0]["text"], rows[0]["url_prefix"])
+    if len(rows) == 1:
+        return [f"Warning: this deck asks {name} twice: {REPEAT_LINE_ADVICE}"]
+    return [
+        f"Warning: this deck asks {len(rows)} questions twice, first {name}: "
+        f"each has {REPEAT_LINE_ADVICE}"
+    ]
 @
 
 A deck decides for itself what git does with its store, and moving the answers to a log
